@@ -66,6 +66,7 @@ CREATE INDEX IF NOT EXISTS subscriptions_expiry_idx ON subscriptions (expires_on
 CREATE TABLE IF NOT EXISTS charges (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   subscription_id uuid NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+  plan_id uuid REFERENCES plans(id),
   stage text NOT NULL CHECK (stage IN ('new_sale', 'd-3', 'd0', 'd+2', 'd+5', 'manual')),
   status text NOT NULL DEFAULT 'awaiting_approval'
     CHECK (status IN ('draft', 'awaiting_approval', 'approved', 'sent', 'paid', 'rejected', 'cancelled', 'expired')),
@@ -84,6 +85,7 @@ CREATE TABLE IF NOT EXISTS charges (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE charges ADD COLUMN IF NOT EXISTS plan_id uuid REFERENCES plans(id);
 CREATE INDEX IF NOT EXISTS charges_status_idx ON charges (status, due_on);
 
 CREATE TABLE IF NOT EXISTS message_logs (

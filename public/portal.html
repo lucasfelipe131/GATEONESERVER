@@ -4,12 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#07172f" />
+    <meta name="referrer" content="no-referrer" />
     <title>Minha assinatura — Gate One Pro</title>
+    <link rel="icon" type="image/png" href="/assets/gate-one-mark.png" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body class="landing">
     <nav class="landing-nav">
-      <div class="brand"><span class="brand-mark">G1</span><span><strong>Gate One Pro</strong><small>Área do cliente</small></span></div>
+      <div class="brand"><img class="brand-logo" src="/assets/gate-one-mark.png" alt="" aria-hidden="true" /><span><strong>Gate One Pro</strong><small>Área do cliente</small></span></div>
     </nav>
     <section class="landing-hero">
       <span class="eyebrow">SUA ASSINATURA</span>
@@ -29,9 +31,11 @@
       </article>
       <article class="plan-card">
         <span class="eyebrow">RENOVAÇÃO</span>
-        <h2>Continue conectado</h2>
-        <p class="muted">Fale com o Gate One Pro no WhatsApp para escolher o plano e receber seu Pix.</p>
-        <a class="btn btn-primary btn-block" id="portalWhatsapp" href="#" target="_blank">Renovar pelo WhatsApp</a>
+        <h2>Escolha seu próximo ciclo</h2>
+        <p class="muted">Solicite a renovação abaixo. O Pix será enviado no seu WhatsApp após a aprovação.</p>
+        <div class="renewal-options" id="renewalPlans"></div>
+        <p class="portal-message" id="portalMessage" role="status"></p>
+        <a class="text-button portal-help" id="portalWhatsapp" href="#" target="_blank" rel="noreferrer">Preciso de ajuda pelo WhatsApp →</a>
       </article>
     </section>
     <script src="/portal.js" type="module"></script>

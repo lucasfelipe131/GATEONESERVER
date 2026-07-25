@@ -140,6 +140,29 @@ export function sendRenewedTemplate(config, renewal, renewedUntil) {
   });
 }
 
+export function sendAccessCreatedTemplate(config, renewal, access, expiresOn) {
+  return send(config, {
+    recipient_type: 'individual',
+    to: renewal.whatsapp_e164,
+    type: 'template',
+    template: {
+      name: config.WHATSAPP_TEMPLATE_ACCESS_CREATED,
+      language: { code: 'pt_BR' },
+      components: [
+        {
+          type: 'body',
+          parameters: [
+            { type: 'text', text: renewal.customer_name.split(/\s+/)[0] },
+            { type: 'text', text: access.username },
+            { type: 'text', text: access.password },
+            { type: 'text', text: expiresOn }
+          ]
+        }
+      ]
+    }
+  });
+}
+
 export function parseWhatsAppWebhook(payload) {
   const result = [];
   for (const entry of payload.entry || []) {

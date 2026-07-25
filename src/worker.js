@@ -7,13 +7,19 @@ import { createRedis } from './queue.js';
 import { scanBilling } from './services/billing.js';
 import { createPixPayment } from './integrations/mercadopago.js';
 import {
+  sendAccessCreatedTemplate,
   sendChargeTemplate,
   sendPaymentConfirmationTemplate,
   sendPlanMenu,
   sendRenewedTemplate,
   sendText
 } from './integrations/whatsapp.js';
-import { renewInBitPanel } from './integrations/bitpanel.js';
+import {
+  bitPanelOperationFor,
+  buildBitPanelUsername,
+  provisionInBitPanel,
+  renewInBitPanel
+} from './integrations/bitpanel.js';
 import { audit } from './audit.js';
 import { formatDate, formatMoney } from './domain/billing.js';
 
@@ -46,7 +52,7 @@ async function loadCharge(chargeId) {
        FROM charges ch
        JOIN subscriptions s ON s.id = ch.subscription_id
        JOIN customers c ON c.id = s.customer_id
-       JOIN plans p ON p.id = s.plan_id
+       JOIN plans p ON p.id = COALESCE(ch.plan_id, s.plan_id)
       WHERE ch.id = $1`,
     [chargeId]
   );
@@ -179,7 +185,8 @@ async function processRenewal(job) {
   const paused = await getSetting(db, 'global_pause', config.GLOBAL_PAUSE);
   if (paused) throw new Error('Automações pausadas pelo administrador.');
   const result = await db.query(
-    `SELECT r.*, s.expires_on::text AS current_expiry, s.bitpanel_list_id,
+    `SELECT r.*, ch.stage AS charge_stage,
+            s.expires_on::text AS current_expiry, s.bitpanel_list_id,
             c.name AS customer_name, c.bitpanel_reference, c.id AS customer_id,
             c.whatsapp_e164,
             p.code AS plan_code, p.name AS plan_name, p.duration_months
@@ -187,7 +194,7 @@ async function processRenewal(job) {
        JOIN charges ch ON ch.id = r.charge_id
        JOIN subscriptions s ON s.id = ch.subscription_id
        JOIN customers c ON c.id = s.customer_id
-       JOIN plans p ON p.id = s.plan_id
+       JOIN plans p ON p.id = COALESCE(ch.plan_id, s.plan_id)
       WHERE r.id = $1`,
     [job.data.renewalId]
   );
@@ -196,6 +203,17 @@ async function processRenewal(job) {
   if (!renewal.approved_at && runtimeConfig.RENEWAL_REQUIRES_APPROVAL) {
     throw new Error('Renovação não aprovada. Execução bloqueada.');
   }
+  const operation = bitPanelOperationFor(renewal);
+  if (operation === 'provision' && !renewal.bitpanel_reference) {
+    renewal.bitpanel_reference = buildBitPanelUsername(
+      renewal.customer_name,
+      renewal.customer_id
+    );
+    await db.query(
+      `UPDATE customers SET bitpanel_reference = $2, updated_at = now() WHERE id = $1`,
+      [renewal.customer_id, renewal.bitpanel_reference]
+    );
+  }
 
   await db.query(
     `UPDATE renewal_jobs SET status = 'running', attempts = attempts + 1, updated_at = now()
@@ -203,7 +221,10 @@ async function processRenewal(job) {
     [renewal.id]
   );
   try {
-    const outcome = await renewInBitPanel(runtimeConfig, renewal);
+    const outcome =
+      operation === 'provision'
+        ? await provisionInBitPanel(runtimeConfig, renewal)
+        : await renewInBitPanel(runtimeConfig, renewal);
     const renewedUntil = await db.transaction(async (client) => {
       await client.query(
         `UPDATE renewal_jobs
@@ -221,33 +242,60 @@ async function processRenewal(job) {
       if (!outcome.simulated) {
         const subscription = await client.query(
           `UPDATE subscriptions
-              SET expires_on = (GREATEST(expires_on, CURRENT_DATE)
-                                + make_interval(months => $2))::date,
+              SET plan_id = COALESCE(
+                    (SELECT plan_id FROM charges WHERE id = $1),
+                    plan_id
+                  ),
+                  expires_on = COALESCE(
+                    $3::date,
+                    (GREATEST(expires_on, CURRENT_DATE)
+                     + make_interval(months => $2))::date
+                  ),
+                  bitpanel_list_id = COALESCE($4, bitpanel_list_id),
                   status = 'active',
                   updated_at = now()
             WHERE id = (SELECT subscription_id FROM charges WHERE id = $1)
             RETURNING expires_on::text`,
-          [renewal.charge_id, renewal.duration_months]
+          [
+            renewal.charge_id,
+            renewal.duration_months,
+            outcome.afterExpiry,
+            outcome.listId || null
+          ]
         );
         await client.query(
-          `UPDATE customers SET status = 'active', updated_at = now() WHERE id = $1`,
-          [renewal.customer_id]
+          `UPDATE customers
+              SET status = 'active',
+                  bitpanel_reference = COALESCE($2, bitpanel_reference),
+                  updated_at = now()
+            WHERE id = $1`,
+          [renewal.customer_id, outcome.username || renewal.bitpanel_reference]
         );
         await client.query(
           `INSERT INTO loyalty_ledger
             (customer_id, points, reason, reference_type, reference_id)
-           VALUES ($1, $2, 'Renovação paga', 'charge', $3)`,
-          [renewal.customer_id, renewal.duration_months === 3 ? 30 : 10, renewal.charge_id]
+           VALUES ($1, $2, $3, 'charge', $4)`,
+          [
+            renewal.customer_id,
+            renewal.duration_months === 3 ? 30 : 10,
+            operation === 'provision' ? 'Nova assinatura paga' : 'Renovação paga',
+            renewal.charge_id
+          ]
         );
         return subscription.rows[0]?.expires_on || outcome.afterExpiry;
       }
       return null;
     });
     await audit(db, {
-      action: outcome.simulated ? 'bitpanel.renewal_simulated' : 'bitpanel.renewal_completed',
+      action: outcome.simulated
+        ? `bitpanel.${operation}_simulated`
+        : `bitpanel.${operation}_completed`,
       entityType: 'renewal_job',
       entityId: renewal.id,
       after: {
+        operation,
+        listId: outcome.listId || renewal.bitpanel_list_id || null,
+        username: outcome.username || renewal.bitpanel_reference || null,
         beforeExpiry: outcome.beforeExpiry,
         afterExpiry: outcome.afterExpiry,
         evidencePath: outcome.evidencePath
@@ -255,11 +303,16 @@ async function processRenewal(job) {
     });
     if (!outcome.simulated && renewedUntil) {
       try {
-        const message = await sendRenewedTemplate(
-          runtimeConfig,
-          renewal,
-          renewedUntil.split('-').reverse().join('/')
-        );
+        const renewedUntilBr = renewedUntil.split('-').reverse().join('/');
+        const message =
+          operation === 'provision'
+            ? await sendAccessCreatedTemplate(
+                runtimeConfig,
+                renewal,
+                outcome,
+                renewedUntilBr
+              )
+            : await sendRenewedTemplate(runtimeConfig, renewal, renewedUntilBr);
         await db.query(
           `INSERT INTO message_logs
             (customer_id, charge_id, direction, template_name, content, provider_id, status, simulated)
@@ -267,8 +320,12 @@ async function processRenewal(job) {
           [
             renewal.customer_id,
             renewal.charge_id,
-            runtimeConfig.WHATSAPP_TEMPLATE_RENEWED,
-            `Renovação concluída até ${renewedUntil}`,
+            operation === 'provision'
+              ? runtimeConfig.WHATSAPP_TEMPLATE_ACCESS_CREATED
+              : runtimeConfig.WHATSAPP_TEMPLATE_RENEWED,
+            operation === 'provision'
+              ? `Acesso criado até ${renewedUntil}`
+              : `Renovação concluída até ${renewedUntil}`,
             message.messages?.[0]?.id,
             message.simulated ? 'simulated' : 'sent',
             message.simulated
@@ -276,7 +333,10 @@ async function processRenewal(job) {
         );
       } catch (messageError) {
         await audit(db, {
-          action: 'whatsapp.renewal_confirmation_failed',
+          action:
+            operation === 'provision'
+              ? 'whatsapp.access_delivery_failed'
+              : 'whatsapp.renewal_confirmation_failed',
           entityType: 'renewal_job',
           entityId: renewal.id,
           after: { error: messageError.message }
@@ -291,7 +351,7 @@ async function processRenewal(job) {
       [renewal.id, error.message]
     );
     await audit(db, {
-      action: 'bitpanel.renewal_failed',
+      action: `bitpanel.${operation}_failed`,
       entityType: 'renewal_job',
       entityId: renewal.id,
       after: { error: error.message }

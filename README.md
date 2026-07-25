@@ -185,7 +185,7 @@ WHATSAPP_VERIFY_TOKEN=...
 META_APP_SECRET=...
 ```
 
-Cadastre e aprove na Meta os seis templates indicados em `.env.example`. O
+Cadastre e aprove na Meta os sete templates indicados em `.env.example`. O
 WhatsApp Cloud API usa Graph API para envio e webhooks para eventos:
 [plataforma](https://developers.facebook.com/documentation/business-messaging/whatsapp/about-the-platform),
 [webhooks](https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/overview)
@@ -197,47 +197,35 @@ receber lembretes.
 
 ## BitPanel
 
-O BitPanel não possui API, portanto a integração usa Playwright. A imagem já
-recebida permite conferir a validade em:
+O BitPanel não possui API, portanto a integração usa Playwright. O fluxo foi
+mapeado diretamente no painel e agora cobre:
+
+- busca de uma lista por usuário;
+- leitura do ID e da validade;
+- renovação de 1 a 12 meses;
+- criação de uma nova lista;
+- seleção do pacote de TV, plano e conexões;
+- captura do usuário e da senha gerada automaticamente;
+- verificação da validade depois da operação;
+- evidência em imagem e revisão manual quando houver falha.
+
+Configure somente no serviço `worker`:
 
 ```text
-/list/view/{id-da-lista}
+BITPANEL_USERNAME=seu-email
+BITPANEL_PASSWORD=salve-apenas-na-railway
+BITPANEL_PLAN_LABEL=30, R$ 30,00
+BITPANEL_TV_PACKAGE=Full HD + H265 + HD + SD + VOD + Adulto
+BITPANEL_DEFAULT_CONNECTIONS=1
+BITPANEL_HEADLESS=true
 ```
 
-Ainda falta mapear a tela ou botão que executa a renovação. Por isso:
-
-```text
-BITPANEL_MODE=disabled
-```
-
-deve continuar ativo até substituir os seletores demonstrativos de
-`config/bitpanel-flow.example.json`.
-
-O fluxo declarativo aceita apenas ações controladas:
-
-- `goto`;
-- `fill`;
-- `click`;
-- `select`;
-- `waitForURL`;
-- `wait`;
-- `captureText`;
-- `expectText`;
-- `assertChanged`;
-- `screenshot`.
-
-Ele não executa JavaScript arbitrário. A renovação real exige:
-
-1. capturar a validade antes;
-2. clicar na renovação;
-3. escolher a duração;
-4. confirmar;
-5. capturar a validade depois;
-6. comprovar que ela mudou;
-7. salvar a evidência.
-
-Para terminar esse mapeamento, ainda é necessária uma captura da lista com os
-botões de ação e outra da janela de renovação antes da confirmação, sem senhas.
+Mantenha `BITPANEL_MODE=simulation` e
+`RENEWAL_REQUIRES_APPROVAL=true` no primeiro piloto. Clientes novos são
+identificados pelo estágio `new_sale` ou pela ausência de ID de lista. O robô
+gera um usuário estável, verifica se ele já existe para impedir duplicidade,
+cria a lista e grava o ID no Gate One Pro. A senha gerada não é incluída na
+auditoria nem no conteúdo dos logs.
 
 ## Scripts
 

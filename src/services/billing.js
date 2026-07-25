@@ -76,13 +76,23 @@ export async function markPaymentApproved(db, chargeId, payment) {
       `SELECT ch.*, s.customer_id, p.duration_months
          FROM charges ch
          JOIN subscriptions s ON s.id = ch.subscription_id
-         JOIN plans p ON p.id = s.plan_id
+         JOIN plans p ON p.id = COALESCE(ch.plan_id, s.plan_id)
         WHERE ch.id = $1
         FOR UPDATE`,
       [chargeId]
     );
     if (!charge.rows[0]) throw new Error('Cobrança não encontrada.');
-    if (charge.rows[0].status === 'paid') return { duplicate: true, charge: charge.rows[0] };
+    if (charge.rows[0].status === 'paid') {
+      const existingJob = await client.query(
+        'SELECT id FROM renewal_jobs WHERE charge_id = $1',
+        [chargeId]
+      );
+      return {
+        duplicate: true,
+        charge: charge.rows[0],
+        renewalId: existingJob.rows[0]?.id || null
+      };
+    }
 
     const updated = await client.query(
       `UPDATE charges
@@ -94,10 +104,11 @@ export async function markPaymentApproved(db, chargeId, payment) {
         RETURNING *`,
       [chargeId, payment?.id ? String(payment.id) : null]
     );
-    await client.query(
+    const renewalJob = await client.query(
       `INSERT INTO renewal_jobs (charge_id, status)
        VALUES ($1, 'awaiting_approval')
-       ON CONFLICT (charge_id) DO NOTHING`,
+       ON CONFLICT (charge_id) DO UPDATE SET updated_at = renewal_jobs.updated_at
+       RETURNING id`,
       [chargeId]
     );
     await client.query(
@@ -109,6 +120,10 @@ export async function markPaymentApproved(db, chargeId, payment) {
         )`,
       [charge.rows[0].subscription_id]
     );
-    return { duplicate: false, charge: updated.rows[0] };
+    return {
+      duplicate: false,
+      charge: updated.rows[0],
+      renewalId: renewalJob.rows[0].id
+    };
   });
 }

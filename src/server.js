@@ -15,6 +15,7 @@ import { audit } from './audit.js';
 import { createQueues, createRedis } from './queue.js';
 import { maskPhone, normalizePhone, randomToken, sanitizeForLog, sha256 } from './security.js';
 import { scanBilling, markPaymentApproved } from './services/billing.js';
+import { buildIdempotencyKey, renderChargeMessage } from './domain/billing.js';
 import { getMercadoPagoPayment, verifyMercadoPagoWebhook } from './integrations/mercadopago.js';
 import {
   parseWhatsAppWebhook,
@@ -85,6 +86,44 @@ function requireQueues(reply) {
   if (queues) return true;
   reply.code(503).send({ error: 'Redis ainda não está conectado.' });
   return false;
+}
+
+async function maybeQueueBitPanelJob(renewalId, approvedBy = null) {
+  if (!queues || !renewalId) return { queued: false, reason: 'queue_unavailable' };
+  const [paused, requiresApproval] = await Promise.all([
+    getSetting(db, 'global_pause', config.GLOBAL_PAUSE),
+    getSetting(db, 'renewal_requires_approval', config.RENEWAL_REQUIRES_APPROVAL)
+  ]);
+  if (paused) return { queued: false, reason: 'global_pause' };
+  if (requiresApproval) return { queued: false, reason: 'approval_required' };
+
+  const result = await db.query(
+    `UPDATE renewal_jobs
+        SET status = 'queued', approved_by = $2, approved_at = now(), error = NULL, updated_at = now()
+      WHERE id = $1 AND status IN ('awaiting_approval', 'manual_review', 'simulated')
+      RETURNING id`,
+    [renewalId, approvedBy]
+  );
+  if (!result.rows[0]) return { queued: false, reason: 'already_queued' };
+
+  await queues.renewals.add(
+    'execute-renewal',
+    { renewalId: result.rows[0].id },
+    {
+      jobId: `renewal-auto-${result.rows[0].id}`,
+      attempts: 5,
+      backoff: { type: 'exponential', delay: 60_000 },
+      removeOnComplete: 1000,
+      removeOnFail: 2000
+    }
+  );
+  await audit(db, {
+    actorType: 'system',
+    action: 'bitpanel.job_queued_automatically',
+    entityType: 'renewal_job',
+    entityId: result.rows[0].id
+  });
+  return { queued: true };
 }
 
 app.get('/health', async (_request, reply) => {
@@ -250,6 +289,7 @@ app.post('/webhooks/mercadopago', async (request, reply) => {
             { jobId: `paid-${payment.external_reference}` }
           );
         }
+        await maybeQueueBitPanelJob(marked.renewalId);
       }
     }
     await db.query('UPDATE webhook_events SET processed_at = now() WHERE id = $1', [
@@ -386,6 +426,31 @@ app.post('/api/admin/customers', { preHandler: requireAuth }, async (request, re
   });
 });
 
+app.post('/api/admin/customers/:id/portal-link', { preHandler: requireAuth }, async (request, reply) => {
+  const portalToken = randomToken(24);
+  const result = await db.query(
+    `UPDATE customers
+        SET portal_token_hash = $2, updated_at = now()
+      WHERE id = $1
+      RETURNING id`,
+    [request.params.id, sha256(portalToken)]
+  );
+  if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado.' });
+  await audit(db, {
+    actorType: 'user',
+    actorId: request.user.id,
+    action: 'customer.portal_access_issued',
+    entityType: 'customer',
+    entityId: result.rows[0].id,
+    ip: request.ip
+  });
+  return {
+    portalUrl: config.PUBLIC_BASE_URL
+      ? `${config.PUBLIC_BASE_URL}/cliente/${portalToken}`
+      : `/cliente/${portalToken}`
+  };
+});
+
 app.post('/api/admin/customers/import', { preHandler: requireAuth }, async (request) => {
   const body = parse(
     z.object({
@@ -475,7 +540,7 @@ app.get('/api/admin/charges', { preHandler: requireAuth }, async (request) => {
        FROM charges ch
        JOIN subscriptions s ON s.id = ch.subscription_id
        JOIN customers c ON c.id = s.customer_id
-       JOIN plans p ON p.id = s.plan_id
+       JOIN plans p ON p.id = COALESCE(ch.plan_id, s.plan_id)
       WHERE ($1 = '' OR ch.status = $1)
       ORDER BY
         CASE ch.status WHEN 'awaiting_approval' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END,
@@ -554,6 +619,7 @@ app.post('/api/admin/charges/:id/reject', { preHandler: requireAuth }, async (re
 
 app.post('/api/admin/charges/:id/mark-paid', { preHandler: requireAuth }, async (request, reply) => {
   const marked = await markPaymentApproved(db, request.params.id, { id: `MANUAL-${Date.now()}` });
+  const automation = await maybeQueueBitPanelJob(marked.renewalId, request.user.id);
   await audit(db, {
     actorType: 'user',
     actorId: request.user.id,
@@ -562,7 +628,7 @@ app.post('/api/admin/charges/:id/mark-paid', { preHandler: requireAuth }, async 
     entityId: request.params.id,
     ip: request.ip
   });
-  return reply.send({ ok: true, duplicate: marked.duplicate });
+  return reply.send({ ok: true, duplicate: marked.duplicate, automation });
 });
 
 app.get('/api/admin/renewals', { preHandler: requireAuth }, async () => {
@@ -570,12 +636,16 @@ app.get('/api/admin/renewals', { preHandler: requireAuth }, async () => {
     `SELECT r.id, r.status, r.attempts, r.before_expiry, r.after_expiry, r.error,
             r.created_at, ch.id AS charge_id, c.name AS customer_name,
             c.bitpanel_reference, s.bitpanel_list_id, s.expires_on::text,
-            p.name AS plan_name, p.duration_months
+            p.name AS plan_name, p.duration_months,
+            CASE
+              WHEN ch.stage = 'new_sale' OR s.bitpanel_list_id IS NULL THEN 'provision'
+              ELSE 'renew'
+            END AS operation
        FROM renewal_jobs r
        JOIN charges ch ON ch.id = r.charge_id
        JOIN subscriptions s ON s.id = ch.subscription_id
        JOIN customers c ON c.id = s.customer_id
-       JOIN plans p ON p.id = s.plan_id
+       JOIN plans p ON p.id = COALESCE(ch.plan_id, s.plan_id)
       ORDER BY CASE r.status WHEN 'awaiting_approval' THEN 0 WHEN 'manual_review' THEN 1 ELSE 2 END,
                r.created_at DESC
       LIMIT 300`
@@ -643,9 +713,7 @@ app.get('/api/admin/settings', { preHandler: requireAuth }, async () => {
       redis: Boolean(config.REDIS_URL),
       mercadoPago: Boolean(config.MERCADOPAGO_ACCESS_TOKEN),
       whatsapp: Boolean(config.WHATSAPP_ACCESS_TOKEN && config.WHATSAPP_PHONE_NUMBER_ID),
-      bitpanel: Boolean(
-        config.BITPANEL_USERNAME && config.BITPANEL_PASSWORD && config.BITPANEL_FLOW_JSON
-      )
+      bitpanel: Boolean(config.BITPANEL_USERNAME && config.BITPANEL_PASSWORD)
     }
   };
 });
@@ -685,9 +753,9 @@ app.put('/api/admin/settings', { preHandler: requireAuth }, async (request) => {
   }
   if (
     body.bitpanel_mode === 'live' &&
-    (!config.BITPANEL_USERNAME || !config.BITPANEL_PASSWORD || !config.BITPANEL_FLOW_JSON)
+    (!config.BITPANEL_USERNAME || !config.BITPANEL_PASSWORD)
   ) {
-    const error = new Error('Mapeie o fluxo e configure o acesso do BitPanel antes do modo real.');
+    const error = new Error('Configure o usuário e a senha do BitPanel antes do modo real.');
     error.statusCode = 409;
     throw error;
   }
@@ -707,7 +775,8 @@ app.put('/api/admin/settings', { preHandler: requireAuth }, async (request) => {
 
 app.get('/api/portal/:token', async (request, reply) => {
   const result = await db.query(
-    `SELECT c.name, c.status, s.expires_on::text, p.name AS plan_name, p.price_cents,
+    `SELECT c.id AS customer_id, c.name, c.status, s.expires_on::text,
+            p.code AS plan_code, p.name AS plan_name, p.price_cents,
             COALESCE((SELECT sum(points) FROM loyalty_ledger l WHERE l.customer_id = c.id), 0)::int AS points
        FROM customers c
        LEFT JOIN LATERAL (
@@ -718,13 +787,159 @@ app.get('/api/portal/:token', async (request, reply) => {
     [sha256(request.params.token)]
   );
   if (!result.rows[0]) return reply.code(404).send({ error: 'Acesso do cliente inválido.' });
+  const customer = result.rows[0];
+  const [plans, pending] = await Promise.all([
+    db.query(
+      'SELECT code, name, duration_months, price_cents FROM plans WHERE active = true ORDER BY sort_order'
+    ),
+    db.query(
+      `SELECT ch.status, ch.amount_cents, ch.created_at, p.code AS plan_code, p.name AS plan_name
+         FROM charges ch
+         JOIN subscriptions s ON s.id = ch.subscription_id
+         JOIN plans p ON p.id = COALESCE(ch.plan_id, s.plan_id)
+        WHERE s.customer_id = $1
+          AND ch.stage = 'manual'
+          AND ch.status IN ('awaiting_approval', 'approved', 'sent')
+        ORDER BY ch.created_at DESC
+        LIMIT 1`,
+      [customer.customer_id]
+    )
+  ]);
+  delete customer.customer_id;
   return {
-    ...result.rows[0],
+    ...customer,
+    plans: plans.rows,
+    pending_renewal: pending.rows[0] || null,
     whatsapp_url: config.PUBLIC_WHATSAPP_NUMBER
       ? `https://wa.me/${config.PUBLIC_WHATSAPP_NUMBER}`
       : null
   };
 });
+
+app.post(
+  '/api/portal/:token/renewals',
+  { config: { rateLimit: { max: 6, timeWindow: '1 hour' } } },
+  async (request, reply) => {
+    const body = parse(
+      z.object({ planCode: z.enum(['monthly', 'quarterly']) }),
+      request.body
+    );
+    const portalHash = sha256(request.params.token);
+    const [globalPause, salesMode] = await Promise.all([
+      getSetting(db, 'global_pause', config.GLOBAL_PAUSE),
+      getSetting(db, 'sales_mode', config.SALES_MODE)
+    ]);
+    const initialStatus = !globalPause && salesMode === 'automatic'
+      ? 'approved'
+      : 'awaiting_approval';
+
+    const created = await db.transaction(async (client) => {
+      const customerResult = await client.query(
+        `SELECT c.id, c.name, c.whatsapp_e164, c.consent_contact,
+                s.id AS subscription_id, s.expires_on::text
+           FROM customers c
+           JOIN LATERAL (
+             SELECT * FROM subscriptions
+              WHERE customer_id = c.id AND status <> 'cancelled'
+              ORDER BY created_at DESC LIMIT 1
+           ) s ON true
+          WHERE c.portal_token_hash = $1
+          FOR UPDATE OF c`,
+        [portalHash]
+      );
+      const customer = customerResult.rows[0];
+      if (!customer) {
+        const error = new Error('Acesso do cliente inválido.');
+        error.statusCode = 404;
+        throw error;
+      }
+      const planResult = await client.query(
+        'SELECT id, code, name, price_cents FROM plans WHERE code = $1 AND active = true',
+        [body.planCode]
+      );
+      const plan = planResult.rows[0];
+      if (!plan) {
+        const error = new Error('Plano indisponível.');
+        error.statusCode = 409;
+        throw error;
+      }
+      const idempotencyKey = buildIdempotencyKey(
+        customer.subscription_id,
+        `portal-${plan.code}`,
+        customer.expires_on
+      );
+      const message = renderChargeMessage({
+        name: customer.name,
+        planName: plan.name,
+        expiresOn: customer.expires_on,
+        amountCents: plan.price_cents,
+        stage: 'manual'
+      });
+      const chargeResult = await client.query(
+        `INSERT INTO charges
+          (subscription_id, plan_id, stage, status, amount_cents, due_on,
+           idempotency_key, message_text)
+         VALUES ($1, $2, 'manual', $3, $4, CURRENT_DATE, $5, $6)
+         ON CONFLICT (idempotency_key) DO UPDATE
+           SET updated_at = charges.updated_at
+         RETURNING id, status, amount_cents`,
+        [
+          customer.subscription_id,
+          plan.id,
+          initialStatus,
+          plan.price_cents,
+          idempotencyKey,
+          message
+        ]
+      );
+      return {
+        ...chargeResult.rows[0],
+        customerId: customer.id,
+        customerPhone: customer.whatsapp_e164,
+        planCode: plan.code,
+        planName: plan.name
+      };
+    });
+
+    let queued = false;
+    if (created.status === 'approved' && queues) {
+      await queues.messages.add(
+        'send-charge',
+        { chargeId: created.id },
+        {
+          jobId: `portal-charge-${created.id}`,
+          attempts: 20,
+          backoff: { type: 'fixed', delay: 300_000 },
+          removeOnComplete: 1000,
+          removeOnFail: 2000
+        }
+      );
+      queued = true;
+    }
+    await audit(db, {
+      actorType: 'customer',
+      actorId: created.customerId,
+      action: 'billing.portal_renewal_requested',
+      entityType: 'charge',
+      entityId: created.id,
+      after: {
+        planCode: created.planCode,
+        status: created.status,
+        queued
+      },
+      ip: request.ip
+    });
+    return reply.code(201).send({
+      ok: true,
+      status: created.status,
+      queued,
+      planName: created.planName,
+      message: created.status === 'approved'
+        ? 'Pedido confirmado. O Pix será enviado pelo WhatsApp.'
+        : 'Pedido recebido. O Pix será enviado pelo WhatsApp assim que a cobrança for aprovada.'
+    });
+  }
+);
 
 app.get('/cliente/:token', async (_request, reply) => reply.sendFile('portal.html'));
 app.get('/captacao', async (_request, reply) => reply.sendFile('landing.html'));

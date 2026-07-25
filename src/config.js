@@ -47,11 +47,16 @@ const schema = z.object({
   WHATSAPP_TEMPLATE_D5: z.string().default('gate_one_ultimo_aviso_d5'),
   WHATSAPP_TEMPLATE_PAYMENT_CONFIRMED: z.string().default('gate_one_pagamento_confirmado'),
   WHATSAPP_TEMPLATE_RENEWED: z.string().default('gate_one_renovacao_concluida'),
+  WHATSAPP_TEMPLATE_ACCESS_CREATED: z.string().default('gate_one_acesso_criado'),
   BITPANEL_BASE_URL: z.string().url().default('https://bitpanel.vip'),
   BITPANEL_LOGIN_URL: z.string().url().default('https://bitpanel.vip/login'),
   BITPANEL_USERNAME: z.string().optional(),
   BITPANEL_PASSWORD: z.string().optional(),
-  BITPANEL_FLOW_JSON: z.string().optional(),
+  BITPANEL_PLAN_LABEL: z.string().default('30, R$ 30,00'),
+  BITPANEL_TV_PACKAGE: z
+    .string()
+    .default('Full HD + H265 + HD + SD + VOD + Adulto'),
+  BITPANEL_DEFAULT_CONNECTIONS: z.coerce.number().int().min(1).max(10).default(1),
   BITPANEL_HEADLESS: bool(true),
   ARTIFACTS_DIR: z.string().default('/app/artifacts')
 });

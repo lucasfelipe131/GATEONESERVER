@@ -49,6 +49,8 @@
 - [ ] Captura da lista e botões recebida sem credenciais.
 - [ ] Janela de renovação mapeada.
 - [ ] Seletores reais configurados.
+- [ ] Cadastro de nova lista testado com aprovação humana.
+- [ ] Template `gate_one_acesso_criado` aprovado na Meta.
 - [ ] Login sem CAPTCHA/2FA automatizável confirmado.
 - [ ] Simulação testada com conta própria.
 - [ ] Validade antes/depois conferida.

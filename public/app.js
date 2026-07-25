@@ -171,10 +171,11 @@ async function loadCustomers(search = '') {
             <td>${date(customer.expires_on)}</td>
             <td>${customer.bitpanel_list_id ? `<span class="tag blue">Lista ${escapeHtml(customer.bitpanel_list_id)}</span>` : '<span class="tag">Não vinculado</span>'}</td>
             <td>${statusTag(customer.status)}</td>
+            <td><button class="btn btn-secondary btn-small" data-portal="${escapeHtml(customer.id)}">Copiar acesso</button></td>
           </tr>`
         )
         .join('')
-    : '<tr><td colspan="5"><div class="empty">Nenhum cliente encontrado.</div></td></tr>';
+    : '<tr><td colspan="6"><div class="empty">Nenhum cliente encontrado.</div></td></tr>';
 }
 
 async function loadCharges(status = state.chargeStatus) {
@@ -213,7 +214,7 @@ async function loadRenewals() {
           (renewal) => `
           <article class="action-card">
             <div class="card-head">
-              <div><h3>${escapeHtml(renewal.customer_name)}</h3><p>${escapeHtml(renewal.plan_name)} · ${renewal.duration_months} ${renewal.duration_months === 1 ? 'mês' : 'meses'}</p></div>
+              <div><h3>${escapeHtml(renewal.customer_name)}</h3><p>${renewal.operation === 'provision' ? 'Novo cadastro' : 'Renovação'} · ${escapeHtml(renewal.plan_name)} · ${renewal.duration_months} ${renewal.duration_months === 1 ? 'mês' : 'meses'}</p></div>
               ${statusTag(renewal.status)}
             </div>
             <div class="card-meta">
@@ -223,7 +224,7 @@ async function loadRenewals() {
             </div>
             ${renewal.error ? `<div class="card-body">${escapeHtml(renewal.error)}</div>` : ''}
             <div class="card-actions">
-              ${['awaiting_approval', 'manual_review', 'simulated'].includes(renewal.status) ? `<button class="btn btn-success" data-renew="${renewal.id}">Aprovar renovação</button>` : ''}
+              ${['awaiting_approval', 'manual_review', 'simulated'].includes(renewal.status) ? `<button class="btn btn-success" data-renew="${renewal.id}">${renewal.operation === 'provision' ? 'Aprovar cadastro' : 'Aprovar renovação'}</button>` : ''}
             </div>
           </article>`
         )
@@ -307,6 +308,27 @@ let searchTimer;
 $('#customerSearch').addEventListener('input', (event) => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => loadCustomers(event.target.value), 250);
+});
+
+$('#customersTable').addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-portal]');
+  if (!button) return;
+  button.disabled = true;
+  try {
+    const result = await api(`/api/admin/customers/${button.dataset.portal}/portal-link`, {
+      method: 'POST'
+    });
+    try {
+      await navigator.clipboard.writeText(result.portalUrl);
+      toast('Link da área do cliente copiado.');
+    } catch {
+      window.prompt('Copie o link da área do cliente:', result.portalUrl);
+    }
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
 });
 
 $('#newCustomerButton').addEventListener('click', () => $('#customerDialog').showModal());

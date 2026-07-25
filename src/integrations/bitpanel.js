@@ -2,132 +2,328 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
 
-function render(value, variables) {
-  if (typeof value !== 'string') return value;
-  return value.replace(/\{\{(\w+)\}\}/g, (_, key) => {
-    if (!(key in variables)) throw new Error(`Variável do fluxo BitPanel não encontrada: ${key}`);
-    return String(variables[key]);
-  });
-}
-
 function safeName(value) {
   return String(value).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 80);
 }
 
-export function parseBitPanelFlow(config) {
-  if (!config.BITPANEL_FLOW_JSON) {
-    throw new Error('BITPANEL_FLOW_JSON ainda não foi mapeado.');
+function optionLabelForMonths(months) {
+  return Number(months) === 1 ? '1 Mês' : `${Number(months)} Meses`;
+}
+
+function stripPrefix(value, prefix) {
+  return String(value || '').replace(new RegExp(`^${prefix}\\s*`, 'i'), '').trim();
+}
+
+export function parseBitPanelExpiry(value) {
+  const match = String(value || '').match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if (!match) return null;
+  return `${match[3]}-${match[2]}-${match[1]}`;
+}
+
+export function buildBitPanelUsername(customerName, stableSeed = '') {
+  const normalized = String(customerName || 'cliente')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+  const base = normalized.slice(0, 16) || 'cliente';
+  const suffix = String(stableSeed)
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .slice(-6);
+  return `${base}${suffix}`.slice(0, 24);
+}
+
+export function bitPanelOperationFor(renewal) {
+  return renewal.charge_stage === 'new_sale' || !renewal.bitpanel_list_id
+    ? 'provision'
+    : 'renew';
+}
+
+async function openSession(page, config) {
+  await page.goto(config.BITPANEL_LOGIN_URL, { waitUntil: 'domcontentloaded' });
+  if (!page.url().includes('/login')) return;
+
+  const email = page.locator("input[name='email']");
+  const password = page.locator("input[name='password']");
+  const submit = page.locator("button[type='submit']");
+  if ((await email.count()) !== 1 || (await password.count()) !== 1 || (await submit.count()) !== 1) {
+    throw new Error('Tela de login do BitPanel mudou. Revisão manual necessária.');
   }
-  let flow;
+  await email.fill(config.BITPANEL_USERNAME);
+  await password.fill(config.BITPANEL_PASSWORD);
+  await Promise.all([
+    page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 25_000 }),
+    submit.click()
+  ]);
+}
+
+async function captureListDetails(page) {
+  const usernameText = await page.getByText(/^Usuário:/).innerText();
+  const passwordText = await page.getByText(/^Senha:/).innerText();
+  const expiryText = await page.getByText(/^Data de validade:/).innerText();
+  const match = page.url().match(/\/list\/view\/(\d+)/);
+  if (!match) throw new Error('O BitPanel não abriu a página final da lista.');
+  return {
+    listId: match[1],
+    username: stripPrefix(usernameText, 'Usuário:'),
+    password: stripPrefix(passwordText, 'Senha:'),
+    expiryText: stripPrefix(expiryText, 'Data de validade:'),
+    expiryDate: parseBitPanelExpiry(expiryText)
+  };
+}
+
+async function findListByUsername(page, config, username) {
+  await page.goto(`${config.BITPANEL_BASE_URL}/list`, { waitUntil: 'domcontentloaded' });
+  const search = page.getByRole('textbox', { name: 'Buscar por nome' });
+  if ((await search.count()) !== 1) {
+    throw new Error('Busca de listas do BitPanel não encontrada.');
+  }
+  await search.fill(username);
+  await page.waitForTimeout(700);
+
+  const rows = page.locator('table tbody tr');
+  const count = await rows.count();
+  for (let index = 0; index < count; index += 1) {
+    const cells = rows.nth(index).locator('td');
+    if ((await cells.count()) < 7) continue;
+    const rowUsername = (await cells.nth(4).innerText()).trim();
+    if (rowUsername !== username) continue;
+    return {
+      id: (await cells.nth(0).innerText()).trim().replace(/^#/, ''),
+      username: rowUsername,
+      expiryText: (await cells.nth(6).innerText()).trim()
+    };
+  }
+  return null;
+}
+
+async function selectVuetifyOption(page, scope, buttonName, optionName) {
+  const button = scope.getByRole('button', { name: buttonName });
+  if ((await button.count()) !== 1) {
+    throw new Error(`Campo do BitPanel não encontrado: ${buttonName}`);
+  }
+  await button.click();
+  const option = page.getByRole('option', { name: optionName, exact: true });
+  if ((await option.count()) !== 1) {
+    throw new Error(`Opção do BitPanel não encontrada: ${optionName}`);
+  }
+  await option.click();
+}
+
+async function setConnections(scope, connections) {
+  const target = Number(connections);
+  const slider = scope.getByRole('slider');
+  if ((await slider.count()) !== 1 || !Number.isInteger(target) || target < 1 || target > 10) {
+    throw new Error('Quantidade de conexões inválida no cadastro do BitPanel.');
+  }
+  let current = Number((await slider.getAttribute('aria-valuenow')) || 0);
+  while (current < target) {
+    await slider.press('ArrowRight');
+    current += 1;
+  }
+  while (current > target) {
+    await slider.press('ArrowLeft');
+    current -= 1;
+  }
+  const confirmed = Number((await slider.getAttribute('aria-valuenow')) || 0);
+  if (confirmed !== target) throw new Error('O BitPanel não confirmou a quantidade de conexões.');
+}
+
+async function runWithBrowser(config, task) {
+  if (!config.BITPANEL_USERNAME || !config.BITPANEL_PASSWORD) {
+    throw new Error('Credenciais do BitPanel não configuradas na Railway.');
+  }
+  await mkdir(config.ARTIFACTS_DIR, { recursive: true });
+  const browser = await chromium.launch({
+    headless: config.BITPANEL_HEADLESS,
+    args: ['--no-sandbox', '--disable-dev-shm-usage']
+  });
   try {
-    flow = JSON.parse(config.BITPANEL_FLOW_JSON);
-  } catch {
-    throw new Error('BITPANEL_FLOW_JSON não contém um JSON válido.');
+    const context = await browser.newContext({
+      locale: 'pt-BR',
+      timezoneId: 'America/Sao_Paulo'
+    });
+    const page = await context.newPage();
+    page.setDefaultTimeout(20_000);
+    await openSession(page, config);
+    return await task(page);
+  } finally {
+    await browser.close();
   }
-  if (!Array.isArray(flow.steps) || !flow.steps.length) {
-    throw new Error('O fluxo BitPanel precisa conter uma lista steps.');
-  }
-  return flow;
 }
 
 export async function renewInBitPanel(config, renewal) {
   if (config.BITPANEL_MODE === 'disabled') throw new Error('Automação BitPanel desativada.');
   if (config.BITPANEL_MODE === 'simulation') {
     return {
+      operation: 'renew',
       simulated: true,
       beforeExpiry: renewal.current_expiry,
       afterExpiry: renewal.current_expiry,
-      evidencePath: null,
-      captures: {}
+      evidencePath: null
     };
   }
-  if (!config.BITPANEL_USERNAME || !config.BITPANEL_PASSWORD) {
-    throw new Error('Credenciais do BitPanel não configuradas na Railway.');
-  }
+  if (!renewal.bitpanel_list_id) throw new Error('ID da lista BitPanel não informado.');
 
-  const flow = parseBitPanelFlow(config);
-  const variables = {
-    baseUrl: config.BITPANEL_BASE_URL,
-    loginUrl: config.BITPANEL_LOGIN_URL,
-    username: config.BITPANEL_USERNAME,
-    password: config.BITPANEL_PASSWORD,
-    customerName: renewal.customer_name,
-    customerReference: renewal.bitpanel_reference || '',
-    listId: renewal.bitpanel_list_id || '',
-    planCode: renewal.plan_code,
-    durationMonths: renewal.duration_months
-  };
-  await mkdir(config.ARTIFACTS_DIR, { recursive: true });
-  const evidencePath = join(
-    config.ARTIFACTS_DIR,
-    `${Date.now()}-${safeName(renewal.id)}-final.png`
-  );
-  const captures = {};
-  const browser = await chromium.launch({
-    headless: config.BITPANEL_HEADLESS,
-    args: ['--no-sandbox', '--disable-dev-shm-usage']
-  });
+  return runWithBrowser(config, async (page) => {
+    const listId = String(renewal.bitpanel_list_id);
+    const detailsUrl = `${config.BITPANEL_BASE_URL}/list/view/${listId}`;
+    await page.goto(detailsUrl, { waitUntil: 'domcontentloaded' });
+    const before = await captureListDetails(page);
 
-  try {
-    const context = await browser.newContext({ locale: 'pt-BR', timezoneId: 'America/Sao_Paulo' });
-    const page = await context.newPage();
-    page.setDefaultTimeout(20_000);
-    for (const step of flow.steps) {
-      const selector = render(step.selector, variables);
-      switch (step.type) {
-        case 'goto':
-          await page.goto(render(step.url, variables), { waitUntil: step.waitUntil || 'domcontentloaded' });
-          break;
-        case 'fill':
-          await page.locator(selector).fill(render(step.value, variables));
-          break;
-        case 'click':
-          await page.locator(selector).click();
-          break;
-        case 'select':
-          await page.locator(selector).selectOption(render(step.value, variables));
-          break;
-        case 'waitForURL':
-          await page.waitForURL(render(step.url, variables));
-          break;
-        case 'wait':
-          await page.waitForTimeout(Math.min(Number(step.ms) || 500, 5_000));
-          break;
-        case 'captureText':
-          captures[step.saveAs] = (await page.locator(selector).innerText()).trim();
-          break;
-        case 'expectText':
-          if (!(await page.locator(selector).innerText()).includes(render(step.text, variables))) {
-            throw new Error(`Texto esperado não apareceu: ${step.text}`);
-          }
-          break;
-        case 'assertChanged':
-          if (!captures[step.before] || captures[step.before] === captures[step.after]) {
-            throw new Error('A validade não mudou após a renovação.');
-          }
-          break;
-        case 'screenshot':
-          await page.screenshot({
-            path: join(
-              config.ARTIFACTS_DIR,
-              `${Date.now()}-${safeName(renewal.id)}-${safeName(step.name || 'step')}.png`
-            ),
-            fullPage: true
-          });
-          break;
-        default:
-          throw new Error(`Ação BitPanel não permitida: ${step.type}`);
-      }
+    const row = await findListByUsername(
+      page,
+      config,
+      renewal.bitpanel_reference || before.username
+    );
+    if (!row || row.id !== listId) {
+      throw new Error('Lista não encontrada na busca do BitPanel.');
     }
+
+    const menuIcon = page.locator(`i[title="Mais opções, lista ${listId}"]`);
+    if ((await menuIcon.count()) !== 1) {
+      throw new Error('Menu de opções da lista não encontrado.');
+    }
+    await menuIcon.click();
+    await page.getByRole('menuitem', { name: 'Renovar', exact: true }).click();
+
+    const dialog = page.locator('.v-dialog--active');
+    await dialog.waitFor({ state: 'visible' });
+    await selectVuetifyOption(
+      page,
+      dialog,
+      /^Selecione o plano/,
+      config.BITPANEL_PLAN_LABEL
+    );
+    await selectVuetifyOption(
+      page,
+      dialog,
+      /^Selecione a validade/,
+      optionLabelForMonths(renewal.duration_months)
+    );
+
+    const evidencePath = join(
+      config.ARTIFACTS_DIR,
+      `${Date.now()}-${safeName(renewal.id)}-renovacao.png`
+    );
     await page.screenshot({ path: evidencePath, fullPage: true });
+    const renewButton = dialog.getByRole('button', { name: 'Renovar', exact: true });
+    if ((await renewButton.count()) !== 1) throw new Error('Botão final de renovação não encontrado.');
+    await renewButton.click();
+    await dialog.waitFor({ state: 'hidden' });
+
+    await page.goto(detailsUrl, { waitUntil: 'domcontentloaded' });
+    const after = await captureListDetails(page);
+    if (!after.expiryDate || before.expiryDate === after.expiryDate) {
+      throw new Error('A validade não mudou após a renovação.');
+    }
     return {
+      operation: 'renew',
       simulated: false,
-      beforeExpiry: captures.beforeExpiry || null,
-      afterExpiry: captures.afterExpiry || null,
+      beforeExpiry: before.expiryDate,
+      afterExpiry: after.expiryDate,
       evidencePath,
-      captures
+      listId,
+      username: after.username
     };
-  } finally {
-    await browser.close();
+  });
+}
+
+export async function provisionInBitPanel(config, renewal) {
+  if (config.BITPANEL_MODE === 'disabled') throw new Error('Automação BitPanel desativada.');
+  const username =
+    renewal.bitpanel_reference ||
+    buildBitPanelUsername(renewal.customer_name, renewal.customer_id);
+  if (config.BITPANEL_MODE === 'simulation') {
+    return {
+      operation: 'provision',
+      simulated: true,
+      beforeExpiry: null,
+      afterExpiry: null,
+      evidencePath: null,
+      listId: null,
+      username,
+      password: null
+    };
   }
+
+  return runWithBrowser(config, async (page) => {
+    const existing = await findListByUsername(page, config, username);
+    if (existing) {
+      await page.goto(`${config.BITPANEL_BASE_URL}/list/view/${existing.id}`, {
+        waitUntil: 'domcontentloaded'
+      });
+      const details = await captureListDetails(page);
+      return {
+        operation: 'provision',
+        simulated: false,
+        existing: true,
+        beforeExpiry: null,
+        afterExpiry: details.expiryDate,
+        evidencePath: null,
+        ...details
+      };
+    }
+
+    const createButton = page.locator('main button.v-btn--fixed.v-btn--fab');
+    if ((await createButton.count()) !== 1) {
+      throw new Error('Botão de nova lista do BitPanel não encontrado.');
+    }
+    await createButton.click();
+    await page.getByText('Adicionar nova lista.', { exact: true }).waitFor({ state: 'visible' });
+
+    const main = page.locator('main');
+    const usernameInput = main.getByRole('textbox', { name: 'Nome do usuário' });
+    if ((await usernameInput.count()) !== 1) {
+      throw new Error('Campo de usuário do BitPanel não encontrado.');
+    }
+    await usernameInput.fill(username);
+    await selectVuetifyOption(
+      page,
+      main,
+      /^Selecione o plano de tv/,
+      config.BITPANEL_TV_PACKAGE
+    );
+    await selectVuetifyOption(
+      page,
+      main,
+      /^Selecione o plano$/,
+      config.BITPANEL_PLAN_LABEL
+    );
+    await setConnections(main, config.BITPANEL_DEFAULT_CONNECTIONS);
+    await selectVuetifyOption(
+      page,
+      main,
+      /^Selecione a validade/,
+      optionLabelForMonths(renewal.duration_months)
+    );
+
+    const note = main.getByRole('textbox', { name: 'Nota' });
+    if ((await note.count()) === 1) {
+      await note.fill(`Gate One Pro - ${renewal.customer_name}`.slice(0, 120));
+    }
+    const evidencePath = join(
+      config.ARTIFACTS_DIR,
+      `${Date.now()}-${safeName(renewal.id)}-cadastro.png`
+    );
+    await page.screenshot({ path: evidencePath, fullPage: true });
+
+    const create = main.getByRole('button', { name: 'Criar', exact: true });
+    if ((await create.count()) !== 1) throw new Error('Botão final de cadastro não encontrado.');
+    await Promise.all([
+      page.waitForURL(/\/list\/view\/\d+/, { timeout: 30_000 }),
+      create.click()
+    ]);
+    const details = await captureListDetails(page);
+    return {
+      operation: 'provision',
+      simulated: false,
+      existing: false,
+      beforeExpiry: null,
+      afterExpiry: details.expiryDate,
+      evidencePath,
+      ...details
+    };
+  });
 }
