@@ -61,6 +61,9 @@ export async function createPixPayment(config, charge) {
   }
 
   requireLiveConfig(config);
+  if (!charge.customer_email) {
+    throw new Error('Informe o e-mail real do pagador antes de gerar o Pix.');
+  }
   const notificationUrl =
     config.MERCADOPAGO_NOTIFICATION_URL ||
     (config.PUBLIC_BASE_URL ? `${config.PUBLIC_BASE_URL}/webhooks/mercadopago` : undefined);
@@ -83,7 +86,7 @@ export async function createPixPayment(config, charge) {
         Date.now() + config.PIX_EXPIRATION_MINUTES * 60_000
       ).toISOString(),
       payer: {
-        email: charge.customer_email || config.MERCADOPAGO_PAYER_EMAIL,
+        email: charge.customer_email,
         first_name: charge.customer_name.split(/\s+/)[0]
       }
     })
@@ -114,6 +117,9 @@ export async function createCheckoutPreference(config, charge) {
   }
 
   requireLiveConfig(config);
+  if (!charge.customer_email) {
+    throw new Error('Informe o e-mail real do pagador antes de abrir o Mercado Pago.');
+  }
   if (!config.PUBLIC_BASE_URL) {
     throw new Error('URL pública do Gate One Pro não configurada.');
   }
@@ -140,7 +146,7 @@ export async function createCheckoutPreference(config, charge) {
       }],
       payer: {
         name: charge.customer_name,
-        email: charge.customer_email || config.MERCADOPAGO_PAYER_EMAIL,
+        email: charge.customer_email,
         phone: charge.customer_phone ? { number: charge.customer_phone } : undefined
       },
       external_reference: charge.id,
