@@ -80,6 +80,7 @@ test('cria Checkout Pro com retorno ao Gate One Pro', async () => {
     const payload = JSON.parse(options.body);
     assert.equal(payload.external_reference, 'charge-1');
     assert.equal(payload.items[0].unit_price, 30);
+    assert.equal(payload.payer.email, 'cliente@example.com');
     assert.match(payload.back_urls.success, /\/pagamento\?status=approved/);
     return {
       ok: true,
@@ -107,7 +108,7 @@ test('cria Checkout Pro com retorno ao Gate One Pro', async () => {
       duration_months: 1,
       amount_cents: 3000,
       customer_name: 'Cliente',
-      customer_email: null,
+      customer_email: 'cliente@example.com',
       customer_phone: '5555999999999'
     });
     assert.equal(result.id, 'pref-1');
