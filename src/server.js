@@ -102,6 +102,7 @@ function safeBitPanelSyncError(error) {
     'Credenciais do BitPanel não configuradas na Railway.',
     'Tela de login do BitPanel mudou. Revisão manual necessária.',
     'Busca de listas do BitPanel não encontrada.',
+    'O BitPanel recusou o acesso. Confira o usuário e a senha em Configurações.',
     'Não foi possível gravar os clientes sincronizados.'
   ];
   if (knownMessages.includes(message)) return message;
@@ -1373,7 +1374,13 @@ app.post('/api/admin/integrations/:provider/test', { preHandler: requireAuth }, 
     request.params.provider
   );
   const runtimeConfig = await getRuntimeConfig(db, config);
-  if (provider === 'bitpanel') return testBitPanelConnection(runtimeConfig);
+  if (provider === 'bitpanel') {
+    try {
+      return await testBitPanelConnection(runtimeConfig);
+    } catch (error) {
+      throw Object.assign(new Error(safeBitPanelSyncError(error)), { statusCode: 409 });
+    }
+  }
   if (provider === 'openai') return testOpenAIConnection(runtimeConfig);
   if (provider === 'mercadopago') {
     if (!getMercadoPagoReadiness(runtimeConfig).ready) {
