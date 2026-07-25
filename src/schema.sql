@@ -85,6 +85,8 @@ CREATE TABLE IF NOT EXISTS charges (
   approved_by uuid REFERENCES users(id),
   approved_at timestamptz,
   mercado_pago_payment_id text,
+  mercado_pago_preference_id text,
+  checkout_url text,
   pix_copy_paste text,
   pix_ticket_url text,
   pix_expires_at timestamptz,
@@ -93,6 +95,8 @@ CREATE TABLE IF NOT EXISTS charges (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE charges ADD COLUMN IF NOT EXISTS plan_id uuid REFERENCES plans(id);
+ALTER TABLE charges ADD COLUMN IF NOT EXISTS mercado_pago_preference_id text;
+ALTER TABLE charges ADD COLUMN IF NOT EXISTS checkout_url text;
 CREATE INDEX IF NOT EXISTS charges_status_idx ON charges (status, due_on);
 
 CREATE TABLE IF NOT EXISTS message_logs (
@@ -191,8 +195,30 @@ CREATE TABLE IF NOT EXISTS system_settings (
 );
 
 CREATE TABLE IF NOT EXISTS integration_credentials (
-  provider text PRIMARY KEY CHECK (provider IN ('mercadopago', 'whatsapp', 'bitpanel')),
+  provider text PRIMARY KEY,
   encrypted_value text NOT NULL,
   updated_by uuid REFERENCES users(id),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE integration_credentials
+  DROP CONSTRAINT IF EXISTS integration_credentials_provider_check;
+ALTER TABLE integration_credentials
+  ADD CONSTRAINT integration_credentials_provider_check
+  CHECK (provider IN ('mercadopago', 'whatsapp', 'bitpanel', 'openai'));
+
+CREATE TABLE IF NOT EXISTS ai_messages (
+  id bigserial PRIMARY KEY,
+  audience text NOT NULL CHECK (audience IN ('admin', 'customer')),
+  customer_id uuid REFERENCES customers(id) ON DELETE CASCADE,
+  actor_id text,
+  role text NOT NULL CHECK (role IN ('user', 'assistant')),
+  content text NOT NULL,
+  model text,
+  provider_response_id text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ai_messages_audience_created_idx
+  ON ai_messages (audience, created_at DESC);
+CREATE INDEX IF NOT EXISTS ai_messages_customer_created_idx
+  ON ai_messages (customer_id, created_at DESC)
+  WHERE customer_id IS NOT NULL;

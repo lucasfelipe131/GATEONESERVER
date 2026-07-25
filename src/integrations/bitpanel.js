@@ -235,6 +235,22 @@ export async function renewInBitPanel(config, renewal) {
     const detailsUrl = `${config.BITPANEL_BASE_URL}/list/view/${listId}`;
     await page.goto(detailsUrl, { waitUntil: 'domcontentloaded' });
     const before = await captureListDetails(page);
+    if (
+      before.expiryDate &&
+      renewal.current_expiry &&
+      before.expiryDate > renewal.current_expiry
+    ) {
+      return {
+        operation: 'renew',
+        simulated: false,
+        alreadyRenewed: true,
+        beforeExpiry: renewal.current_expiry,
+        afterExpiry: before.expiryDate,
+        evidencePath: null,
+        listId,
+        username: before.username
+      };
+    }
 
     const row = await findListByUsername(
       page,

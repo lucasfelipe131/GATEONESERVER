@@ -22,6 +22,10 @@ const ENV_FIELDS = {
     'BITPANEL_PLAN_LABEL',
     'BITPANEL_TV_PACKAGE',
     'BITPANEL_DEFAULT_CONNECTIONS'
+  ],
+  openai: [
+    'OPENAI_API_KEY',
+    'OPENAI_MODEL'
   ]
 };
 
@@ -78,7 +82,8 @@ export async function credentialStatus(db, baseConfig) {
           runtime.WHATSAPP_VERIFY_TOKEN &&
           runtime.META_APP_SECRET
       ),
-      bitpanel: Boolean(runtime.BITPANEL_USERNAME && runtime.BITPANEL_PASSWORD)
+      bitpanel: Boolean(runtime.BITPANEL_USERNAME && runtime.BITPANEL_PASSWORD),
+      openai: Boolean(runtime.OPENAI_API_KEY && runtime.OPENAI_MODEL)
     }
   };
 }

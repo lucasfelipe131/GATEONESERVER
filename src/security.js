@@ -67,7 +67,7 @@ export function maskPhone(value) {
 
 export function sanitizeForLog(value) {
   if (!value || typeof value !== 'object') return value;
-  const blocked = /token|password|secret|pix|authorization/i;
+  const blocked = /token|password|secret|pix|authorization|api[_-]?key|private[_-]?key/i;
   return Object.fromEntries(
     Object.entries(value).map(([key, item]) => [
       key,

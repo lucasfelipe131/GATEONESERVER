@@ -2,6 +2,7 @@ const state = {
   user: null,
   summary: null,
   settings: null,
+  analytics: null,
   chargeStatus: '',
   customers: []
 };
@@ -59,6 +60,7 @@ const titles = {
   charges: ['APROVAÇÃO E PIX', 'Cobranças'],
   renewals: ['AUTOMAÇÃO BITPANEL', 'Renovações'],
   leads: ['VENDAS AUTOMÁTICAS', 'Captação'],
+  assistant: ['INTELIGÊNCIA OPERACIONAL', 'Assistente IA'],
   settings: ['SEGURANÇA E INTEGRAÇÕES', 'Configurações']
 };
 
@@ -73,6 +75,7 @@ async function navigate(page) {
   if (page === 'charges') await loadCharges();
   if (page === 'renewals') await loadRenewals();
   if (page === 'leads') await loadLeads();
+  if (page === 'assistant') await loadAssistant();
   if (page === 'settings') await loadSettings();
 }
 
@@ -103,13 +106,15 @@ function statusTag(status) {
 }
 
 async function loadDashboard() {
-  const [summary, charges, settings] = await Promise.all([
+  const [summary, charges, settings, analytics] = await Promise.all([
     api('/api/admin/summary'),
     api('/api/admin/charges?status=awaiting_approval'),
-    api('/api/admin/settings')
+    api('/api/admin/settings'),
+    api('/api/admin/analytics')
   ]);
   state.summary = summary;
   state.settings = settings;
+  state.analytics = analytics;
   $('#metrics').innerHTML = [
     ['Clientes ativos', summary.customers, '◎', 'base total'],
     ['Para aprovar', summary.charges.awaiting, '◇', 'cobranças pendentes'],
@@ -124,6 +129,9 @@ async function loadDashboard() {
       </article>`
     )
     .join('');
+  renderRevenueChart(analytics.revenueTrend);
+  renderChargeChart(analytics.chargeStatus);
+  renderExpirationChart(analytics.expirations);
   $('#dashboardCharges').innerHTML = charges.charges.length
     ? charges.charges
         .slice(0, 5)
@@ -140,12 +148,93 @@ async function loadDashboard() {
   updateSafety(summary.settings.globalPause);
 }
 
+function renderRevenueChart(points) {
+  const max = Math.max(1, ...points.map((point) => Number(point.cents)));
+  $('#revenueChart').innerHTML = points
+    .map((point) => {
+      const [year, month] = point.month.split('-').map(Number);
+      const label = new Intl.DateTimeFormat('pt-BR', { month: 'short' })
+        .format(new Date(Date.UTC(year, month - 1, 1)))
+        .replace('.', '');
+      const height = Math.max(4, Math.round((Number(point.cents) / max) * 100));
+      return `
+        <div class="bar-column" title="${money(point.cents)}">
+          <span class="bar-value">${money(point.cents)}</span>
+          <div class="bar-track"><i style="height:${height}%"></i></div>
+          <strong>${escapeHtml(label)}</strong>
+        </div>`;
+    })
+    .join('');
+}
+
+function renderChargeChart(items) {
+  const colors = {
+    paid: '#10a36a',
+    sent: '#1769ff',
+    approved: '#5d8dff',
+    awaiting_approval: '#f2a93b',
+    expired: '#aeb8c6',
+    rejected: '#ef5b68',
+    cancelled: '#7c8ba1',
+    draft: '#b7c6dc'
+  };
+  const labels = {
+    paid: 'Pagas',
+    sent: 'Enviadas',
+    approved: 'Aprovadas',
+    awaiting_approval: 'Para aprovar',
+    expired: 'Expiradas',
+    rejected: 'Rejeitadas',
+    cancelled: 'Canceladas',
+    draft: 'Rascunhos'
+  };
+  const total = items.reduce((sum, item) => sum + Number(item.total), 0);
+  if (!total) {
+    $('#chargeChart').innerHTML = '<div class="empty">Ainda não há cobranças.</div>';
+    return;
+  }
+  let angle = 0;
+  const slices = items.map((item, index) => {
+    const start = angle;
+    angle += (Number(item.total) / total) * 360;
+    return `${colors[item.status] || `hsl(${index * 47} 70% 55%)`} ${start}deg ${angle}deg`;
+  });
+  $('#chargeChart').innerHTML = `
+    <div class="donut" style="background:conic-gradient(${slices.join(',')})">
+      <div><strong>${total}</strong><span>cobranças</span></div>
+    </div>
+    <div class="chart-legend">
+      ${items.map((item, index) => `
+        <div><i style="background:${colors[item.status] || `hsl(${index * 47} 70% 55%)`}"></i>
+        <span>${escapeHtml(labels[item.status] || item.status)}</span><strong>${item.total}</strong></div>
+      `).join('')}
+    </div>`;
+}
+
+function renderExpirationChart(expirations) {
+  const items = [
+    ['Atrasados', expirations.overdue, 'danger'],
+    ['Até 7 dias', expirations.next7, 'warning'],
+    ['8 a 15 dias', expirations.next15, 'primary'],
+    ['16 a 30 dias', expirations.next30, 'calm']
+  ];
+  const max = Math.max(1, ...items.map((item) => Number(item[1])));
+  $('#expirationChart').innerHTML = items
+    .map(([label, value, color]) => `
+      <div class="mini-bar">
+        <div><span>${label}</span><strong>${value}</strong></div>
+        <i><b class="${color}" style="width:${Math.round((Number(value) / max) * 100)}%"></b></i>
+      </div>`)
+    .join('');
+}
+
 function renderIntegrations(target, integrations) {
   const labels = {
     redis: ['Fila Redis', 'Processamento em segundo plano'],
     mercadoPago: ['Mercado Pago', 'Cobrança Pix e confirmação'],
     whatsapp: ['WhatsApp Cloud API', 'Atendimento e lembretes'],
-    bitpanel: ['BitPanel', 'Renovação por navegador']
+    bitpanel: ['BitPanel', 'Renovação por navegador'],
+    openai: ['OpenAI', 'Assistente do painel e WhatsApp']
   };
   $(target).innerHTML = Object.entries(labels)
     .map(
@@ -214,7 +303,28 @@ async function loadCharges(status = state.chargeStatus) {
 }
 
 async function loadRenewals() {
-  const { renewals } = await api('/api/admin/renewals');
+  const [{ renewals }, analytics] = await Promise.all([
+    api('/api/admin/renewals'),
+    api('/api/admin/analytics')
+  ]);
+  const queued = (analytics.renewalStatus || [])
+    .filter((item) => ['queued', 'running'].includes(item.status))
+    .reduce((sum, item) => sum + Number(item.total), 0);
+  $('#renewalMetrics').innerHTML = [
+    ['Automação', analytics.automation.active ? 'Ativa' : 'Pausada', '↻', analytics.automation.active ? 'pagamento → BitPanel' : 'revise as configurações'],
+    ['Na fila', queued, '◇', 'aguardando o worker'],
+    ['Concluídas (30d)', analytics.automation.completed_30d, '✓', 'renovações confirmadas'],
+    ['Taxa de sucesso', analytics.automation.successRate30d == null ? '—' : `${analytics.automation.successRate30d}%`, '%', `${analytics.automation.failed_30d} falha(s) em 30 dias`]
+  ].map(([label, value, icon, note]) => `
+    <article class="metric">
+      <div class="metric-top"><span>${label}</span><span class="metric-icon">${icon}</span></div>
+      <strong>${escapeHtml(value)}</strong><small>${escapeHtml(note)}</small>
+    </article>`).join('');
+  const notice = $('#renewalNotice');
+  notice.classList.toggle('success', analytics.automation.active);
+  notice.innerHTML = analytics.automation.active
+    ? '<span>✓</span><div><strong>Renovação automática ativa</strong><p>Pagamento confirmado pelo Mercado Pago entra na fila do BitPanel sem aprovação manual. Somente clientes elegíveis do Gate One Pro Server.</p></div>'
+    : '<span>🛡</span><div><strong>Automação protegida ou pausada</strong><p>Para automatizar: Mercado Pago real, BitPanel real, pausa global desligada e “Renovar automaticamente” ativado.</p></div>';
   $('#renewalsList').innerHTML = renewals.length
     ? renewals
         .map(
@@ -237,6 +347,32 @@ async function loadRenewals() {
         )
         .join('')
     : '<div class="empty">Nenhuma renovação aguardando ação.</div>';
+}
+
+function renderAssistantMessages(messages) {
+  $('#assistantMessages').innerHTML = messages.length
+    ? messages.map((message) => `
+        <div class="chat-message ${message.role === 'assistant' ? 'assistant' : 'user'}">
+          <strong>${message.role === 'assistant' ? 'Assistente Gate One' : 'Você'}</strong>
+          <p>${escapeHtml(message.content)}</p>
+          ${message.model ? `<small>${escapeHtml(message.model)}</small>` : ''}
+        </div>`).join('')
+    : '<div class="empty">Faça uma pergunta ou use um dos atalhos ao lado.</div>';
+  $('#assistantMessages').scrollTop = $('#assistantMessages').scrollHeight;
+}
+
+async function loadAssistant() {
+  const [history, settings] = await Promise.all([
+    api('/api/admin/ai/history'),
+    api('/api/admin/settings')
+  ]);
+  state.settings = settings;
+  const ready = Boolean(settings.integrations.openai && settings.settings.ai_admin_enabled);
+  const status = $('#assistantStatus');
+  status.className = `status-dot ${ready ? 'ready' : ''}`;
+  status.textContent = ready ? 'IA pronta' : 'Configure em Ajustes';
+  $('#assistantForm button').disabled = !ready;
+  renderAssistantMessages(history.messages);
 }
 
 async function loadLeads() {
@@ -266,7 +402,9 @@ async function loadSettings() {
   $('#paymentMode').value = settings.payment_mode || 'simulation';
   $('#whatsappMode').value = settings.whatsapp_mode || 'simulation';
   $('#bitpanelMode').value = settings.bitpanel_mode || 'disabled';
-  $('#renewalApproval').checked = settings.renewal_requires_approval !== false;
+  $('#automaticRenewal').checked = settings.renewal_requires_approval === false;
+  $('#aiAdminEnabled').checked = settings.ai_admin_enabled === true;
+  $('#aiWhatsappEnabled').checked = settings.ai_whatsapp_enabled === true;
   renderIntegrations('#settingsIntegrations', result.integrations);
   updateSafety(settings.global_pause);
 }
@@ -516,7 +654,9 @@ $('#saveSettings').addEventListener('click', async (event) => {
         payment_mode: $('#paymentMode').value,
         whatsapp_mode: $('#whatsappMode').value,
         bitpanel_mode: $('#bitpanelMode').value,
-        renewal_requires_approval: $('#renewalApproval').checked
+        renewal_requires_approval: !$('#automaticRenewal').checked,
+        ai_admin_enabled: $('#aiAdminEnabled').checked,
+        ai_whatsapp_enabled: $('#aiWhatsappEnabled').checked
       })
     });
     toast('Configurações salvas.');
@@ -579,6 +719,45 @@ $$('.integration-form').forEach((form) => {
       }
     });
   }
+});
+
+$('#assistantForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const question = $('#assistantQuestion').value.trim();
+  if (!question) return;
+  const button = $('button[type="submit"]', form);
+  button.disabled = true;
+  $('#assistantQuestion').value = '';
+  const current = $$('.chat-message', $('#assistantMessages')).map((node) => ({
+    role: node.classList.contains('assistant') ? 'assistant' : 'user',
+    content: $('p', node)?.textContent || ''
+  }));
+  renderAssistantMessages([...current, { role: 'user', content: question }]);
+  try {
+    const result = await api('/api/admin/ai/chat', {
+      method: 'POST',
+      body: JSON.stringify({ question })
+    });
+    renderAssistantMessages([
+      ...current,
+      { role: 'user', content: question },
+      { role: 'assistant', content: result.answer, model: result.model }
+    ]);
+  } catch (error) {
+    toast(error.message, 'error');
+    renderAssistantMessages(current);
+  } finally {
+    button.disabled = false;
+    $('#assistantQuestion').focus();
+  }
+});
+
+$$('[data-ai-prompt]').forEach((button) => {
+  button.addEventListener('click', () => {
+    $('#assistantQuestion').value = button.dataset.aiPrompt;
+    $('#assistantForm').requestSubmit();
+  });
 });
 
 api('/api/auth/me')

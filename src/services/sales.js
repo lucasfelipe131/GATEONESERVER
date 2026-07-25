@@ -2,6 +2,7 @@ import { normalizePhone } from '../security.js';
 import { buildIdempotencyKey, renderChargeMessage } from '../domain/billing.js';
 import { audit } from '../audit.js';
 import { getSetting } from '../db.js';
+import { requestsHumanSupport } from './ai-support.js';
 
 function detectPlan(text) {
   const normalized = String(text || '').trim().toLowerCase();
@@ -61,9 +62,55 @@ export async function handleInboundMessage({ db, queues, config, inbound }) {
        SELECT $1, $2, 'whatsapp', 'engaged'
        WHERE NOT EXISTS (
          SELECT 1 FROM leads WHERE whatsapp_e164 = $2 AND status IN ('new', 'engaged', 'payment_pending')
-       )`,
+      )`,
       [customer.name, phone]
     );
+    if (requestsHumanSupport(inbound.text)) {
+      await db.query(
+        `UPDATE leads
+            SET notes = concat_ws(E'\n', NULLIF(notes, ''), 'Cliente solicitou atendimento humano.'),
+                status = 'engaged', updated_at = now()
+          WHERE whatsapp_e164 = $1 AND status IN ('new', 'engaged', 'payment_pending')`,
+        [phone]
+      );
+      await queues.messages.add(
+        'send-free-text',
+        {
+          customerId: customer.id,
+          to: phone,
+          text:
+            'Certo! Registrei seu pedido de atendimento humano. Enquanto isso, envie uma mensagem para o suporte no WhatsApp +55 55 99611-1943.'
+        },
+        { jobId: `handoff-${inbound.id}` }
+      );
+      return { action: 'human_handoff' };
+    }
+    const aiEnabled = await getSetting(db, 'ai_whatsapp_enabled', config.AI_WHATSAPP_ENABLED);
+    if (aiEnabled && config.OPENAI_API_KEY && String(inbound.text || '').trim()) {
+      await queues.messages.add(
+        'send-ai-reply',
+        {
+          customerId: customer.id,
+          to: phone,
+          question: String(inbound.text).trim()
+        },
+        {
+          jobId: `ai-${inbound.id}`,
+          attempts: 2,
+          backoff: { type: 'fixed', delay: 15_000 },
+          removeOnComplete: 1000,
+          removeOnFail: 2000
+        }
+      );
+      await audit(db, {
+        actorType: 'whatsapp',
+        actorId: phone,
+        action: 'ai.customer_question_queued',
+        entityType: 'customer',
+        entityId: customer.id
+      });
+      return { action: 'ai_queued' };
+    }
     await queues.messages.add(
       'send-plan-menu',
       { customerId: customer.id, to: phone },

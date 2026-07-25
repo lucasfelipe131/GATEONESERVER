@@ -3,6 +3,7 @@
 Projeto de produção para centralizar na Railway:
 
 - painel administrativo responsivo;
+- gráficos de receita, cobranças e vencimentos;
 - clientes e assinaturas;
 - planos Mensal (R$ 30), Trimestral (R$ 85), Semestral (R$ 150) e Anual (R$ 270);
 - configuração protegida de Mercado Pago, WhatsApp Cloud API e BitPanel diretamente no administrador;
@@ -15,6 +16,7 @@ Projeto de produção para centralizar na Railway:
 - captação de leads;
 - área do cliente e pontos Gate Club;
 - fila de renovação no BitPanel por Playwright;
+- assistente OpenAI no painel e atendimento orientativo no WhatsApp;
 - auditoria, idempotência e pausa global.
 
 O sistema nasce travado em modo seguro:
@@ -230,6 +232,33 @@ gera um usuário estável, verifica se ele já existe para impedir duplicidade,
 cria a lista e grava o ID no Gate One Pro. A senha gerada não é incluída na
 auditoria nem no conteúdo dos logs.
 
+Para liberar a renovação automática após o piloto, o administrador exige:
+
+```text
+PAYMENT_MODE=live
+BITPANEL_MODE=live
+RENEWAL_REQUIRES_APPROVAL=false
+GLOBAL_PAUSE=false
+```
+
+Mesmo nesse modo, o worker só executa depois do pagamento confirmado pelo
+Mercado Pago e somente para listas do proprietário `Gate One Pro Server`.
+Antes de clicar novamente no BitPanel, o worker confere se a validade já foi
+alterada, protegendo contra renovação duplicada em uma repetição de job.
+
+## Assistente de IA
+
+Em **Configurações → OpenAI**, salve a chave da API e o modelo. Depois ative
+separadamente:
+
+- IA dentro do painel, para análise de indicadores e filas;
+- IA no WhatsApp, para dúvidas de planos, vencimento e suporte inicial.
+
+A integração usa a Responses API e envia apenas o contexto necessário. O
+assistente não recebe credenciais e não possui ferramenta para aprovar
+pagamento, alterar preço, enviar cobrança ou executar renovação. Solicitações
+por atendimento humano são encaminhadas ao WhatsApp `+55 55 99611-1943`.
+
 ## Scripts
 
 ```bash
@@ -249,6 +278,8 @@ npm run check      # valida sintaxe
 - Use a pausa global em qualquer comportamento inesperado.
 - Cada estágio de cobrança possui chave idempotente.
 - Cada pagamento cria no máximo uma renovação.
+- A renovação automática exige pagamento confirmado e proprietário elegível.
+- A IA é somente orientativa e não executa ações financeiras ou no BitPanel.
 - Telefones aparecem mascarados no painel.
 - Falhas do BitPanel vão para revisão manual.
 - O serviço ofertado e anunciado deve respeitar os direitos e licenças aplicáveis.

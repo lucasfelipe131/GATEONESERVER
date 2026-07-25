@@ -24,7 +24,9 @@ export async function seed(db, config) {
     payment_mode: config.PAYMENT_MODE,
     whatsapp_mode: config.WHATSAPP_MODE,
     bitpanel_mode: config.BITPANEL_MODE,
-    renewal_requires_approval: config.RENEWAL_REQUIRES_APPROVAL
+    renewal_requires_approval: config.RENEWAL_REQUIRES_APPROVAL,
+    ai_admin_enabled: config.AI_ADMIN_ENABLED,
+    ai_whatsapp_enabled: config.AI_WHATSAPP_ENABLED
   };
   for (const [key, value] of Object.entries(defaults)) {
     await db.query(

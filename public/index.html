@@ -50,6 +50,7 @@
           <button class="nav-item" data-page="charges"><span>◇</span> Cobranças</button>
           <button class="nav-item" data-page="renewals"><span>↻</span> Renovações</button>
           <button class="nav-item" data-page="leads"><span>⌁</span> Captação</button>
+          <button class="nav-item" data-page="assistant"><span>✦</span> Assistente IA</button>
           <button class="nav-item" data-page="settings"><span>⚙</span> Configurações</button>
         </nav>
         <div class="sidebar-foot">
@@ -81,6 +82,26 @@
             <button class="btn btn-light" id="scanButton">↻ Verificar vencimentos</button>
           </div>
           <div class="metrics" id="metrics"></div>
+          <div class="analytics-grid">
+            <article class="panel chart-panel">
+              <div class="panel-head">
+                <div><span class="eyebrow">DESEMPENHO</span><h3>Receita confirmada — 6 meses</h3></div>
+              </div>
+              <div id="revenueChart" class="bar-chart"></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-head">
+                <div><span class="eyebrow">OPERAÇÃO</span><h3>Situação das cobranças</h3></div>
+              </div>
+              <div id="chargeChart" class="donut-layout"></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-head">
+                <div><span class="eyebrow">VENCIMENTOS</span><h3>Próximos 30 dias</h3></div>
+              </div>
+              <div id="expirationChart" class="mini-bars"></div>
+            </article>
+          </div>
           <div class="grid-two">
             <article class="panel">
               <div class="panel-head">
@@ -129,10 +150,11 @@
         </section>
 
         <section class="page" data-page-panel="renewals">
-          <div class="notice">
+          <div class="notice" id="renewalNotice">
             <span>🛡</span>
-            <div><strong>Barreira de segurança</strong><p>O robô só executa uma renovação depois da confirmação do pagamento e da sua aprovação.</p></div>
+            <div><strong>Carregando automação</strong><p>Conferindo o estado do Mercado Pago e do BitPanel.</p></div>
           </div>
+          <div class="metrics" id="renewalMetrics"></div>
           <div id="renewalsList" class="cards-grid"></div>
         </section>
 
@@ -152,6 +174,37 @@
               </table>
             </div>
           </article>
+        </section>
+
+        <section class="page" data-page-panel="assistant">
+          <div class="assistant-layout">
+            <article class="panel assistant-info">
+              <span class="eyebrow">AJUDA OPERACIONAL</span>
+              <h2>Assistente Gate One Pro</h2>
+              <p>Analisa os dados do painel, explica filas e ajuda a priorizar clientes. A IA não aprova pagamentos nem executa renovações.</p>
+              <div class="assistant-prompts">
+                <button class="prompt-chip" data-ai-prompt="Quais são as prioridades de hoje?">Prioridades de hoje</button>
+                <button class="prompt-chip" data-ai-prompt="Resuma as renovações com falha e o que devo verificar.">Falhas do BitPanel</button>
+                <button class="prompt-chip" data-ai-prompt="Como está a receita e a fila de cobranças deste mês?">Receita e cobranças</button>
+                <button class="prompt-chip" data-ai-prompt="Quais clientes vencem nos próximos 7 dias?">Vencimentos próximos</button>
+              </div>
+              <div class="ai-safety">
+                <strong>Limites de segurança</strong>
+                <span>Somente leitura e orientação. Segredos, senhas e tokens não entram no contexto da IA.</span>
+              </div>
+            </article>
+            <article class="panel assistant-chat">
+              <div class="panel-head">
+                <div><span class="eyebrow">CONVERSA</span><h3>Pergunte sobre sua operação</h3></div>
+                <span class="status-dot" id="assistantStatus">Verificando</span>
+              </div>
+              <div id="assistantMessages" class="chat-messages"></div>
+              <form id="assistantForm" class="chat-form">
+                <textarea id="assistantQuestion" rows="3" maxlength="2000" placeholder="Ex.: quais clientes precisam de atenção hoje?" required></textarea>
+                <button class="btn btn-primary" type="submit">Enviar pergunta</button>
+              </form>
+            </article>
+          </div>
         </section>
 
         <section class="page" data-page-panel="settings">
@@ -175,7 +228,9 @@
                 <label>Pagamento<select id="paymentMode"><option value="simulation">Simulação</option><option value="live">Real</option></select></label>
                 <label>WhatsApp<select id="whatsappMode"><option value="simulation">Simulação</option><option value="live">Real</option></select></label>
                 <label>BitPanel<select id="bitpanelMode"><option value="disabled">Desativado</option><option value="simulation">Simulação</option><option value="live">Real</option></select></label>
-                <label class="check-row"><input type="checkbox" id="renewalApproval" /> Exigir aprovação antes da renovação</label>
+                <label class="check-row"><input type="checkbox" id="automaticRenewal" /> Renovar automaticamente no BitPanel após pagamento confirmado</label>
+                <label class="check-row"><input type="checkbox" id="aiAdminEnabled" /> Ativar IA dentro do painel</label>
+                <label class="check-row"><input type="checkbox" id="aiWhatsappEnabled" /> Ativar respostas de IA para clientes no WhatsApp</label>
                 <button class="btn btn-primary" id="saveSettings">Salvar configurações</button>
               </div>
             </article>
@@ -217,6 +272,15 @@
                 <label>Conexões padrão<input name="BITPANEL_DEFAULT_CONNECTIONS" type="number" min="1" max="10" value="1" /></label>
                 <p class="hint">A sincronização importa todas as listas, mas só libera automação para o proprietário Gate One Pro Server.</p>
                 <div class="integration-actions"><button class="btn btn-secondary test-integration" type="button">Testar conexão</button><button class="btn btn-primary" type="submit">Salvar BitPanel</button></div>
+              </form>
+            </article>
+            <article class="panel integration-config">
+              <div class="panel-head"><div><span class="eyebrow">ASSISTENTE</span><h3>OpenAI</h3></div></div>
+              <form class="settings-form integration-form" data-provider="openai">
+                <label>Chave da API OpenAI<input name="OPENAI_API_KEY" type="password" autocomplete="off" placeholder="Deixe vazio para manter a atual" /></label>
+                <label>Modelo<input name="OPENAI_MODEL" value="gpt-5.6" /></label>
+                <p class="hint">A chave fica criptografada. A IA responde e analisa, mas não recebe permissão para confirmar pagamento ou executar renovação.</p>
+                <div class="integration-actions"><button class="btn btn-secondary test-integration" type="button">Testar conexão</button><button class="btn btn-primary" type="submit">Salvar OpenAI</button></div>
               </form>
             </article>
           </div>

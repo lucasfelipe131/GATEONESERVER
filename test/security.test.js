@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { hmacSha256, maskPhone, normalizePhone, safeEqual } from '../src/security.js';
+import {
+  hmacSha256,
+  maskPhone,
+  normalizePhone,
+  safeEqual,
+  sanitizeForLog
+} from '../src/security.js';
 import {
   createCheckoutPreference,
   getMercadoPagoReadiness,
@@ -21,6 +27,13 @@ test('comparação segura distingue assinaturas', () => {
   assert.equal(safeEqual('abc', 'abc'), true);
   assert.equal(safeEqual('abc', 'abd'), false);
   assert.equal(safeEqual('abc', 'abcd'), false);
+});
+
+test('remove chaves de API antes da auditoria', () => {
+  assert.deepEqual(
+    sanitizeForLog({ OPENAI_API_KEY: 'sk-secret', OPENAI_MODEL: 'gpt-5.6' }),
+    { OPENAI_API_KEY: '[PROTEGIDO]', OPENAI_MODEL: 'gpt-5.6' }
+  );
 });
 
 test('valida assinatura do webhook do Mercado Pago', () => {

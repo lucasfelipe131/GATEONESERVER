@@ -23,24 +23,28 @@ import {
 import { audit } from './audit.js';
 import { formatDate, formatMoney } from './domain/billing.js';
 import { getRuntimeConfig } from './integrations/runtime-config.js';
+import { answerCustomerQuestion } from './services/ai-support.js';
 
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL, { ssl: config.DATABASE_SSL });
 const redis = createRedis(config.REDIS_URL);
 
 async function effectiveConfig() {
-  const [paymentMode, whatsappMode, bitpanelMode, renewalApproval] = await Promise.all([
-    getSetting(db, 'payment_mode', config.PAYMENT_MODE),
-    getSetting(db, 'whatsapp_mode', config.WHATSAPP_MODE),
-    getSetting(db, 'bitpanel_mode', config.BITPANEL_MODE),
-    getSetting(db, 'renewal_requires_approval', config.RENEWAL_REQUIRES_APPROVAL)
-  ]);
+  const [paymentMode, whatsappMode, bitpanelMode, renewalApproval, aiWhatsAppEnabled] =
+    await Promise.all([
+      getSetting(db, 'payment_mode', config.PAYMENT_MODE),
+      getSetting(db, 'whatsapp_mode', config.WHATSAPP_MODE),
+      getSetting(db, 'bitpanel_mode', config.BITPANEL_MODE),
+      getSetting(db, 'renewal_requires_approval', config.RENEWAL_REQUIRES_APPROVAL),
+      getSetting(db, 'ai_whatsapp_enabled', config.AI_WHATSAPP_ENABLED)
+    ]);
   return {
     ...(await getRuntimeConfig(db, config)),
     PAYMENT_MODE: paymentMode,
     WHATSAPP_MODE: whatsappMode,
     BITPANEL_MODE: bitpanelMode,
-    RENEWAL_REQUIRES_APPROVAL: renewalApproval
+    RENEWAL_REQUIRES_APPROVAL: renewalApproval,
+    AI_WHATSAPP_ENABLED: aiWhatsAppEnabled
   };
 }
 
@@ -108,6 +112,45 @@ async function processMessage(job) {
        VALUES ($1, 'outbound', 'Menu de planos', $2, $3, $4)`,
       [
         job.data.customerId,
+        response.messages?.[0]?.id,
+        response.simulated ? 'simulated' : 'sent',
+        response.simulated
+      ]
+    );
+    return response;
+  }
+
+  if (job.name === 'send-ai-reply') {
+    if (!runtimeConfig.AI_WHATSAPP_ENABLED) {
+      throw new Error('IA do WhatsApp desativada pelo administrador.');
+    }
+    let text;
+    try {
+      const answer = await answerCustomerQuestion({
+        db,
+        config: runtimeConfig,
+        customerId: job.data.customerId,
+        question: job.data.question
+      });
+      text = answer.text;
+    } catch (error) {
+      text =
+        'Não consegui consultar a ajuda automática agora. Digite ATENDENTE para falar com o suporte.';
+      await audit(db, {
+        action: 'ai.customer_answer_failed',
+        entityType: 'customer',
+        entityId: job.data.customerId,
+        after: { error: error.message }
+      });
+    }
+    const response = await sendText(runtimeConfig, job.data.to, text);
+    await db.query(
+      `INSERT INTO message_logs
+        (customer_id, direction, content, provider_id, status, simulated)
+       VALUES ($1, 'outbound', $2, $3, $4, $5)`,
+      [
+        job.data.customerId,
+        text,
         response.messages?.[0]?.id,
         response.simulated ? 'simulated' : 'sent',
         response.simulated
@@ -186,7 +229,7 @@ async function processRenewal(job) {
   const paused = await getSetting(db, 'global_pause', config.GLOBAL_PAUSE);
   if (paused) throw new Error('Automações pausadas pelo administrador.');
   const result = await db.query(
-    `SELECT r.*, ch.stage AS charge_stage,
+    `SELECT r.*, ch.stage AS charge_stage, ch.status AS charge_status,
             s.expires_on::text AS current_expiry, s.bitpanel_list_id,
             c.name AS customer_name, c.bitpanel_reference, c.id AS customer_id,
             c.whatsapp_e164, c.bitpanel_owner, c.automation_eligible,
@@ -201,6 +244,9 @@ async function processRenewal(job) {
   );
   const renewal = result.rows[0];
   if (!renewal) throw new Error('Renovação não encontrada.');
+  if (renewal.charge_status !== 'paid') {
+    throw new Error('Pagamento não confirmado. Renovação bloqueada.');
+  }
   if (!renewal.approved_at && runtimeConfig.RENEWAL_REQUIRES_APPROVAL) {
     throw new Error('Renovação não aprovada. Execução bloqueada.');
   }

@@ -34,7 +34,9 @@ import {
   saveIntegrationCredentials
 } from './integrations/runtime-config.js';
 import { fetchBitPanelCustomers, testBitPanelConnection } from './integrations/bitpanel.js';
+import { testOpenAIConnection } from './integrations/openai.js';
 import { parseCustomerSpreadsheet } from './importers/spreadsheet.js';
+import { answerAdminQuestion } from './services/ai-support.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -50,6 +52,7 @@ const app = Fastify({
       'res.headers.set-cookie',
       '*.password',
       '*.token',
+      '*.OPENAI_API_KEY',
       '*.pix_copy_paste'
     ]
   },
@@ -127,12 +130,35 @@ function requireQueues(reply) {
 
 async function maybeQueueBitPanelJob(renewalId, approvedBy = null) {
   if (!queues || !renewalId) return { queued: false, reason: 'queue_unavailable' };
-  const [paused, requiresApproval] = await Promise.all([
+  const [paused, requiresApproval, bitpanelMode, eligibility] = await Promise.all([
     getSetting(db, 'global_pause', config.GLOBAL_PAUSE),
-    getSetting(db, 'renewal_requires_approval', config.RENEWAL_REQUIRES_APPROVAL)
+    getSetting(db, 'renewal_requires_approval', config.RENEWAL_REQUIRES_APPROVAL),
+    getSetting(db, 'bitpanel_mode', config.BITPANEL_MODE),
+    db.query(
+      `SELECT ch.status AS charge_status, ch.stage, s.bitpanel_list_id,
+              c.bitpanel_owner, c.automation_eligible
+         FROM renewal_jobs r
+         JOIN charges ch ON ch.id = r.charge_id
+         JOIN subscriptions s ON s.id = ch.subscription_id
+         JOIN customers c ON c.id = s.customer_id
+        WHERE r.id = $1`,
+      [renewalId]
+    )
   ]);
   if (paused) return { queued: false, reason: 'global_pause' };
   if (requiresApproval) return { queued: false, reason: 'approval_required' };
+  if (bitpanelMode !== 'live') return { queued: false, reason: 'bitpanel_not_live' };
+  const target = eligibility.rows[0];
+  if (!target || target.charge_status !== 'paid') {
+    return { queued: false, reason: 'payment_not_confirmed' };
+  }
+  const isProvision = target.stage === 'new_sale' || !target.bitpanel_list_id;
+  if (
+    !isProvision &&
+    (!target.automation_eligible || target.bitpanel_owner !== 'Gate One Pro Server')
+  ) {
+    return { queued: false, reason: 'customer_not_eligible' };
+  }
 
   const result = await db.query(
     `UPDATE renewal_jobs
@@ -465,6 +491,97 @@ app.get('/api/admin/summary', { preHandler: requireAuth }, async () => {
       paymentMode: settings[1],
       whatsappMode: settings[2],
       bitpanelMode: settings[3]
+    }
+  };
+});
+
+app.get('/api/admin/analytics', { preHandler: requireAuth }, async () => {
+  const [
+    revenueTrend,
+    chargeStatus,
+    customerStatus,
+    renewalStatus,
+    expirations,
+    automation,
+    settings
+  ] = await Promise.all([
+    db.query(
+      `WITH months AS (
+         SELECT generate_series(
+           date_trunc('month', now()) - interval '5 months',
+           date_trunc('month', now()),
+           interval '1 month'
+         ) AS month
+       )
+       SELECT to_char(months.month, 'YYYY-MM') AS month,
+              COALESCE(sum(ch.amount_cents), 0)::int AS cents
+         FROM months
+         LEFT JOIN charges ch
+           ON ch.status = 'paid'
+          AND ch.paid_at >= months.month
+          AND ch.paid_at < months.month + interval '1 month'
+        GROUP BY months.month
+        ORDER BY months.month`
+    ),
+    db.query(
+      `SELECT status, count(*)::int AS total
+         FROM charges
+        GROUP BY status ORDER BY total DESC`
+    ),
+    db.query(
+      `SELECT status, count(*)::int AS total
+         FROM customers
+        GROUP BY status ORDER BY total DESC`
+    ),
+    db.query(
+      `SELECT status, count(*)::int AS total
+         FROM renewal_jobs
+        GROUP BY status ORDER BY total DESC`
+    ),
+    db.query(
+      `SELECT
+         count(*) FILTER (WHERE expires_on < CURRENT_DATE)::int AS overdue,
+         count(*) FILTER (WHERE expires_on BETWEEN CURRENT_DATE AND CURRENT_DATE + 7)::int AS next7,
+         count(*) FILTER (WHERE expires_on BETWEEN CURRENT_DATE + 8 AND CURRENT_DATE + 15)::int AS next15,
+         count(*) FILTER (WHERE expires_on BETWEEN CURRENT_DATE + 16 AND CURRENT_DATE + 30)::int AS next30
+       FROM subscriptions
+       WHERE status IN ('active', 'late')`
+    ),
+    db.query(
+      `SELECT
+         count(*) FILTER (
+           WHERE status = 'completed' AND updated_at >= now() - interval '30 days'
+         )::int AS completed_30d,
+         count(*) FILTER (
+           WHERE status IN ('failed', 'manual_review') AND updated_at >= now() - interval '30 days'
+         )::int AS failed_30d,
+         max(updated_at) FILTER (WHERE status = 'completed') AS last_completed_at,
+         max(updated_at) FILTER (WHERE status IN ('failed', 'manual_review')) AS last_failed_at
+       FROM renewal_jobs`
+    ),
+    Promise.all([
+      getSetting(db, 'global_pause', config.GLOBAL_PAUSE),
+      getSetting(db, 'payment_mode', config.PAYMENT_MODE),
+      getSetting(db, 'bitpanel_mode', config.BITPANEL_MODE),
+      getSetting(db, 'renewal_requires_approval', config.RENEWAL_REQUIRES_APPROVAL)
+    ])
+  ]);
+  const completed = automation.rows[0].completed_30d;
+  const failed = automation.rows[0].failed_30d;
+  return {
+    revenueTrend: revenueTrend.rows,
+    chargeStatus: chargeStatus.rows,
+    customerStatus: customerStatus.rows,
+    renewalStatus: renewalStatus.rows,
+    expirations: expirations.rows[0],
+    automation: {
+      ...automation.rows[0],
+      successRate30d: completed + failed ? Math.round((completed / (completed + failed)) * 100) : null,
+      active:
+        !settings[0] &&
+        settings[1] === 'live' &&
+        settings[2] === 'live' &&
+        settings[3] === false
     }
   };
 });
@@ -1054,13 +1171,21 @@ app.get('/api/admin/renewals', { preHandler: requireAuth }, async () => {
 app.post('/api/admin/renewals/:id/approve', { preHandler: requireAuth }, async (request, reply) => {
   if (!requireQueues(reply)) return;
   const result = await db.query(
-    `UPDATE renewal_jobs
+    `UPDATE renewal_jobs r
         SET status = 'queued', approved_by = $2, approved_at = now(), error = NULL, updated_at = now()
-      WHERE id = $1 AND status IN ('awaiting_approval', 'manual_review', 'simulated')
-      RETURNING id`,
+       FROM charges ch
+      WHERE r.id = $1
+        AND ch.id = r.charge_id
+        AND ch.status = 'paid'
+        AND r.status IN ('awaiting_approval', 'manual_review', 'simulated')
+      RETURNING r.id`,
     [request.params.id, request.user.id]
   );
-  if (!result.rows[0]) return reply.code(409).send({ error: 'Renovação não pode ser executada.' });
+  if (!result.rows[0]) {
+    return reply.code(409).send({
+      error: 'Renovação não pode ser executada sem pagamento confirmado.'
+    });
+  }
   await queues.renewals.add(
     'execute-renewal',
     { renewalId: result.rows[0].id },
@@ -1100,7 +1225,9 @@ app.get('/api/admin/settings', { preHandler: requireAuth }, async () => {
     'payment_mode',
     'whatsapp_mode',
     'bitpanel_mode',
-    'renewal_requires_approval'
+    'renewal_requires_approval',
+    'ai_admin_enabled',
+    'ai_whatsapp_enabled'
   ];
   const values = Object.fromEntries(
     await Promise.all(keys.map(async (key) => [key, await getSetting(db, key, null)]))
@@ -1113,7 +1240,8 @@ app.get('/api/admin/settings', { preHandler: requireAuth }, async () => {
       redis: Boolean(config.REDIS_URL),
       mercadoPago: mercadoPago.ready,
       whatsapp: status.configured.whatsapp,
-      bitpanel: status.configured.bitpanel
+      bitpanel: status.configured.bitpanel,
+      openai: status.configured.openai
     },
     mercadoPago
   };
@@ -1127,17 +1255,65 @@ app.put('/api/admin/settings', { preHandler: requireAuth }, async (request) => {
       payment_mode: z.enum(['simulation', 'live']).optional(),
       whatsapp_mode: z.enum(['simulation', 'live']).optional(),
       bitpanel_mode: z.enum(['disabled', 'simulation', 'live']).optional(),
-      renewal_requires_approval: z.boolean().optional()
+      renewal_requires_approval: z.boolean().optional(),
+      ai_admin_enabled: z.boolean().optional(),
+      ai_whatsapp_enabled: z.boolean().optional()
     }),
     request.body
   );
   const runtimeConfig = await getRuntimeConfig(db, config);
+  const [currentPaymentMode, currentBitPanelMode] = await Promise.all([
+    getSetting(db, 'payment_mode', config.PAYMENT_MODE),
+    getSetting(db, 'bitpanel_mode', config.BITPANEL_MODE)
+  ]);
   if (body.payment_mode === 'live' && !getMercadoPagoReadiness(runtimeConfig).ready) {
     const error = new Error(
       'Configure o Access Token de produção, o segredo e o webhook do Mercado Pago antes do modo real.'
     );
     error.statusCode = 409;
     throw error;
+  }
+  if (
+    body.renewal_requires_approval === false &&
+    (body.payment_mode || currentPaymentMode) !== 'live'
+  ) {
+    throw Object.assign(
+      new Error('Ative o pagamento real antes da renovação automática.'),
+      { statusCode: 409 }
+    );
+  }
+  if (
+    body.renewal_requires_approval === false &&
+    (body.bitpanel_mode || currentBitPanelMode) !== 'live'
+  ) {
+    throw Object.assign(
+      new Error('Ative o BitPanel real antes da renovação automática.'),
+      { statusCode: 409 }
+    );
+  }
+  if (
+    body.renewal_requires_approval === false &&
+    (!runtimeConfig.BITPANEL_USERNAME || !runtimeConfig.BITPANEL_PASSWORD)
+  ) {
+    throw Object.assign(
+      new Error('Configure e teste o BitPanel antes da renovação automática.'),
+      { statusCode: 409 }
+    );
+  }
+  if ((body.ai_admin_enabled || body.ai_whatsapp_enabled) && !runtimeConfig.OPENAI_API_KEY) {
+    throw Object.assign(
+      new Error('Configure a chave da OpenAI antes de ativar a ajuda de IA.'),
+      { statusCode: 409 }
+    );
+  }
+  if (
+    body.ai_whatsapp_enabled &&
+    (!runtimeConfig.WHATSAPP_ACCESS_TOKEN || !runtimeConfig.WHATSAPP_PHONE_NUMBER_ID)
+  ) {
+    throw Object.assign(
+      new Error('Configure o WhatsApp Cloud API antes de ativar a IA para clientes.'),
+      { statusCode: 409 }
+    );
   }
   if (
     body.whatsapp_mode === 'live' &&
@@ -1173,7 +1349,10 @@ app.put('/api/admin/settings', { preHandler: requireAuth }, async (request) => {
 });
 
 app.put('/api/admin/integrations/:provider', { preHandler: requireAuth }, async (request) => {
-  const provider = parse(z.enum(['mercadopago', 'whatsapp', 'bitpanel']), request.params.provider);
+  const provider = parse(
+    z.enum(['mercadopago', 'whatsapp', 'bitpanel', 'openai']),
+    request.params.provider
+  );
   const body = parse(z.record(z.string(), z.union([z.string(), z.number()])), request.body || {});
   await saveIntegrationCredentials(db, config, provider, body, request.user.id);
   await audit(db, {
@@ -1189,9 +1368,13 @@ app.put('/api/admin/integrations/:provider', { preHandler: requireAuth }, async 
 });
 
 app.post('/api/admin/integrations/:provider/test', { preHandler: requireAuth }, async (request) => {
-  const provider = parse(z.enum(['mercadopago', 'whatsapp', 'bitpanel']), request.params.provider);
+  const provider = parse(
+    z.enum(['mercadopago', 'whatsapp', 'bitpanel', 'openai']),
+    request.params.provider
+  );
   const runtimeConfig = await getRuntimeConfig(db, config);
   if (provider === 'bitpanel') return testBitPanelConnection(runtimeConfig);
+  if (provider === 'openai') return testOpenAIConnection(runtimeConfig);
   if (provider === 'mercadopago') {
     if (!getMercadoPagoReadiness(runtimeConfig).ready) {
       throw Object.assign(new Error('Complete as credenciais do Mercado Pago.'), { statusCode: 409 });
@@ -1224,6 +1407,54 @@ app.post('/api/admin/integrations/:provider/test', { preHandler: requireAuth }, 
   }
   return { ok: true, message: 'WhatsApp Cloud API conectado.' };
 });
+
+app.get('/api/admin/ai/history', { preHandler: requireAuth }, async (request) => {
+  const result = await db.query(
+    `SELECT id, role, content, model, created_at
+       FROM ai_messages
+      WHERE audience = 'admin' AND actor_id = $1
+      ORDER BY created_at DESC
+      LIMIT 30`,
+    [String(request.user.id)]
+  );
+  return { messages: result.rows.reverse() };
+});
+
+app.post(
+  '/api/admin/ai/chat',
+  {
+    preHandler: requireAuth,
+    config: { rateLimit: { max: 20, timeWindow: '1 minute' } }
+  },
+  async (request) => {
+    const body = parse(
+      z.object({ question: z.string().trim().min(2).max(2000) }),
+      request.body
+    );
+    const enabled = await getSetting(db, 'ai_admin_enabled', config.AI_ADMIN_ENABLED);
+    if (!enabled) {
+      throw Object.assign(new Error('A IA do administrador está desativada.'), {
+        statusCode: 409
+      });
+    }
+    const runtimeConfig = await getRuntimeConfig(db, config);
+    const answer = await answerAdminQuestion({
+      db,
+      config: runtimeConfig,
+      user: request.user,
+      question: body.question
+    });
+    await audit(db, {
+      actorType: 'user',
+      actorId: request.user.id,
+      action: 'ai.admin_question_answered',
+      entityType: 'ai_message',
+      entityId: answer.id,
+      ip: request.ip
+    });
+    return { answer: answer.text, model: answer.model };
+  }
+);
 
 app.post(
   '/api/admin/integrations/mercadopago/activate',
