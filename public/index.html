@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#07172f" />
+    <title>Gate One Pro — Central de Controle</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <section class="login-shell" id="loginShell">
+      <div class="login-visual">
+        <div class="brand brand-large">
+          <span class="brand-mark">G1</span>
+          <span><strong>Gate One Pro</strong><small>Server Ecosystem</small></span>
+        </div>
+        <div class="login-copy">
+          <span class="eyebrow">OPERAÇÃO CENTRALIZADA</span>
+          <h1>Vendas e renovações em um fluxo que você controla.</h1>
+          <p>Clientes, Pix, WhatsApp, fidelidade e BitPanel organizados em uma única central.</p>
+        </div>
+        <div class="signal-card">
+          <span class="pulse"></span>
+          <div><strong>Modo seguro ativo</strong><small>Integrações liberadas por etapas</small></div>
+        </div>
+      </div>
+      <form class="login-card" id="loginForm">
+        <div>
+          <span class="eyebrow">ACESSO ADMINISTRATIVO</span>
+          <h2>Bem-vindo de volta</h2>
+          <p>Entre com o administrador configurado na Railway.</p>
+        </div>
+        <label>E-mail<input name="email" type="email" autocomplete="username" required /></label>
+        <label>Senha<input name="password" type="password" autocomplete="current-password" required /></label>
+        <button class="btn btn-primary btn-block" type="submit">Entrar no painel</button>
+        <p class="form-error" id="loginError"></p>
+      </form>
+    </section>
+
+    <div class="app-shell hidden" id="appShell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <span class="brand-mark">G1</span>
+          <span><strong>Gate One Pro</strong><small>Server Ecosystem</small></span>
+        </div>
+        <nav>
+          <button class="nav-item active" data-page="dashboard"><span>◫</span> Visão geral</button>
+          <button class="nav-item" data-page="customers"><span>◎</span> Clientes</button>
+          <button class="nav-item" data-page="charges"><span>◇</span> Cobranças</button>
+          <button class="nav-item" data-page="renewals"><span>↻</span> Renovações</button>
+          <button class="nav-item" data-page="leads"><span>⌁</span> Captação</button>
+          <button class="nav-item" data-page="settings"><span>⚙</span> Configurações</button>
+        </nav>
+        <div class="sidebar-foot">
+          <a class="side-link" href="/captacao" target="_blank">Abrir página de vendas ↗</a>
+          <button class="side-link" id="logoutButton">Sair</button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <button class="menu-button" id="menuButton" aria-label="Abrir menu">☰</button>
+          <div>
+            <span class="eyebrow" id="pageEyebrow">CENTRAL DE CONTROLE</span>
+            <h1 id="pageTitle">Visão geral</h1>
+          </div>
+          <div class="topbar-actions">
+            <div class="safety-badge" id="safetyBadge"><span></span> Carregando</div>
+            <div class="avatar" id="avatar">L</div>
+          </div>
+        </header>
+
+        <section class="page active" data-page-panel="dashboard">
+          <div class="hero">
+            <div>
+              <span class="eyebrow">GATE ONE PRO SERVER</span>
+              <h2>Bom dia, <span id="adminName">Lucas</span>.</h2>
+              <p>Acompanhe o que exige sua atenção antes que qualquer ação chegue ao cliente.</p>
+            </div>
+            <button class="btn btn-light" id="scanButton">↻ Verificar vencimentos</button>
+          </div>
+          <div class="metrics" id="metrics"></div>
+          <div class="grid-two">
+            <article class="panel">
+              <div class="panel-head">
+                <div><span class="eyebrow">FILA PRIORITÁRIA</span><h3>Cobranças para revisar</h3></div>
+                <button class="text-button" data-go="charges">Ver todas →</button>
+              </div>
+              <div id="dashboardCharges" class="stack"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <div><span class="eyebrow">ECOSSISTEMA</span><h3>Status das integrações</h3></div>
+              </div>
+              <div id="integrationStatus" class="integration-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="page" data-page-panel="customers">
+          <div class="section-actions">
+            <div class="search"><span>⌕</span><input id="customerSearch" placeholder="Buscar nome ou WhatsApp" /></div>
+            <button class="btn btn-secondary" id="importButton">Importar JSON</button>
+            <button class="btn btn-primary" id="newCustomerButton">+ Novo cliente</button>
+          </div>
+          <article class="panel table-panel">
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Cliente</th><th>Plano</th><th>Vencimento</th><th>BitPanel</th><th>Status</th></tr></thead>
+                <tbody id="customersTable"></tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+
+        <section class="page" data-page-panel="charges">
+          <div class="section-actions">
+            <div class="filter-pills" id="chargeFilters">
+              <button class="pill active" data-status="">Todas</button>
+              <button class="pill" data-status="awaiting_approval">Para aprovar</button>
+              <button class="pill" data-status="sent">Enviadas</button>
+              <button class="pill" data-status="paid">Pagas</button>
+            </div>
+          </div>
+          <div id="chargesList" class="cards-grid"></div>
+        </section>
+
+        <section class="page" data-page-panel="renewals">
+          <div class="notice">
+            <span>🛡</span>
+            <div><strong>Barreira de segurança</strong><p>O robô só executa uma renovação depois da confirmação do pagamento e da sua aprovação.</p></div>
+          </div>
+          <div id="renewalsList" class="cards-grid"></div>
+        </section>
+
+        <section class="page" data-page-panel="leads">
+          <div class="section-actions">
+            <div>
+              <h2>Funil de novos clientes</h2>
+              <p class="muted">Cadastros da página de vendas e conversas iniciadas no WhatsApp.</p>
+            </div>
+            <a class="btn btn-primary" href="/captacao" target="_blank">Abrir página de captação ↗</a>
+          </div>
+          <article class="panel table-panel">
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Lead</th><th>Origem</th><th>Plano desejado</th><th>Etapa</th><th>Entrada</th></tr></thead>
+                <tbody id="leadsTable"></tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+
+        <section class="page" data-page-panel="settings">
+          <div class="settings-grid">
+            <article class="panel danger-panel">
+              <div>
+                <span class="eyebrow">CONTROLE MESTRE</span>
+                <h3>Pausa global</h3>
+                <p>Interrompe mensagens, cobranças e renovações imediatamente.</p>
+              </div>
+              <label class="switch"><input type="checkbox" id="globalPause" /><span></span></label>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><div><span class="eyebrow">MODOS DE OPERAÇÃO</span><h3>Liberação por etapas</h3></div></div>
+              <div class="settings-form">
+                <label>Vendas<select id="salesMode"><option value="simulation">Simulação</option><option value="approval">Com aprovação</option><option value="automatic">Automática</option></select></label>
+                <label>Pagamento<select id="paymentMode"><option value="simulation">Simulação</option><option value="live">Real</option></select></label>
+                <label>WhatsApp<select id="whatsappMode"><option value="simulation">Simulação</option><option value="live">Real</option></select></label>
+                <label>BitPanel<select id="bitpanelMode"><option value="disabled">Desativado</option><option value="simulation">Simulação</option><option value="live">Real</option></select></label>
+                <label class="check-row"><input type="checkbox" id="renewalApproval" /> Exigir aprovação antes da renovação</label>
+                <button class="btn btn-primary" id="saveSettings">Salvar configurações</button>
+              </div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><div><span class="eyebrow">CREDENCIAIS</span><h3>Prontidão das integrações</h3></div></div>
+              <div id="settingsIntegrations" class="integration-list"></div>
+              <p class="hint">As credenciais são configuradas como variáveis privadas na Railway e nunca aparecem nesta tela.</p>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="customerDialog">
+      <form method="dialog" class="dialog-form" id="customerForm">
+        <div class="dialog-head"><div><span class="eyebrow">CADASTRO</span><h2>Novo cliente</h2></div><button class="icon-button" value="cancel">×</button></div>
+        <div class="form-grid">
+          <label class="full">Nome<input name="name" required /></label>
+          <label>WhatsApp<input name="whatsapp" placeholder="55 55 99999-9999" required /></label>
+          <label>Plano<select name="planCode"><option value="monthly">Mensal — R$ 30</option><option value="quarterly">Trimestral — R$ 80</option></select></label>
+          <label>Vencimento<input name="expiresOn" type="date" required /></label>
+          <label>ID da lista BitPanel<input name="bitpanelListId" /></label>
+          <label class="full">Referência/usuário no BitPanel<input name="bitpanelReference" /></label>
+          <label class="check-row full"><input name="consentContact" type="checkbox" checked /> Cliente autorizou contato pelo WhatsApp</label>
+        </div>
+        <p class="form-error" id="customerError"></p>
+        <div class="dialog-actions"><button class="btn btn-secondary" value="cancel">Cancelar</button><button class="btn btn-primary" type="submit" value="default">Salvar cliente</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="importDialog">
+      <form method="dialog" class="dialog-form" id="importForm">
+        <div class="dialog-head"><div><span class="eyebrow">IMPORTAÇÃO</span><h2>Importar clientes.json</h2></div><button class="icon-button" value="cancel">×</button></div>
+        <p class="muted">Cole o conteúdo do arquivo. Os campos aceitos estão no exemplo abaixo.</p>
+        <textarea id="importJson" rows="14">[
+  {
+    "name": "Nome do cliente",
+    "whatsapp": "5555999999999",
+    "plan": "monthly",
+    "expiresOn": "2026-08-25",
+    "bitpanelListId": "3353378",
+    "bitpanelReference": "usuario",
+    "consentContact": true
+  }
+]</textarea>
+        <p class="form-error" id="importError"></p>
+        <div class="dialog-actions"><button class="btn btn-secondary" value="cancel">Cancelar</button><button class="btn btn-primary" type="submit" value="default">Importar</button></div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

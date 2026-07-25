@@ -1,0 +1,34 @@
+{
+  "name": "gate-one-pro-railway",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ecossistema de vendas, cobranças, fidelidade e renovações do Gate One Pro Server",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "worker": "node src/worker.js",
+    "migrate": "node src/migrate.js",
+    "seed": "node src/seed.js",
+    "test": "node --test",
+    "check": "node --check src/server.js && node --check src/worker.js && node --check public/app.js"
+  },
+  "dependencies": {
+    "@fastify/cookie": "11.1.2",
+    "@fastify/helmet": "13.1.0",
+    "@fastify/rate-limit": "11.1.0",
+    "@fastify/static": "10.1.2",
+    "bcryptjs": "3.0.3",
+    "bullmq": "5.81.2",
+    "cron": "4.4.0",
+    "fastify": "5.10.0",
+    "fastify-raw-body": "5.0.0",
+    "ioredis": "5.11.1",
+    "pg": "8.22.0",
+    "playwright": "1.62.0",
+    "qrcode": "1.5.4",
+    "zod": "4.4.3"
+  }
+}

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#07172f" />
+    <title>Gate One Pro Server</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="landing">
+    <nav class="landing-nav">
+      <div class="brand"><span class="brand-mark">G1</span><span><strong>Gate One Pro</strong><small>Server Ecosystem</small></span></div>
+      <a class="btn btn-primary" href="#quero">Quero conhecer</a>
+    </nav>
+    <section class="landing-hero">
+      <span class="eyebrow">ENTRETENIMENTO COM ATENDIMENTO DE VERDADE</span>
+      <h1>Seu acesso, seus planos, tudo mais simples.</h1>
+      <p>Escolha o ciclo ideal e fale diretamente com nossa equipe pelo WhatsApp.</p>
+    </section>
+    <section class="plan-section">
+      <article class="plan-card">
+        <span class="eyebrow">FLEXIBILIDADE</span>
+        <h2>Plano Mensal</h2>
+        <div class="price">R$ 30 <small>/ mês</small></div>
+        <div class="benefits"><span>✓ Renovação simples</span><span>✓ Atendimento pelo WhatsApp</span><span>✓ Pontos no Gate Club</span></div>
+        <button class="btn btn-secondary btn-block choose-plan" data-plan="monthly">Escolher mensal</button>
+      </article>
+      <article class="plan-card featured">
+        <span class="eyebrow">MAIS VANTAJOSO</span>
+        <h2>Plano Trimestral</h2>
+        <div class="price">R$ 80 <small>/ 3 meses</small></div>
+        <div class="benefits"><span>✓ Economia no ciclo</span><span>✓ Atendimento pelo WhatsApp</span><span>✓ Mais pontos no Gate Club</span></div>
+        <button class="btn btn-primary btn-block choose-plan" data-plan="quarterly">Escolher trimestral</button>
+      </article>
+    </section>
+    <section class="lead-section" id="quero">
+      <span class="eyebrow">COMECE AGORA</span>
+      <h2>Receba o atendimento no WhatsApp</h2>
+      <p class="muted">Preencha seus dados e continue a conversa com o Gate One Pro.</p>
+      <form class="lead-form" id="leadForm">
+        <label>Nome<input name="name" required /></label>
+        <label>WhatsApp com DDD<input name="whatsapp" placeholder="(55) 99999-9999" required /></label>
+        <label>Plano<select name="desiredPlan"><option value="monthly">Mensal — R$ 30</option><option value="quarterly">Trimestral — R$ 80</option></select></label>
+        <label class="check-row"><input name="consent" type="checkbox" required /> Aceito receber o atendimento solicitado pelo WhatsApp.</label>
+        <button class="btn btn-primary btn-block" type="submit">Solicitar atendimento</button>
+        <p class="form-error" id="leadMessage"></p>
+      </form>
+    </section>
+    <script src="/landing.js" type="module"></script>
+  </body>
+</html>

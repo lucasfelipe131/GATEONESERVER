@@ -1,0 +1,59 @@
+{
+  "description": "Exemplo seguro. Os seletores reais serão preenchidos após mapear a tela de renovação.",
+  "steps": [
+    {
+      "type": "goto",
+      "url": "{{loginUrl}}"
+    },
+    {
+      "type": "fill",
+      "selector": "input[name='email']",
+      "value": "{{username}}"
+    },
+    {
+      "type": "fill",
+      "selector": "input[name='password']",
+      "value": "{{password}}"
+    },
+    {
+      "type": "click",
+      "selector": "button[type='submit']"
+    },
+    {
+      "type": "goto",
+      "url": "{{baseUrl}}/list/view/{{listId}}"
+    },
+    {
+      "type": "captureText",
+      "selector": "[data-field='expiry']",
+      "saveAs": "beforeExpiry"
+    },
+    {
+      "type": "screenshot",
+      "name": "antes"
+    },
+    {
+      "type": "click",
+      "selector": "[data-action='renew']"
+    },
+    {
+      "type": "select",
+      "selector": "select[name='months']",
+      "value": "{{durationMonths}}"
+    },
+    {
+      "type": "click",
+      "selector": "button[data-action='confirm-renewal']"
+    },
+    {
+      "type": "captureText",
+      "selector": "[data-field='expiry']",
+      "saveAs": "afterExpiry"
+    },
+    {
+      "type": "assertChanged",
+      "before": "beforeExpiry",
+      "after": "afterExpiry"
+    }
+  ]
+}
