@@ -365,7 +365,10 @@ app.get('/api/admin/customers', { preHandler: requireAuth }, async (request) => 
           ORDER BY created_at DESC LIMIT 1
        ) s ON true
        LEFT JOIN plans p ON p.id = s.plan_id
-      WHERE ($1 = '' OR c.name ILIKE '%' || $1 || '%' OR c.whatsapp_e164 LIKE '%' || $1 || '%')
+      WHERE ($1 = '' OR COALESCE(c.name, '') ILIKE '%' || $1 || '%'
+         OR COALESCE(c.whatsapp_e164, '') LIKE '%' || $1 || '%'
+         OR COALESCE(c.bitpanel_reference, '') ILIKE '%' || $1 || '%'
+         OR COALESCE(s.bitpanel_list_id, '') LIKE '%' || $1 || '%')
       ORDER BY COALESCE(s.expires_on, CURRENT_DATE + 9999), c.name
       LIMIT 300`,
     [search]
@@ -373,6 +376,87 @@ app.get('/api/admin/customers', { preHandler: requireAuth }, async (request) => 
   return {
     customers: result.rows.map((row) => ({ ...row, whatsapp_masked: maskPhone(row.whatsapp_e164) }))
   };
+});
+
+app.post('/api/admin/customers/import-bitpanel', { preHandler: requireAuth }, async (request) => {
+  const body = parse(
+    z.object({
+      customers: z.array(z.object({
+        bitpanelListId: z.string().min(1).max(100),
+        bitpanelReference: z.string().min(1).max(120),
+        expiresOn: z.iso.date(),
+        status: z.enum(['active', 'late', 'suspended', 'cancelled']).default('active'),
+        owner: z.string().max(120).optional()
+      })).min(1).max(2000)
+    }),
+    request.body
+  );
+
+  const stats = { imported: 0, updated: 0, errors: [] };
+  for (const [index, item] of body.customers.entries()) {
+    try {
+      await db.transaction(async (client) => {
+        const existing = await client.query(
+          `SELECT c.id AS customer_id, s.id AS subscription_id
+             FROM subscriptions s
+             JOIN customers c ON c.id = s.customer_id
+            WHERE s.bitpanel_list_id = $1
+            ORDER BY s.created_at DESC LIMIT 1`,
+          [item.bitpanelListId]
+        );
+        const plan = await client.query("SELECT id FROM plans WHERE code = 'monthly'");
+        if (!plan.rows[0]) throw new Error('Plano mensal não encontrado.');
+
+        if (existing.rows[0]) {
+          await client.query(
+            `UPDATE customers
+                SET bitpanel_reference = $2, source = 'bitpanel',
+                    status = $3, updated_at = now()
+              WHERE id = $1`,
+            [existing.rows[0].customer_id, item.bitpanelReference, item.status]
+          );
+          await client.query(
+            `UPDATE subscriptions
+                SET expires_on = $2, status = $3, updated_at = now()
+              WHERE id = $1`,
+            [existing.rows[0].subscription_id, item.expiresOn, item.status]
+          );
+          stats.updated += 1;
+          return;
+        }
+
+        const customer = await client.query(
+          `INSERT INTO customers
+            (name, whatsapp_e164, bitpanel_reference, source, status, consent_contact)
+           VALUES (NULL, NULL, $1, 'bitpanel', $2, false)
+           RETURNING id`,
+          [item.bitpanelReference, item.status]
+        );
+        await client.query(
+          `INSERT INTO subscriptions
+            (customer_id, plan_id, starts_on, expires_on, status, bitpanel_list_id)
+           VALUES ($1, $2, CURRENT_DATE, $3, $4, $5)`,
+          [customer.rows[0].id, plan.rows[0].id, item.expiresOn, item.status, item.bitpanelListId]
+        );
+        stats.imported += 1;
+      });
+    } catch (error) {
+      stats.errors.push({
+        row: index + 1,
+        bitpanelListId: item.bitpanelListId,
+        error: error.message
+      });
+    }
+  }
+  await audit(db, {
+    actorType: 'user',
+    actorId: request.user.id,
+    action: 'customer.bitpanel_imported',
+    entityType: 'customer',
+    after: { imported: stats.imported, updated: stats.updated, errorCount: stats.errors.length },
+    ip: request.ip
+  });
+  return stats;
 });
 
 app.post('/api/admin/customers', { preHandler: requireAuth }, async (request, reply) => {
@@ -457,8 +541,8 @@ app.post('/api/admin/customers/import', { preHandler: requireAuth }, async (requ
       customers: z
         .array(
           z.object({
-            name: z.string().min(2).max(120),
-            whatsapp: z.string().min(10).max(30),
+            name: z.string().min(2).max(120).optional(),
+            whatsapp: z.string().min(10).max(30).optional(),
             plan: z.enum(['monthly', 'quarterly', 'mensal', 'trimestral']),
             expiresOn: z.iso.date(),
             bitpanelListId: z.string().max(100).optional(),
@@ -475,23 +559,48 @@ app.post('/api/admin/customers/import', { preHandler: requireAuth }, async (requ
   const stats = { imported: 0, errors: [] };
   for (const [index, item] of body.customers.entries()) {
     try {
-      const phone = normalizePhone(item.whatsapp);
+      if (!item.whatsapp && !item.bitpanelListId) {
+        throw new Error('Informe o WhatsApp ou o ID da lista BitPanel.');
+      }
+      const phone = item.whatsapp ? normalizePhone(item.whatsapp) : null;
       const planCode = item.plan === 'mensal' ? 'monthly' : item.plan === 'trimestral' ? 'quarterly' : item.plan;
       await db.transaction(async (client) => {
         const plan = await client.query('SELECT id FROM plans WHERE code = $1', [planCode]);
-        const customer = await client.query(
-          `INSERT INTO customers
-            (name, whatsapp_e164, bitpanel_reference, source, status, consent_contact)
-           VALUES ($1, $2, $3, 'import', $4, $5)
-           ON CONFLICT (whatsapp_e164) DO UPDATE
-             SET name = EXCLUDED.name,
-                 bitpanel_reference = COALESCE(EXCLUDED.bitpanel_reference, customers.bitpanel_reference),
-                 status = EXCLUDED.status,
-                 consent_contact = EXCLUDED.consent_contact,
-                 updated_at = now()
-           RETURNING id`,
-          [item.name, phone, item.bitpanelReference || null, item.status, item.consentContact]
-        );
+        const linked = item.bitpanelListId
+          ? await client.query(
+              `SELECT c.id
+                 FROM subscriptions s JOIN customers c ON c.id = s.customer_id
+                WHERE s.bitpanel_list_id = $1
+                ORDER BY s.created_at DESC LIMIT 1`,
+              [item.bitpanelListId]
+            )
+          : { rows: [] };
+        let customer;
+        if (linked.rows[0]) {
+          customer = await client.query(
+            `UPDATE customers
+                SET name = COALESCE($2, name),
+                    whatsapp_e164 = COALESCE($3, whatsapp_e164),
+                    bitpanel_reference = COALESCE($4, bitpanel_reference),
+                    status = $5, consent_contact = $6, updated_at = now()
+              WHERE id = $1 RETURNING id`,
+            [linked.rows[0].id, item.name || null, phone, item.bitpanelReference || null, item.status, item.consentContact]
+          );
+        } else {
+          customer = await client.query(
+            `INSERT INTO customers
+              (name, whatsapp_e164, bitpanel_reference, source, status, consent_contact)
+             VALUES ($1, $2, $3, 'import', $4, $5)
+             ON CONFLICT (whatsapp_e164) DO UPDATE
+               SET name = COALESCE(EXCLUDED.name, customers.name),
+                   bitpanel_reference = COALESCE(EXCLUDED.bitpanel_reference, customers.bitpanel_reference),
+                   status = EXCLUDED.status,
+                   consent_contact = EXCLUDED.consent_contact,
+                   updated_at = now()
+             RETURNING id`,
+            [item.name || null, phone, item.bitpanelReference || null, item.status, item.consentContact]
+          );
+        }
         await client.query(
           `WITH latest AS (
            SELECT id FROM subscriptions
@@ -516,7 +625,7 @@ app.post('/api/admin/customers/import', { preHandler: requireAuth }, async (requ
       });
       stats.imported += 1;
     } catch (error) {
-      stats.errors.push({ row: index + 1, name: item.name, error: error.message });
+      stats.errors.push({ row: index + 1, name: item.name || item.bitpanelReference, error: error.message });
     }
   }
   await audit(db, {

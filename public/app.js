@@ -166,7 +166,7 @@ async function loadCustomers(search = '') {
         .map(
           (customer) => `
           <tr>
-            <td class="client-cell"><strong>${escapeHtml(customer.name)}</strong><small>${escapeHtml(customer.whatsapp_masked)}</small></td>
+            <td class="client-cell"><strong>${escapeHtml(customer.name || customer.bitpanel_reference || 'A preencher')}</strong><small>${escapeHtml(customer.whatsapp_masked || 'Telefone a preencher')}</small></td>
             <td>${escapeHtml(customer.plan_name || 'Sem plano')}</td>
             <td>${date(customer.expires_on)}</td>
             <td>${customer.bitpanel_list_id ? `<span class="tag blue">Lista ${escapeHtml(customer.bitpanel_list_id)}</span>` : '<span class="tag">Não vinculado</span>'}</td>

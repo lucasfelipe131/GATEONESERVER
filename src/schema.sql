@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS customers (
 CREATE UNIQUE INDEX IF NOT EXISTS customers_whatsapp_unique ON customers (whatsapp_e164);
 CREATE UNIQUE INDEX IF NOT EXISTS customers_portal_token_unique
   ON customers (portal_token_hash) WHERE portal_token_hash IS NOT NULL;
+ALTER TABLE customers ALTER COLUMN name DROP NOT NULL;
+ALTER TABLE customers ALTER COLUMN whatsapp_e164 DROP NOT NULL;
 
 CREATE TABLE IF NOT EXISTS subscriptions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
