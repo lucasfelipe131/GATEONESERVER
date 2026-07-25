@@ -228,7 +228,10 @@ app.post(
     if (!body.desiredPlan) {
       return reply.code(400).send({ error: 'Escolha um plano para continuar ao pagamento.' });
     }
-    const runtimeConfig = await getRuntimeConfig(db, config);
+    const runtimeConfig = {
+      ...(await getRuntimeConfig(db, config)),
+      PAYMENT_MODE: await getSetting(db, 'payment_mode', config.PAYMENT_MODE)
+    };
     const created = await db.transaction(async (client) => {
       const planResult = await client.query(
         'SELECT * FROM plans WHERE code = $1 AND active = true',
@@ -1370,7 +1373,10 @@ app.post(
       },
       ip: request.ip
     });
-    const runtimeConfig = await getRuntimeConfig(db, config);
+    const runtimeConfig = {
+      ...(await getRuntimeConfig(db, config)),
+      PAYMENT_MODE: await getSetting(db, 'payment_mode', config.PAYMENT_MODE)
+    };
     const chargeDetails = await db.query(
       `SELECT ch.id, ch.idempotency_key, ch.amount_cents,
               c.name AS customer_name, c.email AS customer_email,

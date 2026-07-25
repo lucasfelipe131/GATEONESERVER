@@ -85,8 +85,6 @@ CREATE TABLE IF NOT EXISTS charges (
   approved_by uuid REFERENCES users(id),
   approved_at timestamptz,
   mercado_pago_payment_id text,
-  mercado_pago_preference_id text,
-  checkout_url text,
   pix_copy_paste text,
   pix_ticket_url text,
   pix_expires_at timestamptz,
@@ -95,8 +93,6 @@ CREATE TABLE IF NOT EXISTS charges (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE charges ADD COLUMN IF NOT EXISTS plan_id uuid REFERENCES plans(id);
-ALTER TABLE charges ADD COLUMN IF NOT EXISTS mercado_pago_preference_id text;
-ALTER TABLE charges ADD COLUMN IF NOT EXISTS checkout_url text;
 CREATE INDEX IF NOT EXISTS charges_status_idx ON charges (status, due_on);
 
 CREATE TABLE IF NOT EXISTS message_logs (
