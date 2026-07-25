@@ -28,7 +28,7 @@ async function api(path, options = {}) {
   });
   const body = await response.json().catch(() => ({}));
   if (response.status === 401 && path !== '/api/auth/login') showLogin();
-  if (!response.ok) throw new Error(body.error || 'Não foi possível concluir.');
+  if (!response.ok) throw new Error(body.error || body.message || 'Não foi possível concluir.');
   return body;
 }
 

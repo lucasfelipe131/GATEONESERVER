@@ -88,6 +88,27 @@ function parse(schema, value) {
   return parsed.data;
 }
 
+function safeBitPanelSyncError(error) {
+  const message = String(error?.message || '');
+  const knownMessages = [
+    'Credenciais do BitPanel não configuradas na Railway.',
+    'Tela de login do BitPanel mudou. Revisão manual necessária.',
+    'Busca de listas do BitPanel não encontrada.',
+    'Não foi possível gravar os clientes sincronizados.'
+  ];
+  if (knownMessages.includes(message)) return message;
+  if (/timeout|waiting for|locator/i.test(message)) {
+    return 'O BitPanel demorou para responder ou a tela de clientes mudou. Teste a conexão e tente novamente.';
+  }
+  if (/net::|navigation|ERR_/i.test(message)) {
+    return 'Não foi possível acessar o endereço do BitPanel. Confira as URLs salvas em Configurações.';
+  }
+  if (/login|credential|password|unauthorized|forbidden/i.test(message)) {
+    return 'O BitPanel recusou o acesso. Confira o usuário e a senha em Configurações.';
+  }
+  return 'O BitPanel não concluiu a sincronização. Use “Testar conexão” em Configurações e tente novamente.';
+}
+
 async function requireAuth(request, reply) {
   request.user = await authenticate(db, request);
   if (!request.user) return reply.code(401).send({ error: 'Sessão expirada. Entre novamente.' });
@@ -567,22 +588,32 @@ app.post('/api/admin/customers/import-bitpanel', { preHandler: requireAuth }, as
 });
 
 app.post('/api/admin/customers/sync-bitpanel', { preHandler: requireAuth }, async (request) => {
-  const runtimeConfig = await getRuntimeConfig(db, config);
-  const customers = await fetchBitPanelCustomers(runtimeConfig);
-  const result = await app.inject({
-    method: 'POST',
-    url: '/api/admin/customers/import-bitpanel',
-    headers: { cookie: request.headers.cookie || '' },
-    payload: { customers }
-  });
-  if (result.statusCode >= 400) {
-    throw Object.assign(new Error('Não foi possível gravar os clientes sincronizados.'), {
-      statusCode: result.statusCode
+  try {
+    const runtimeConfig = await getRuntimeConfig(db, config);
+    const customers = await fetchBitPanelCustomers(runtimeConfig);
+    const result = await app.inject({
+      method: 'POST',
+      url: '/api/admin/customers/import-bitpanel',
+      headers: { cookie: request.headers.cookie || '' },
+      payload: { customers }
     });
+    if (result.statusCode >= 400) {
+      request.log.error(
+        { statusCode: result.statusCode, response: sanitizeForLog(result.json()) },
+        'Falha ao gravar clientes sincronizados'
+      );
+      throw new Error('Não foi possível gravar os clientes sincronizados.');
+    }
+    const stats = result.json();
+    const blocked = customers.filter((item) => item.owner !== 'Gate One Pro Server').length;
+    return { ...stats, found: customers.length, blocked };
+  } catch (error) {
+    request.log.error(
+      { error: error.message, data: sanitizeForLog(error) },
+      'Falha na sincronização do BitPanel'
+    );
+    throw Object.assign(new Error(safeBitPanelSyncError(error)), { statusCode: 502 });
   }
-  const stats = result.json();
-  const blocked = customers.filter((item) => item.owner !== 'Gate One Pro Server').length;
-  return { ...stats, found: customers.length, blocked };
 });
 
 app.post('/api/admin/customers', { preHandler: requireAuth }, async (request, reply) => {
