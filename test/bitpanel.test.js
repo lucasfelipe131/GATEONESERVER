@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  BITPANEL_LOGIN_SELECTORS,
   bitPanelOperationFor,
   buildBitPanelUsername,
-  parseBitPanelExpiry
+  parseBitPanelExpiry,
+  resolveBitPanelLoginUrl
 } from '../src/integrations/bitpanel.js';
 
 test('gera usuário estável e compatível com o BitPanel', () => {
@@ -31,5 +33,18 @@ test('separa cadastro novo de renovação existente', () => {
   assert.equal(
     bitPanelOperationFor({ charge_stage: 'manual', bitpanel_list_id: null }),
     'provision'
+  );
+});
+
+test('aceita o login atual por username e corrige a URL raiz do BitPanel', () => {
+  assert.match(BITPANEL_LOGIN_SELECTORS.username, /name='username'/);
+  assert.match(BITPANEL_LOGIN_SELECTORS.username, /name='email'/);
+  assert.equal(
+    resolveBitPanelLoginUrl('https://bitpanel.vip', 'https://bitpanel.vip'),
+    'https://bitpanel.vip/login'
+  );
+  assert.equal(
+    resolveBitPanelLoginUrl('https://bitpanel.vip', 'https://bitpanel.vip/login'),
+    'https://bitpanel.vip/login'
   );
 });
