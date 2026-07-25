@@ -57,6 +57,8 @@ async function requestRenewal(planCode, button) {
     message.className = 'portal-message success';
     message.textContent = body.message;
     button.classList.add('selected');
+    if (!body.checkoutUrl) throw new Error('O Mercado Pago não retornou a tela de pagamento.');
+    window.location.assign(body.checkoutUrl);
   } catch (error) {
     message.className = 'portal-message error';
     message.textContent = error.message;

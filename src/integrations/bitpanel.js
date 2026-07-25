@@ -180,10 +180,12 @@ export async function fetchBitPanelCustomers(config) {
     for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
       const rows = page.locator('table tbody tr');
       const count = await rows.count();
+      let firstIdOnPage = '';
       for (let index = 0; index < count; index += 1) {
         const cells = rows.nth(index).locator('td');
         if ((await cells.count()) < 7) continue;
         const id = (await cells.nth(0).innerText()).trim().replace(/^#/, '');
+        if (!firstIdOnPage) firstIdOnPage = id;
         const owner = (await cells.nth(2).innerText()).trim();
         const rawStatus = (await cells.nth(3).innerText()).trim();
         const username = (await cells.nth(4).innerText()).trim();
@@ -199,17 +201,17 @@ export async function fetchBitPanelCustomers(config) {
         });
       }
 
-      const next = page.locator(
-        'button[aria-label*="next" i], button[aria-label*="próxima" i], .v-data-footer__icons-after button'
-      ).last();
-      if ((await next.count()) !== 1 || (await next.isDisabled())) break;
-      const firstId = customers.size ? [...customers.keys()].at(-1) : '';
+      const next = page.getByRole('button', { name: 'Next page', exact: true });
+      if ((await next.count()) !== 1 || !(await next.isEnabled())) break;
       await next.click();
-      await page.waitForTimeout(500);
       const firstCell = page.locator('table tbody tr td').first();
       await firstCell.waitFor({ state: 'visible' });
-      const currentId = (await firstCell.innerText()).trim().replace(/^#/, '');
-      if (currentId === firstId && count <= 1) break;
+      await page.waitForFunction(
+        (previousId) =>
+          document.querySelector('table tbody tr td')?.textContent?.trim().replace(/^#/, '') !== previousId,
+        firstIdOnPage,
+        { timeout: 10_000 }
+      );
     }
     return [...customers.values()];
   });

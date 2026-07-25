@@ -24,8 +24,8 @@ document.querySelector('#leadForm').addEventListener('submit', async (event) => 
     if (!response.ok) throw new Error(body.error);
     message.style.color = '#10a36a';
     message.textContent = body.message;
-    if (body.whatsappUrl) window.location.href = body.whatsappUrl;
-    form.reset();
+    if (!body.checkoutUrl) throw new Error('O Mercado Pago não retornou a tela de pagamento.');
+    window.location.assign(body.checkoutUrl);
   } catch (error) {
     message.style.color = '#df4b55';
     message.textContent = error.message || 'Não foi possível enviar.';

@@ -17,6 +17,7 @@ import { maskPhone, normalizePhone, randomToken, sanitizeForLog, sha256 } from '
 import { scanBilling, markPaymentApproved } from './services/billing.js';
 import { buildIdempotencyKey, renderChargeMessage } from './domain/billing.js';
 import {
+  createCheckoutPreference,
   getMercadoPagoPayment,
   getMercadoPagoReadiness,
   verifyMercadoPagoWebhook
@@ -198,37 +199,103 @@ app.post(
       request.body
     );
     const phone = normalizePhone(body.whatsapp);
-    const result = await db.query(
-      `INSERT INTO leads (name, whatsapp_e164, source, campaign, desired_plan, status)
-       VALUES ($1, $2, 'landing_page', $3, $4, 'new')
-       RETURNING id`,
-      [body.name, phone, body.campaign || null, body.desiredPlan || null]
+    if (!body.desiredPlan) {
+      return reply.code(400).send({ error: 'Escolha um plano para continuar ao pagamento.' });
+    }
+    const runtimeConfig = await getRuntimeConfig(db, config);
+    const created = await db.transaction(async (client) => {
+      const planResult = await client.query(
+        'SELECT * FROM plans WHERE code = $1 AND active = true',
+        [body.desiredPlan]
+      );
+      const plan = planResult.rows[0];
+      if (!plan) throw Object.assign(new Error('Plano indisponível.'), { statusCode: 409 });
+      const lead = await client.query(
+        `INSERT INTO leads (name, whatsapp_e164, source, campaign, desired_plan, status)
+         VALUES ($1, $2, 'landing_page', $3, $4, 'payment_pending')
+         RETURNING id`,
+        [body.name, phone, body.campaign || null, body.desiredPlan]
+      );
+      const customer = await client.query(
+        `INSERT INTO customers (name, whatsapp_e164, source, status, consent_contact)
+         VALUES ($1, $2, 'landing_page', 'lead', true)
+         ON CONFLICT (whatsapp_e164) DO UPDATE
+           SET name = EXCLUDED.name, consent_contact = true, updated_at = now()
+         RETURNING id, name, email`,
+        [body.name, phone]
+      );
+      let subscription = await client.query(
+        `SELECT id, expires_on::text FROM subscriptions
+          WHERE customer_id = $1 AND status <> 'cancelled'
+          ORDER BY created_at DESC LIMIT 1`,
+        [customer.rows[0].id]
+      );
+      if (!subscription.rows[0]) {
+        subscription = await client.query(
+          `INSERT INTO subscriptions
+            (customer_id, plan_id, starts_on, expires_on, status)
+           VALUES ($1, $2, CURRENT_DATE, CURRENT_DATE, 'pending')
+           RETURNING id, expires_on::text`,
+          [customer.rows[0].id, plan.id]
+        );
+      }
+      const idempotencyKey = buildIdempotencyKey(
+        subscription.rows[0].id,
+        `checkout-${plan.code}`,
+        new Date().toISOString().slice(0, 13)
+      );
+      const charge = await client.query(
+        `INSERT INTO charges
+          (subscription_id, plan_id, stage, status, amount_cents, due_on,
+           idempotency_key, message_text)
+         VALUES ($1, $2, 'new_sale', 'approved', $3, CURRENT_DATE, $4, $5)
+         ON CONFLICT (idempotency_key) DO UPDATE SET updated_at = now()
+         RETURNING id, idempotency_key, amount_cents`,
+        [
+          subscription.rows[0].id,
+          plan.id,
+          plan.price_cents,
+          idempotencyKey,
+          renderChargeMessage({
+            name: body.name,
+            planName: plan.name,
+            expiresOn: subscription.rows[0].expires_on,
+            amountCents: plan.price_cents,
+            stage: 'new_sale'
+          })
+        ]
+      );
+      return {
+        leadId: lead.rows[0].id,
+        customerId: customer.rows[0].id,
+        customer_name: body.name,
+        customer_email: customer.rows[0].email,
+        customer_phone: phone,
+        plan_code: plan.code,
+        plan_name: plan.name,
+        duration_months: plan.duration_months,
+        ...charge.rows[0]
+      };
+    });
+    const preference = await createCheckoutPreference(runtimeConfig, created);
+    await db.query(
+      `UPDATE charges
+          SET mercado_pago_preference_id = $2, checkout_url = $3, updated_at = now()
+        WHERE id = $1`,
+      [created.id, preference.id, preference.checkoutUrl]
     );
     await audit(db, {
       actorType: 'lead',
       actorId: phone,
       action: 'lead.captured',
       entityType: 'lead',
-      entityId: result.rows[0].id,
+      entityId: created.leadId,
       ip: request.ip
     });
-    const planNames = {
-      monthly: 'Mensal',
-      quarterly: 'Trimestral',
-      semiannual: 'Semestral',
-      annual: 'Anual'
-    };
-    const selectedPlan = planNames[body.desiredPlan];
-    const whatsappText = selectedPlan
-      ? `Olá! Quero o plano ${selectedPlan} do Gate One Pro e gerar minha cobrança Pix.`
-      : 'Olá! Quero conhecer os planos do Gate One Pro.';
-    const whatsappUrl = config.PUBLIC_WHATSAPP_NUMBER
-      ? `https://wa.me/${config.PUBLIC_WHATSAPP_NUMBER}?text=${encodeURIComponent(whatsappText)}`
-      : null;
     return reply.code(201).send({
       ok: true,
-      message: 'Cadastro recebido. Abra o WhatsApp do Gate One Pro para continuar.',
-      whatsappUrl
+      message: 'Abrindo o ambiente seguro do Mercado Pago…',
+      checkoutUrl: preference.checkoutUrl
     });
   }
 );
@@ -1151,20 +1218,39 @@ app.post(
       },
       ip: request.ip
     });
+    const runtimeConfig = await getRuntimeConfig(db, config);
+    const chargeDetails = await db.query(
+      `SELECT ch.id, ch.idempotency_key, ch.amount_cents,
+              c.name AS customer_name, c.email AS customer_email,
+              c.whatsapp_e164 AS customer_phone,
+              p.code AS plan_code, p.name AS plan_name, p.duration_months
+         FROM charges ch
+         JOIN subscriptions s ON s.id = ch.subscription_id
+         JOIN customers c ON c.id = s.customer_id
+         JOIN plans p ON p.id = ch.plan_id
+        WHERE ch.id = $1`,
+      [created.id]
+    );
+    const preference = await createCheckoutPreference(runtimeConfig, chargeDetails.rows[0]);
+    await db.query(
+      `UPDATE charges SET mercado_pago_preference_id = $2, checkout_url = $3, updated_at = now()
+        WHERE id = $1`,
+      [created.id, preference.id, preference.checkoutUrl]
+    );
     return reply.code(201).send({
       ok: true,
       status: created.status,
       queued,
       planName: created.planName,
-      message: created.status === 'approved'
-        ? `Plano ${created.planName} escolhido. A cobrança Pix foi criada e será enviada agora pelo WhatsApp.`
-        : `Plano ${created.planName} escolhido. A cobrança está aguardando aprovação no administrador.`
+      checkoutUrl: preference.checkoutUrl,
+      message: `Plano ${created.planName} escolhido. Abrindo o pagamento seguro do Mercado Pago.`
     });
   }
 );
 
 app.get('/cliente/:token', async (_request, reply) => reply.sendFile('portal.html'));
 app.get('/captacao', async (_request, reply) => reply.sendFile('landing.html'));
+app.get('/pagamento', async (_request, reply) => reply.sendFile('payment.html'));
 app.get('/', async (_request, reply) => reply.sendFile('index.html'));
 
 app.setErrorHandler((error, request, reply) => {

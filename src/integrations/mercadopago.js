@@ -104,6 +104,70 @@ export async function createPixPayment(config, charge) {
   };
 }
 
+export async function createCheckoutPreference(config, charge) {
+  if (config.PAYMENT_MODE === 'simulation') {
+    return {
+      id: `SIM-PREF-${randomUUID()}`,
+      checkoutUrl: `${config.PUBLIC_BASE_URL || ''}/pagamento?status=simulation&charge=${encodeURIComponent(charge.id)}`,
+      simulated: true
+    };
+  }
+
+  requireLiveConfig(config);
+  if (!config.PUBLIC_BASE_URL) {
+    throw new Error('URL pública do Gate One Pro não configurada.');
+  }
+  const base = config.PUBLIC_BASE_URL.replace(/\/$/, '');
+  const returnUrl = (status) =>
+    `${base}/pagamento?status=${status}&charge=${encodeURIComponent(charge.id)}`;
+  const notificationUrl =
+    config.MERCADOPAGO_NOTIFICATION_URL || `${base}/webhooks/mercadopago`;
+  const response = await fetch(`${API_URL}/checkout/preferences`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.MERCADOPAGO_ACCESS_TOKEN}`,
+      'Content-Type': 'application/json',
+      'X-Idempotency-Key': charge.idempotency_key
+    },
+    body: JSON.stringify({
+      items: [{
+        id: charge.plan_code,
+        title: `Gate One Pro - Plano ${charge.plan_name}`,
+        description: `${charge.duration_months} ${charge.duration_months === 1 ? 'mês' : 'meses'} de acesso`,
+        quantity: 1,
+        currency_id: 'BRL',
+        unit_price: charge.amount_cents / 100
+      }],
+      payer: {
+        name: charge.customer_name,
+        email: charge.customer_email || config.MERCADOPAGO_PAYER_EMAIL,
+        phone: charge.customer_phone ? { number: charge.customer_phone } : undefined
+      },
+      external_reference: charge.id,
+      notification_url: notificationUrl,
+      back_urls: {
+        success: returnUrl('approved'),
+        pending: returnUrl('pending'),
+        failure: returnUrl('failure')
+      },
+      auto_return: 'approved',
+      statement_descriptor: 'GATE ONE PRO'
+    })
+  });
+  const body = await response.json();
+  if (!response.ok || !body.init_point) {
+    throw new Error(
+      `Mercado Pago recusou o checkout (${response.status}): ${body.message || 'erro'}`
+    );
+  }
+  return {
+    id: String(body.id),
+    checkoutUrl: body.init_point,
+    sandboxCheckoutUrl: body.sandbox_init_point || null,
+    simulated: false
+  };
+}
+
 export async function getMercadoPagoPayment(config, paymentId) {
   requireLiveConfig(config);
   const response = await fetch(`${API_URL}/v1/payments/${encodeURIComponent(paymentId)}`, {
