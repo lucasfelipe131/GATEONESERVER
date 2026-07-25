@@ -31,15 +31,36 @@ const ENV_FIELDS = {
 
 export const integrationProviders = Object.keys(ENV_FIELDS);
 
+function configuredBaseValues(baseConfig, provider) {
+  return Object.fromEntries(
+    ENV_FIELDS[provider]
+      .filter((field) => baseConfig[field] !== undefined && baseConfig[field] !== '')
+      .map((field) => [field, String(baseConfig[field]).trim()])
+  );
+}
+
 export async function saveIntegrationCredentials(db, baseConfig, provider, values, userId) {
   const allowed = ENV_FIELDS[provider];
   if (!allowed) throw new Error('Integração desconhecida.');
+
+  // Preserve credentials that may still live only in Railway environment variables.
+  // Previously, the first panel save could replace them with an incomplete DB record.
   const existing = await readStored(db, baseConfig, provider);
-  const clean = { ...existing };
+  const clean = {
+    ...configuredBaseValues(baseConfig, provider),
+    ...existing
+  };
   for (const field of allowed) {
     if (values[field] === undefined || values[field] === '') continue;
     clean[field] = String(values[field]).trim();
   }
+
+  if (provider === 'bitpanel' && !clean.BITPANEL_PASSWORD) {
+    const error = new Error('Digite a senha do BitPanel antes de salvar.');
+    error.statusCode = 400;
+    throw error;
+  }
+
   const encrypted = encryptSecret(JSON.stringify(clean), baseConfig.COOKIE_SECRET);
   await db.query(
     `INSERT INTO integration_credentials (provider, encrypted_value, updated_by)
@@ -50,6 +71,12 @@ export async function saveIntegrationCredentials(db, baseConfig, provider, value
            updated_at = now()`,
     [provider, encrypted, userId]
   );
+
+  // Verify the encrypted value can be read back before reporting success.
+  const saved = await readStored(db, baseConfig, provider);
+  if (provider === 'bitpanel' && !saved.BITPANEL_PASSWORD) {
+    throw new Error('A senha do BitPanel não pôde ser confirmada no banco de dados.');
+  }
 }
 
 async function readStored(db, baseConfig, provider) {
