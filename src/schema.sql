@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS customers (
   whatsapp_e164 text NOT NULL,
   email text,
   bitpanel_reference text,
+  bitpanel_owner text,
+  automation_eligible boolean NOT NULL DEFAULT true,
   source text NOT NULL DEFAULT 'manual',
   status text NOT NULL DEFAULT 'active' CHECK (status IN ('lead', 'active', 'late', 'suspended', 'cancelled')),
   consent_contact boolean NOT NULL DEFAULT false,
@@ -50,6 +52,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS customers_portal_token_unique
   ON customers (portal_token_hash) WHERE portal_token_hash IS NOT NULL;
 ALTER TABLE customers ALTER COLUMN name DROP NOT NULL;
 ALTER TABLE customers ALTER COLUMN whatsapp_e164 DROP NOT NULL;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS bitpanel_owner text;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS automation_eligible boolean NOT NULL DEFAULT true;
 
 CREATE TABLE IF NOT EXISTS subscriptions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -181,6 +185,13 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE TABLE IF NOT EXISTS system_settings (
   key text PRIMARY KEY,
   value jsonb NOT NULL,
+  updated_by uuid REFERENCES users(id),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS integration_credentials (
+  provider text PRIMARY KEY CHECK (provider IN ('mercadopago', 'whatsapp', 'bitpanel')),
+  encrypted_value text NOT NULL,
   updated_by uuid REFERENCES users(id),
   updated_at timestamptz NOT NULL DEFAULT now()
 );

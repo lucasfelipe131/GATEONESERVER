@@ -22,6 +22,7 @@ import {
 } from './integrations/bitpanel.js';
 import { audit } from './audit.js';
 import { formatDate, formatMoney } from './domain/billing.js';
+import { getRuntimeConfig } from './integrations/runtime-config.js';
 
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL, { ssl: config.DATABASE_SSL });
@@ -35,7 +36,7 @@ async function effectiveConfig() {
     getSetting(db, 'renewal_requires_approval', config.RENEWAL_REQUIRES_APPROVAL)
   ]);
   return {
-    ...config,
+    ...(await getRuntimeConfig(db, config)),
     PAYMENT_MODE: paymentMode,
     WHATSAPP_MODE: whatsappMode,
     BITPANEL_MODE: bitpanelMode,
@@ -188,7 +189,7 @@ async function processRenewal(job) {
     `SELECT r.*, ch.stage AS charge_stage,
             s.expires_on::text AS current_expiry, s.bitpanel_list_id,
             c.name AS customer_name, c.bitpanel_reference, c.id AS customer_id,
-            c.whatsapp_e164,
+            c.whatsapp_e164, c.bitpanel_owner, c.automation_eligible,
             p.code AS plan_code, p.name AS plan_name, p.duration_months
        FROM renewal_jobs r
        JOIN charges ch ON ch.id = r.charge_id
@@ -204,6 +205,12 @@ async function processRenewal(job) {
     throw new Error('Renovação não aprovada. Execução bloqueada.');
   }
   const operation = bitPanelOperationFor(renewal);
+  if (
+    operation === 'renew' &&
+    (!renewal.automation_eligible || renewal.bitpanel_owner !== 'Gate One Pro Server')
+  ) {
+    throw new Error('Automação bloqueada: o cliente não pertence ao Gate One Pro Server.');
+  }
   if (operation === 'provision' && !renewal.bitpanel_reference) {
     renewal.bitpanel_reference = buildBitPanelUsername(
       renewal.customer_name,
@@ -267,9 +274,21 @@ async function processRenewal(job) {
           `UPDATE customers
               SET status = 'active',
                   bitpanel_reference = COALESCE($2, bitpanel_reference),
+                  bitpanel_owner = CASE
+                    WHEN $3 = 'provision' THEN 'Gate One Pro Server'
+                    ELSE bitpanel_owner
+                  END,
+                  automation_eligible = CASE
+                    WHEN $3 = 'provision' THEN true
+                    ELSE automation_eligible
+                  END,
                   updated_at = now()
             WHERE id = $1`,
-          [renewal.customer_id, outcome.username || renewal.bitpanel_reference]
+          [
+            renewal.customer_id,
+            outcome.username || renewal.bitpanel_reference,
+            operation
+          ]
         );
         await client.query(
           `INSERT INTO loyalty_ledger

@@ -170,12 +170,13 @@ async function loadCustomers(search = '') {
             <td>${escapeHtml(customer.plan_name || 'Sem plano')}</td>
             <td>${date(customer.expires_on)}</td>
             <td>${customer.bitpanel_list_id ? `<span class="tag blue">Lista ${escapeHtml(customer.bitpanel_list_id)}</span>` : '<span class="tag">Não vinculado</span>'}</td>
+            <td>${escapeHtml(customer.bitpanel_owner || 'Gate One Pro Server')}${customer.automation_eligible === false ? '<small class="blocked-note">Automação bloqueada</small>' : ''}</td>
             <td>${statusTag(customer.status)}</td>
             <td><button class="btn btn-secondary btn-small" data-portal="${escapeHtml(customer.id)}">Copiar acesso</button></td>
           </tr>`
         )
         .join('')
-    : '<tr><td colspan="6"><div class="empty">Nenhum cliente encontrado.</div></td></tr>';
+    : '<tr><td colspan="7"><div class="empty">Nenhum cliente encontrado.</div></td></tr>';
 }
 
 async function loadCharges(status = state.chargeStatus) {
@@ -350,6 +351,19 @@ $('#customerForm').addEventListener('submit', async (event) => {
 });
 
 $('#importButton').addEventListener('click', () => $('#importDialog').showModal());
+$('#syncBitPanelButton').addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const result = await api('/api/admin/customers/sync-bitpanel', { method: 'POST' });
+    toast(`${result.found} lista(s) encontrada(s): ${result.imported} nova(s), ${result.updated} atualizada(s) e ${result.blocked} bloqueada(s).`);
+    await loadCustomers();
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+});
 $('#importForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   $('#importError').textContent = '';
@@ -442,6 +456,42 @@ $('#saveSettings').addEventListener('click', async (event) => {
   } finally {
     event.currentTarget.disabled = false;
   }
+});
+
+$$('.integration-form').forEach((form) => {
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = $('button[type="submit"]', form);
+    button.disabled = true;
+    try {
+      const values = Object.fromEntries(new FormData(form));
+      await api(`/api/admin/integrations/${form.dataset.provider}`, {
+        method: 'PUT',
+        body: JSON.stringify(values)
+      });
+      $$('input[type="password"]', form).forEach((input) => (input.value = ''));
+      toast('Credenciais protegidas e salvas.');
+      await loadSettings();
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      button.disabled = false;
+    }
+  });
+  $('.test-integration', form).addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const result = await api(`/api/admin/integrations/${form.dataset.provider}/test`, {
+        method: 'POST'
+      });
+      toast(result.message || 'Conexão confirmada.');
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      button.disabled = false;
+    }
+  });
 });
 
 api('/api/auth/me')

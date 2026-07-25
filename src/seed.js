@@ -6,7 +6,9 @@ export async function seed(db, config) {
   await db.query(
     `INSERT INTO plans (code, name, duration_months, price_cents, sort_order)
      VALUES ('monthly', 'Mensal', 1, 3000, 1),
-            ('quarterly', 'Trimestral', 3, 8000, 2)
+            ('quarterly', 'Trimestral', 3, 8500, 2),
+            ('semiannual', 'Semestral', 6, 15000, 3),
+            ('annual', 'Anual', 12, 27000, 4)
      ON CONFLICT (code) DO UPDATE
        SET name = EXCLUDED.name,
            duration_months = EXCLUDED.duration_months,

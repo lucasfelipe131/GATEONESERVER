@@ -29,9 +29,23 @@
       <article class="plan-card featured">
         <span class="eyebrow">MAIS VANTAJOSO</span>
         <h2>Plano Trimestral</h2>
-        <div class="price">R$ 80 <small>/ 3 meses</small></div>
+        <div class="price">R$ 85 <small>/ 3 meses</small></div>
         <div class="benefits"><span>✓ Economia no ciclo</span><span>✓ Atendimento pelo WhatsApp</span><span>✓ Mais pontos no Gate Club</span></div>
         <button class="btn btn-primary btn-block choose-plan" data-plan="quarterly">Escolher trimestral</button>
+      </article>
+      <article class="plan-card">
+        <span class="eyebrow">ECONOMIA</span>
+        <h2>Plano Semestral</h2>
+        <div class="price">R$ 150 <small>/ 6 meses</small></div>
+        <div class="benefits"><span>✓ Ciclo mais econômico</span><span>✓ Atendimento pelo WhatsApp</span><span>✓ Mais pontos no Gate Club</span></div>
+        <button class="btn btn-secondary btn-block choose-plan" data-plan="semiannual">Escolher semestral</button>
+      </article>
+      <article class="plan-card featured">
+        <span class="eyebrow">MELHOR VALOR</span>
+        <h2>Plano Anual</h2>
+        <div class="price">R$ 270 <small>/ 12 meses</small></div>
+        <div class="benefits"><span>✓ Maior economia</span><span>✓ Atendimento pelo WhatsApp</span><span>✓ Máximo de pontos no Gate Club</span></div>
+        <button class="btn btn-primary btn-block choose-plan" data-plan="annual">Escolher anual</button>
       </article>
     </section>
     <section class="lead-section" id="quero">
@@ -41,7 +55,7 @@
       <form class="lead-form" id="leadForm">
         <label>Nome<input name="name" required /></label>
         <label>WhatsApp com DDD<input name="whatsapp" placeholder="(55) 99999-9999" required /></label>
-        <label>Plano<select name="desiredPlan"><option value="monthly">Mensal — R$ 30</option><option value="quarterly">Trimestral — R$ 80</option></select></label>
+        <label>Plano<select name="desiredPlan"><option value="monthly">Mensal — R$ 30</option><option value="quarterly">Trimestral — R$ 85</option><option value="semiannual">Semestral — R$ 150</option><option value="annual">Anual — R$ 270</option></select></label>
         <label class="check-row"><input name="consent" type="checkbox" required /> Aceito receber o atendimento solicitado pelo WhatsApp.</label>
         <button class="btn btn-primary btn-block" type="submit">Solicitar atendimento</button>
         <p class="form-error" id="leadMessage"></p>

@@ -47,16 +47,22 @@ export function sendPlanMenu(config, to) {
     to,
     type: 'interactive',
     interactive: {
-      type: 'button',
+      type: 'list',
       body: {
         text:
           'Bem-vindo ao Gate One Pro! Escolha um plano para receber as instruções de ativação:'
       },
       action: {
-        buttons: [
-          { type: 'reply', reply: { id: 'plan_monthly', title: 'Mensal — R$ 30' } },
-          { type: 'reply', reply: { id: 'plan_quarterly', title: 'Trimestral — R$ 80' } }
-        ]
+        button: 'Ver planos',
+        sections: [{
+          title: 'Planos Gate One Pro',
+          rows: [
+            { id: 'plan_monthly', title: 'Mensal', description: 'R$ 30 por 1 mês' },
+            { id: 'plan_quarterly', title: 'Trimestral', description: 'R$ 85 por 3 meses' },
+            { id: 'plan_semiannual', title: 'Semestral', description: 'R$ 150 por 6 meses' },
+            { id: 'plan_annual', title: 'Anual', description: 'R$ 270 por 12 meses' }
+          ]
+        }]
       }
     }
   });

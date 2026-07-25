@@ -153,6 +153,68 @@ async function runWithBrowser(config, task) {
   }
 }
 
+function statusFromBitPanel(value, expiryDate) {
+  const normalized = String(value || '').toLowerCase();
+  if (normalized.includes('expir')) return 'late';
+  if (normalized.includes('susp')) return 'suspended';
+  if (normalized.includes('cancel')) return 'cancelled';
+  if (expiryDate && expiryDate < new Date().toISOString().slice(0, 10)) return 'late';
+  return 'active';
+}
+
+export async function testBitPanelConnection(config) {
+  return runWithBrowser(config, async (page) => {
+    await page.goto(`${config.BITPANEL_BASE_URL}/list`, { waitUntil: 'domcontentloaded' });
+    const table = page.locator('table tbody');
+    await table.waitFor({ state: 'visible' });
+    return { ok: true, message: 'Login confirmado e lista de clientes encontrada.' };
+  });
+}
+
+export async function fetchBitPanelCustomers(config) {
+  return runWithBrowser(config, async (page) => {
+    await page.goto(`${config.BITPANEL_BASE_URL}/list`, { waitUntil: 'domcontentloaded' });
+    await page.locator('table tbody').waitFor({ state: 'visible' });
+    const customers = new Map();
+
+    for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+      const rows = page.locator('table tbody tr');
+      const count = await rows.count();
+      for (let index = 0; index < count; index += 1) {
+        const cells = rows.nth(index).locator('td');
+        if ((await cells.count()) < 7) continue;
+        const id = (await cells.nth(0).innerText()).trim().replace(/^#/, '');
+        const owner = (await cells.nth(2).innerText()).trim();
+        const rawStatus = (await cells.nth(3).innerText()).trim();
+        const username = (await cells.nth(4).innerText()).trim();
+        const expiresText = (await cells.nth(6).innerText()).trim();
+        const expiresOn = parseBitPanelExpiry(expiresText);
+        if (!id || !username || !expiresOn) continue;
+        customers.set(id, {
+          bitpanelListId: id,
+          bitpanelReference: username,
+          owner,
+          expiresOn,
+          status: statusFromBitPanel(rawStatus, expiresOn)
+        });
+      }
+
+      const next = page.locator(
+        'button[aria-label*="next" i], button[aria-label*="próxima" i], .v-data-footer__icons-after button'
+      ).last();
+      if ((await next.count()) !== 1 || (await next.isDisabled())) break;
+      const firstId = customers.size ? [...customers.keys()].at(-1) : '';
+      await next.click();
+      await page.waitForTimeout(500);
+      const firstCell = page.locator('table tbody tr td').first();
+      await firstCell.waitFor({ state: 'visible' });
+      const currentId = (await firstCell.innerText()).trim().replace(/^#/, '');
+      if (currentId === firstId && count <= 1) break;
+    }
+    return [...customers.values()];
+  });
+}
+
 export async function renewInBitPanel(config, renewal) {
   if (config.BITPANEL_MODE === 'disabled') throw new Error('Automação BitPanel desativada.');
   if (config.BITPANEL_MODE === 'simulation') {

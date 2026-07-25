@@ -26,6 +26,12 @@ import {
   verifyMetaSignature
 } from './integrations/whatsapp.js';
 import { handleInboundMessage } from './services/sales.js';
+import {
+  credentialStatus,
+  getRuntimeConfig,
+  saveIntegrationCredentials
+} from './integrations/runtime-config.js';
+import { fetchBitPanelCustomers, testBitPanelConnection } from './integrations/bitpanel.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -185,7 +191,7 @@ app.post(
       z.object({
         name: z.string().min(2).max(120),
         whatsapp: z.string().min(10).max(30),
-        desiredPlan: z.enum(['monthly', 'quarterly']).optional(),
+        desiredPlan: z.enum(['monthly', 'quarterly', 'semiannual', 'annual']).optional(),
         campaign: z.string().max(100).optional(),
         consent: z.literal(true)
       }),
@@ -218,11 +224,12 @@ app.post(
 );
 
 app.get('/webhooks/whatsapp', async (request, reply) => {
+  const runtimeConfig = await getRuntimeConfig(db, config);
   const query = request.query || {};
   if (
     query['hub.mode'] === 'subscribe' &&
     query['hub.verify_token'] &&
-    query['hub.verify_token'] === config.WHATSAPP_VERIFY_TOKEN
+    query['hub.verify_token'] === runtimeConfig.WHATSAPP_VERIFY_TOKEN
   ) {
     return reply.type('text/plain').send(query['hub.challenge']);
   }
@@ -234,7 +241,10 @@ app.post(
   { config: { rawBody: true }, bodyLimit: 1024 * 1024 },
   async (request, reply) => {
     const whatsappMode = await getSetting(db, 'whatsapp_mode', config.WHATSAPP_MODE);
-    const runtimeConfig = { ...config, WHATSAPP_MODE: whatsappMode };
+    const runtimeConfig = {
+      ...(await getRuntimeConfig(db, config)),
+      WHATSAPP_MODE: whatsappMode
+    };
     if (
       !verifyMetaSignature(
         runtimeConfig,
@@ -248,7 +258,7 @@ app.post(
     const messages = parseWhatsAppWebhook(request.body);
     for (const inbound of messages) {
       try {
-        await handleInboundMessage({ db, queues, config, inbound });
+        await handleInboundMessage({ db, queues, config: runtimeConfig, inbound });
       } catch (error) {
         app.log.error({ messageId: inbound.id, error: error.message }, 'Falha no atendimento');
       }
@@ -259,7 +269,10 @@ app.post(
 
 app.post('/webhooks/mercadopago', async (request, reply) => {
   const paymentMode = await getSetting(db, 'payment_mode', config.PAYMENT_MODE);
-  const runtimeConfig = { ...config, PAYMENT_MODE: paymentMode };
+  const runtimeConfig = {
+    ...(await getRuntimeConfig(db, config)),
+    PAYMENT_MODE: paymentMode
+  };
   const dataId = request.query?.['data.id'] || request.body?.data?.id;
   const valid = verifyMercadoPagoWebhook({
     config: runtimeConfig,
@@ -359,7 +372,7 @@ app.get('/api/admin/customers', { preHandler: requireAuth }, async (request) => 
   const search = String(request.query?.search || '').trim();
   const result = await db.query(
     `SELECT c.id, c.name, c.whatsapp_e164, c.status, c.consent_contact, c.source,
-            c.bitpanel_reference, c.created_at,
+            c.bitpanel_reference, c.bitpanel_owner, c.automation_eligible, c.created_at,
             s.id AS subscription_id, s.expires_on::text, s.bitpanel_list_id,
             p.code AS plan_code, p.name AS plan_name, p.price_cents
        FROM customers c
@@ -415,9 +428,16 @@ app.post('/api/admin/customers/import-bitpanel', { preHandler: requireAuth }, as
           await client.query(
             `UPDATE customers
                 SET bitpanel_reference = $2, source = 'bitpanel',
-                    status = $3, updated_at = now()
+                    status = $3, bitpanel_owner = $4,
+                    automation_eligible = $5, updated_at = now()
               WHERE id = $1`,
-            [existing.rows[0].customer_id, item.bitpanelReference, item.status]
+            [
+              existing.rows[0].customer_id,
+              item.bitpanelReference,
+              item.status,
+              item.owner || null,
+              item.owner === 'Gate One Pro Server'
+            ]
           );
           await client.query(
             `UPDATE subscriptions
@@ -431,10 +451,16 @@ app.post('/api/admin/customers/import-bitpanel', { preHandler: requireAuth }, as
 
         const customer = await client.query(
           `INSERT INTO customers
-            (name, whatsapp_e164, bitpanel_reference, source, status, consent_contact)
-           VALUES (NULL, NULL, $1, 'bitpanel', $2, false)
+            (name, whatsapp_e164, bitpanel_reference, bitpanel_owner,
+             automation_eligible, source, status, consent_contact)
+           VALUES (NULL, NULL, $1, $3, $4, 'bitpanel', $2, false)
            RETURNING id`,
-          [item.bitpanelReference, item.status]
+          [
+            item.bitpanelReference,
+            item.status,
+            item.owner || null,
+            item.owner === 'Gate One Pro Server'
+          ]
         );
         await client.query(
           `INSERT INTO subscriptions
@@ -463,12 +489,31 @@ app.post('/api/admin/customers/import-bitpanel', { preHandler: requireAuth }, as
   return stats;
 });
 
+app.post('/api/admin/customers/sync-bitpanel', { preHandler: requireAuth }, async (request) => {
+  const runtimeConfig = await getRuntimeConfig(db, config);
+  const customers = await fetchBitPanelCustomers(runtimeConfig);
+  const result = await app.inject({
+    method: 'POST',
+    url: '/api/admin/customers/import-bitpanel',
+    headers: { cookie: request.headers.cookie || '' },
+    payload: { customers }
+  });
+  if (result.statusCode >= 400) {
+    throw Object.assign(new Error('Não foi possível gravar os clientes sincronizados.'), {
+      statusCode: result.statusCode
+    });
+  }
+  const stats = result.json();
+  const blocked = customers.filter((item) => item.owner !== 'Gate One Pro Server').length;
+  return { ...stats, found: customers.length, blocked };
+});
+
 app.post('/api/admin/customers', { preHandler: requireAuth }, async (request, reply) => {
   const body = parse(
     z.object({
       name: z.string().min(2).max(120),
       whatsapp: z.string().min(10).max(30),
-      planCode: z.enum(['monthly', 'quarterly']),
+      planCode: z.enum(['monthly', 'quarterly', 'semiannual', 'annual']),
       expiresOn: z.iso.date(),
       bitpanelListId: z.string().max(100).optional(),
       bitpanelReference: z.string().max(120).optional(),
@@ -547,7 +592,10 @@ app.post('/api/admin/customers/import', { preHandler: requireAuth }, async (requ
           z.object({
             name: z.string().min(2).max(120).optional(),
             whatsapp: z.string().min(10).max(30).optional(),
-            plan: z.enum(['monthly', 'quarterly', 'mensal', 'trimestral']),
+            plan: z.enum([
+              'monthly', 'quarterly', 'semiannual', 'annual',
+              'mensal', 'trimestral', 'semestral', 'anual'
+            ]),
             expiresOn: z.iso.date(),
             bitpanelListId: z.string().max(100).optional(),
             bitpanelReference: z.string().max(120).optional(),
@@ -567,7 +615,12 @@ app.post('/api/admin/customers/import', { preHandler: requireAuth }, async (requ
         throw new Error('Informe o WhatsApp ou o ID da lista BitPanel.');
       }
       const phone = item.whatsapp ? normalizePhone(item.whatsapp) : null;
-      const planCode = item.plan === 'mensal' ? 'monthly' : item.plan === 'trimestral' ? 'quarterly' : item.plan;
+      const planCode = ({
+        mensal: 'monthly',
+        trimestral: 'quarterly',
+        semestral: 'semiannual',
+        anual: 'annual'
+      })[item.plan] || item.plan;
       await db.transaction(async (client) => {
         const plan = await client.query('SELECT id FROM plans WHERE code = $1', [planCode]);
         const linked = item.bitpanelListId
@@ -820,14 +873,15 @@ app.get('/api/admin/settings', { preHandler: requireAuth }, async () => {
   const values = Object.fromEntries(
     await Promise.all(keys.map(async (key) => [key, await getSetting(db, key, null)]))
   );
-  const mercadoPago = getMercadoPagoReadiness(config);
+  const status = await credentialStatus(db, config);
+  const mercadoPago = getMercadoPagoReadiness(status.runtime);
   return {
     settings: values,
     integrations: {
       redis: Boolean(config.REDIS_URL),
       mercadoPago: mercadoPago.ready,
-      whatsapp: Boolean(config.WHATSAPP_ACCESS_TOKEN && config.WHATSAPP_PHONE_NUMBER_ID),
-      bitpanel: Boolean(config.BITPANEL_USERNAME && config.BITPANEL_PASSWORD)
+      whatsapp: status.configured.whatsapp,
+      bitpanel: status.configured.bitpanel
     },
     mercadoPago
   };
@@ -845,7 +899,8 @@ app.put('/api/admin/settings', { preHandler: requireAuth }, async (request) => {
     }),
     request.body
   );
-  if (body.payment_mode === 'live' && !getMercadoPagoReadiness(config).ready) {
+  const runtimeConfig = await getRuntimeConfig(db, config);
+  if (body.payment_mode === 'live' && !getMercadoPagoReadiness(runtimeConfig).ready) {
     const error = new Error(
       'Configure o Access Token de produção, o segredo e o webhook do Mercado Pago antes do modo real.'
     );
@@ -854,10 +909,10 @@ app.put('/api/admin/settings', { preHandler: requireAuth }, async (request) => {
   }
   if (
     body.whatsapp_mode === 'live' &&
-    (!config.WHATSAPP_ACCESS_TOKEN ||
-      !config.WHATSAPP_PHONE_NUMBER_ID ||
-      !config.WHATSAPP_VERIFY_TOKEN ||
-      !config.META_APP_SECRET)
+    (!runtimeConfig.WHATSAPP_ACCESS_TOKEN ||
+      !runtimeConfig.WHATSAPP_PHONE_NUMBER_ID ||
+      !runtimeConfig.WHATSAPP_VERIFY_TOKEN ||
+      !runtimeConfig.META_APP_SECRET)
   ) {
     const error = new Error('Configure tokens, número e assinatura da Meta antes do modo real.');
     error.statusCode = 409;
@@ -865,7 +920,7 @@ app.put('/api/admin/settings', { preHandler: requireAuth }, async (request) => {
   }
   if (
     body.bitpanel_mode === 'live' &&
-    (!config.BITPANEL_USERNAME || !config.BITPANEL_PASSWORD)
+    (!runtimeConfig.BITPANEL_USERNAME || !runtimeConfig.BITPANEL_PASSWORD)
   ) {
     const error = new Error('Configure o usuário e a senha do BitPanel antes do modo real.');
     error.statusCode = 409;
@@ -883,6 +938,51 @@ app.put('/api/admin/settings', { preHandler: requireAuth }, async (request) => {
     ip: request.ip
   });
   return { ok: true };
+});
+
+app.put('/api/admin/integrations/:provider', { preHandler: requireAuth }, async (request) => {
+  const provider = parse(z.enum(['mercadopago', 'whatsapp', 'bitpanel']), request.params.provider);
+  const body = parse(z.record(z.string(), z.union([z.string(), z.number()])), request.body || {});
+  await saveIntegrationCredentials(db, config, provider, body, request.user.id);
+  await audit(db, {
+    actorType: 'user',
+    actorId: request.user.id,
+    action: `integration.${provider}_configured`,
+    entityType: 'integration',
+    entityId: provider,
+    after: sanitizeForLog(body),
+    ip: request.ip
+  });
+  return { ok: true };
+});
+
+app.post('/api/admin/integrations/:provider/test', { preHandler: requireAuth }, async (request) => {
+  const provider = parse(z.enum(['mercadopago', 'whatsapp', 'bitpanel']), request.params.provider);
+  const runtimeConfig = await getRuntimeConfig(db, config);
+  if (provider === 'bitpanel') return testBitPanelConnection(runtimeConfig);
+  if (provider === 'mercadopago') {
+    if (!getMercadoPagoReadiness(runtimeConfig).ready) {
+      throw Object.assign(new Error('Complete as credenciais do Mercado Pago.'), { statusCode: 409 });
+    }
+    const response = await fetch('https://api.mercadopago.com/users/me', {
+      headers: { Authorization: `Bearer ${runtimeConfig.MERCADOPAGO_ACCESS_TOKEN}` }
+    });
+    if (!response.ok) {
+      throw Object.assign(new Error('Access Token recusado pelo Mercado Pago.'), { statusCode: 409 });
+    }
+    return { ok: true, message: 'Mercado Pago conectado.' };
+  }
+  if (!runtimeConfig.WHATSAPP_PHONE_NUMBER_ID || !runtimeConfig.WHATSAPP_ACCESS_TOKEN) {
+    throw Object.assign(new Error('Complete o token e o ID do número.'), { statusCode: 409 });
+  }
+  const response = await fetch(
+    `https://graph.facebook.com/${runtimeConfig.WHATSAPP_GRAPH_VERSION}/${runtimeConfig.WHATSAPP_PHONE_NUMBER_ID}`,
+    { headers: { Authorization: `Bearer ${runtimeConfig.WHATSAPP_ACCESS_TOKEN}` } }
+  );
+  if (!response.ok) {
+    throw Object.assign(new Error('Credenciais recusadas pela Meta.'), { statusCode: 409 });
+  }
+  return { ok: true, message: 'WhatsApp Cloud API conectado.' };
 });
 
 app.get('/api/portal/:token', async (request, reply) => {
@@ -933,7 +1033,7 @@ app.post(
   { config: { rateLimit: { max: 6, timeWindow: '1 hour' } } },
   async (request, reply) => {
     const body = parse(
-      z.object({ planCode: z.enum(['monthly', 'quarterly']) }),
+      z.object({ planCode: z.enum(['monthly', 'quarterly', 'semiannual', 'annual']) }),
       request.body
     );
     const portalHash = sha256(request.params.token);

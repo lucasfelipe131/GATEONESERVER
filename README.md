@@ -4,7 +4,10 @@ Projeto de produção para centralizar na Railway:
 
 - painel administrativo responsivo;
 - clientes e assinaturas;
-- planos Mensal (R$ 30) e Trimestral (R$ 80);
+- planos Mensal (R$ 30), Trimestral (R$ 85), Semestral (R$ 150) e Anual (R$ 270);
+- configuração protegida de Mercado Pago, WhatsApp Cloud API e BitPanel diretamente no administrador;
+- sincronização de clientes do BitPanel por ID, login, proprietário, status e vencimento;
+- renovação automática restrita aos clientes do proprietário Gate One Pro Server;
 - detecção de vencimentos D−3, D0, D+2 e D+5;
 - fila de aprovação de cobranças;
 - Pix pelo Mercado Pago;

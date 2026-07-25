@@ -101,13 +101,14 @@
         <section class="page" data-page-panel="customers">
           <div class="section-actions">
             <div class="search"><span>⌕</span><input id="customerSearch" placeholder="Buscar nome ou WhatsApp" /></div>
+            <button class="btn btn-success" id="syncBitPanelButton">↻ Sincronizar BitPanel</button>
             <button class="btn btn-secondary" id="importButton">Importar JSON</button>
             <button class="btn btn-primary" id="newCustomerButton">+ Novo cliente</button>
           </div>
           <article class="panel table-panel">
             <div class="table-wrap">
               <table>
-                <thead><tr><th>Cliente</th><th>Plano</th><th>Vencimento</th><th>BitPanel</th><th>Status</th><th>Ações</th></tr></thead>
+                <thead><tr><th>Cliente</th><th>Plano</th><th>Vencimento</th><th>BitPanel</th><th>Proprietário</th><th>Status</th><th>Ações</th></tr></thead>
                 <tbody id="customersTable"></tbody>
               </table>
             </div>
@@ -176,7 +177,42 @@
             <article class="panel">
               <div class="panel-head"><div><span class="eyebrow">CREDENCIAIS</span><h3>Prontidão das integrações</h3></div></div>
               <div id="settingsIntegrations" class="integration-list"></div>
-              <p class="hint">As credenciais são configuradas como variáveis privadas na Railway e nunca aparecem nesta tela.</p>
+              <p class="hint">As credenciais ficam protegidas no banco e nunca são exibidas novamente. Campos vazios mantêm o valor já salvo.</p>
+            </article>
+            <article class="panel integration-config">
+              <div class="panel-head"><div><span class="eyebrow">PIX AUTOMÁTICO</span><h3>Mercado Pago</h3></div></div>
+              <form class="settings-form integration-form" data-provider="mercadopago">
+                <label>Access Token de produção<input name="MERCADOPAGO_ACCESS_TOKEN" type="password" autocomplete="off" placeholder="Deixe vazio para manter o atual" /></label>
+                <label>Segredo do webhook<input name="MERCADOPAGO_WEBHOOK_SECRET" type="password" autocomplete="off" placeholder="Deixe vazio para manter o atual" /></label>
+                <label>URL de notificações<input name="MERCADOPAGO_NOTIFICATION_URL" type="url" value="https://gateoneserver-production.up.railway.app/webhooks/mercadopago" /></label>
+                <label>E-mail do pagador<input name="MERCADOPAGO_PAYER_EMAIL" type="email" /></label>
+                <div class="integration-actions"><button class="btn btn-secondary test-integration" type="button">Testar conexão</button><button class="btn btn-primary" type="submit">Salvar Mercado Pago</button></div>
+              </form>
+            </article>
+            <article class="panel integration-config">
+              <div class="panel-head"><div><span class="eyebrow">MENSAGENS</span><h3>WhatsApp Cloud API</h3></div></div>
+              <form class="settings-form integration-form" data-provider="whatsapp">
+                <label>Access Token<input name="WHATSAPP_ACCESS_TOKEN" type="password" autocomplete="off" placeholder="Deixe vazio para manter o atual" /></label>
+                <label>ID do número de telefone<input name="WHATSAPP_PHONE_NUMBER_ID" /></label>
+                <label>Token de verificação<input name="WHATSAPP_VERIFY_TOKEN" type="password" autocomplete="off" /></label>
+                <label>Segredo do aplicativo Meta<input name="META_APP_SECRET" type="password" autocomplete="off" /></label>
+                <label>Versão Graph API<input name="WHATSAPP_GRAPH_VERSION" value="v23.0" /></label>
+                <div class="integration-actions"><button class="btn btn-secondary test-integration" type="button">Testar conexão</button><button class="btn btn-primary" type="submit">Salvar WhatsApp</button></div>
+              </form>
+            </article>
+            <article class="panel integration-config">
+              <div class="panel-head"><div><span class="eyebrow">NAVEGADOR</span><h3>BitPanel</h3></div></div>
+              <form class="settings-form integration-form" data-provider="bitpanel">
+                <label>Usuário<input name="BITPANEL_USERNAME" autocomplete="username" /></label>
+                <label>Senha<input name="BITPANEL_PASSWORD" type="password" autocomplete="new-password" placeholder="Deixe vazio para manter a atual" /></label>
+                <label>Endereço do painel<input name="BITPANEL_BASE_URL" type="url" value="https://bitpanel.vip" /></label>
+                <label>Endereço de login<input name="BITPANEL_LOGIN_URL" type="url" value="https://bitpanel.vip/login" /></label>
+                <label>Plano do BitPanel<input name="BITPANEL_PLAN_LABEL" value="30, R$ 30,00" /></label>
+                <label>Pacote de TV<input name="BITPANEL_TV_PACKAGE" value="Full HD + H265 + HD + SD + VOD + Adulto" /></label>
+                <label>Conexões padrão<input name="BITPANEL_DEFAULT_CONNECTIONS" type="number" min="1" max="10" value="1" /></label>
+                <p class="hint">A sincronização importa todas as listas, mas só libera automação para o proprietário Gate One Pro Server.</p>
+                <div class="integration-actions"><button class="btn btn-secondary test-integration" type="button">Testar conexão</button><button class="btn btn-primary" type="submit">Salvar BitPanel</button></div>
+              </form>
             </article>
           </div>
         </section>
@@ -189,7 +225,7 @@
         <div class="form-grid">
           <label class="full">Nome<input name="name" required /></label>
           <label>WhatsApp<input name="whatsapp" placeholder="55 55 99999-9999" required /></label>
-          <label>Plano<select name="planCode"><option value="monthly">Mensal — R$ 30</option><option value="quarterly">Trimestral — R$ 80</option></select></label>
+          <label>Plano<select name="planCode"><option value="monthly">Mensal — R$ 30</option><option value="quarterly">Trimestral — R$ 85</option><option value="semiannual">Semestral — R$ 150</option><option value="annual">Anual — R$ 270</option></select></label>
           <label>Vencimento<input name="expiresOn" type="date" required /></label>
           <label>ID da lista BitPanel<input name="bitpanelListId" /></label>
           <label class="full">Referência/usuário no BitPanel<input name="bitpanelReference" /></label>

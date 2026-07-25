@@ -17,6 +17,7 @@ export async function scanBilling(db, { now = new Date(), timezone = 'America/Sa
        JOIN plans p ON p.id = s.plan_id
       WHERE s.status IN ('active', 'late')
         AND c.status NOT IN ('cancelled')
+        AND c.automation_eligible = true
         AND p.active = true`
   );
 

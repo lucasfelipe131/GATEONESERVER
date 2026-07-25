@@ -6,9 +6,11 @@ import { getSetting } from '../db.js';
 function detectPlan(text) {
   const normalized = String(text || '').trim().toLowerCase();
   if (normalized === 'plan_monthly' || /\b(mensal|30)\b/.test(normalized)) return 'monthly';
-  if (normalized === 'plan_quarterly' || /\b(trimestral|80|3 meses)\b/.test(normalized)) {
+  if (normalized === 'plan_quarterly' || /\b(trimestral|85|3 meses)\b/.test(normalized)) {
     return 'quarterly';
   }
+  if (normalized === 'plan_semiannual' || /\b(semestral|150|6 meses)\b/.test(normalized)) return 'semiannual';
+  if (normalized === 'plan_annual' || /\b(anual|270|12 meses)\b/.test(normalized)) return 'annual';
   return null;
 }
 
