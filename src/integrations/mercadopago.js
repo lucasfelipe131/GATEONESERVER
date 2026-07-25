@@ -3,9 +3,34 @@ import { hmacSha256, safeEqual } from '../security.js';
 
 const API_URL = 'https://api.mercadopago.com';
 
+export function getMercadoPagoReadiness(config) {
+  const token = String(config.MERCADOPAGO_ACCESS_TOKEN || '').trim();
+  const webhookSecret = String(config.MERCADOPAGO_WEBHOOK_SECRET || '').trim();
+  const notificationUrl =
+    config.MERCADOPAGO_NOTIFICATION_URL ||
+    (config.PUBLIC_BASE_URL ? `${config.PUBLIC_BASE_URL}/webhooks/mercadopago` : '');
+  const productionToken = token.startsWith('APP_USR-') && !token.startsWith('TEST-');
+  const missing = [];
+
+  if (!token) missing.push('access_token');
+  else if (!productionToken) missing.push('production_access_token');
+  if (!webhookSecret) missing.push('webhook_secret');
+  if (!notificationUrl) missing.push('notification_url');
+
+  return {
+    ready: missing.length === 0,
+    accessToken: Boolean(token),
+    productionToken,
+    webhookSecret: Boolean(webhookSecret),
+    notificationUrl: Boolean(notificationUrl),
+    missing
+  };
+}
+
 function requireLiveConfig(config) {
-  if (!config.MERCADOPAGO_ACCESS_TOKEN) {
-    throw new Error('MERCADOPAGO_ACCESS_TOKEN não configurado.');
+  const readiness = getMercadoPagoReadiness(config);
+  if (!readiness.ready) {
+    throw new Error(`Mercado Pago não está pronto para produção: ${readiness.missing.join(', ')}.`);
   }
 }
 

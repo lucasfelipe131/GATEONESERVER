@@ -16,7 +16,11 @@ import { createQueues, createRedis } from './queue.js';
 import { maskPhone, normalizePhone, randomToken, sanitizeForLog, sha256 } from './security.js';
 import { scanBilling, markPaymentApproved } from './services/billing.js';
 import { buildIdempotencyKey, renderChargeMessage } from './domain/billing.js';
-import { getMercadoPagoPayment, verifyMercadoPagoWebhook } from './integrations/mercadopago.js';
+import {
+  getMercadoPagoPayment,
+  getMercadoPagoReadiness,
+  verifyMercadoPagoWebhook
+} from './integrations/mercadopago.js';
 import {
   parseWhatsAppWebhook,
   verifyMetaSignature
@@ -816,14 +820,16 @@ app.get('/api/admin/settings', { preHandler: requireAuth }, async () => {
   const values = Object.fromEntries(
     await Promise.all(keys.map(async (key) => [key, await getSetting(db, key, null)]))
   );
+  const mercadoPago = getMercadoPagoReadiness(config);
   return {
     settings: values,
     integrations: {
       redis: Boolean(config.REDIS_URL),
-      mercadoPago: Boolean(config.MERCADOPAGO_ACCESS_TOKEN),
+      mercadoPago: mercadoPago.ready,
       whatsapp: Boolean(config.WHATSAPP_ACCESS_TOKEN && config.WHATSAPP_PHONE_NUMBER_ID),
       bitpanel: Boolean(config.BITPANEL_USERNAME && config.BITPANEL_PASSWORD)
-    }
+    },
+    mercadoPago
   };
 });
 
@@ -839,13 +845,10 @@ app.put('/api/admin/settings', { preHandler: requireAuth }, async (request) => {
     }),
     request.body
   );
-  if (
-    body.payment_mode === 'live' &&
-    (!config.MERCADOPAGO_ACCESS_TOKEN ||
-      !config.MERCADOPAGO_WEBHOOK_SECRET ||
-      !(config.MERCADOPAGO_NOTIFICATION_URL || config.PUBLIC_BASE_URL))
-  ) {
-    const error = new Error('Configure as credenciais e o webhook do Mercado Pago antes do modo real.');
+  if (body.payment_mode === 'live' && !getMercadoPagoReadiness(config).ready) {
+    const error = new Error(
+      'Configure o Access Token de produção, o segredo e o webhook do Mercado Pago antes do modo real.'
+    );
     error.statusCode = 409;
     throw error;
   }

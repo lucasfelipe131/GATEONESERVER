@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { hmacSha256, maskPhone, normalizePhone, safeEqual } from '../src/security.js';
-import { verifyMercadoPagoWebhook } from '../src/integrations/mercadopago.js';
+import {
+  getMercadoPagoReadiness,
+  verifyMercadoPagoWebhook
+} from '../src/integrations/mercadopago.js';
 
 test('normaliza telefone brasileiro', () => {
   assert.equal(normalizePhone('(55) 99999-9999'), '5555999999999');
@@ -33,4 +36,26 @@ test('valida assinatura do webhook do Mercado Pago', () => {
     dataId
   });
   assert.equal(valid, true);
+});
+
+test('só libera Mercado Pago com credenciais de produção completas', () => {
+  const base = {
+    PUBLIC_BASE_URL: 'https://gateoneserver-production.up.railway.app'
+  };
+  assert.equal(
+    getMercadoPagoReadiness({
+      ...base,
+      MERCADOPAGO_ACCESS_TOKEN: 'TEST-123',
+      MERCADOPAGO_WEBHOOK_SECRET: 'segredo'
+    }).ready,
+    false
+  );
+  assert.equal(
+    getMercadoPagoReadiness({
+      ...base,
+      MERCADOPAGO_ACCESS_TOKEN: 'APP_USR-123',
+      MERCADOPAGO_WEBHOOK_SECRET: 'segredo'
+    }).ready,
+    true
+  );
 });
