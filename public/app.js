@@ -17,10 +17,14 @@ const escapeHtml = (value) =>
   String(value ?? '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[character]);
 
 async function api(path, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (options.body !== undefined && options.body !== null && !('Content-Type' in headers)) {
+    headers['Content-Type'] = 'application/json';
+  }
   const response = await fetch(path, {
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-    ...options
+    ...options,
+    headers
   });
   const body = await response.json().catch(() => ({}));
   if (response.status === 401 && path !== '/api/auth/login') showLogin();
@@ -355,7 +359,10 @@ $('#syncBitPanelButton').addEventListener('click', async (event) => {
   const button = event.currentTarget;
   button.disabled = true;
   try {
-    const result = await api('/api/admin/customers/sync-bitpanel', { method: 'POST' });
+    const result = await api('/api/admin/customers/sync-bitpanel', {
+      method: 'POST',
+      body: JSON.stringify({})
+    });
     toast(`${result.found} lista(s) encontrada(s): ${result.imported} nova(s), ${result.updated} atualizada(s) e ${result.blocked} bloqueada(s).`);
     await loadCustomers();
   } catch (error) {
