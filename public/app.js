@@ -2,7 +2,8 @@ const state = {
   user: null,
   summary: null,
   settings: null,
-  chargeStatus: ''
+  chargeStatus: '',
+  customers: []
 };
 
 const $ = (selector, parent = document) => parent.querySelector(selector);
@@ -18,7 +19,7 @@ const escapeHtml = (value) =>
 
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
-  if (options.body !== undefined && options.body !== null && !('Content-Type' in headers)) {
+  if (options.body !== undefined && options.body !== null && !(options.body instanceof FormData) && !('Content-Type' in headers)) {
     headers['Content-Type'] = 'application/json';
   }
   const response = await fetch(path, {
@@ -165,6 +166,7 @@ function updateSafety(paused) {
 
 async function loadCustomers(search = '') {
   const { customers } = await api(`/api/admin/customers?search=${encodeURIComponent(search)}`);
+  state.customers = customers;
   $('#customersTable').innerHTML = customers.length
     ? customers
         .map(
@@ -176,7 +178,7 @@ async function loadCustomers(search = '') {
             <td>${customer.bitpanel_list_id ? `<span class="tag blue">Lista ${escapeHtml(customer.bitpanel_list_id)}</span>` : '<span class="tag">Não vinculado</span>'}</td>
             <td>${escapeHtml(customer.bitpanel_owner || 'Gate One Pro Server')}${customer.automation_eligible === false ? '<small class="blocked-note">Automação bloqueada</small>' : ''}</td>
             <td>${statusTag(customer.status)}</td>
-            <td><button class="btn btn-secondary btn-small" data-portal="${escapeHtml(customer.id)}">Copiar acesso</button></td>
+            <td><div class="table-actions"><button class="btn btn-secondary btn-small" data-edit-customer="${escapeHtml(customer.id)}">Editar</button><button class="btn btn-secondary btn-small" data-portal="${escapeHtml(customer.id)}">Copiar acesso</button></div></td>
           </tr>`
         )
         .join('')
@@ -316,6 +318,25 @@ $('#customerSearch').addEventListener('input', (event) => {
 });
 
 $('#customersTable').addEventListener('click', async (event) => {
+  const editButton = event.target.closest('[data-edit-customer]');
+  if (editButton) {
+    const customer = state.customers.find((item) => item.id === editButton.dataset.editCustomer);
+    if (!customer) return;
+    const form = $('#editCustomerForm');
+    form.elements.customerId.value = customer.id;
+    form.elements.name.value = customer.name || '';
+    form.elements.whatsapp.value = customer.whatsapp_e164 || '';
+    form.elements.planCode.value = customer.plan_code || 'monthly';
+    form.elements.expiresOn.value = customer.expires_on?.slice(0, 10) || '';
+    form.elements.status.value = customer.status || 'active';
+    form.elements.bitpanelListId.value = customer.bitpanel_list_id || '';
+    form.elements.bitpanelReference.value = customer.bitpanel_reference || '';
+    form.elements.bitpanelOwner.value = customer.bitpanel_owner || 'Gate One Pro Server';
+    form.elements.consentContact.checked = Boolean(customer.consent_contact);
+    $('#editCustomerError').textContent = '';
+    $('#editCustomerDialog').showModal();
+    return;
+  }
   const button = event.target.closest('[data-portal]');
   if (!button) return;
   button.disabled = true;
@@ -337,6 +358,26 @@ $('#customersTable').addEventListener('click', async (event) => {
 });
 
 $('#newCustomerButton').addEventListener('click', () => $('#customerDialog').showModal());
+$('#editCustomerForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = Object.fromEntries(new FormData(form));
+  const customerId = data.customerId;
+  delete data.customerId;
+  data.consentContact = form.elements.consentContact.checked;
+  $('#editCustomerError').textContent = '';
+  try {
+    await api(`/api/admin/customers/${customerId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data)
+    });
+    $('#editCustomerDialog').close();
+    toast('Cliente atualizado com sucesso.');
+    await loadCustomers($('#customerSearch').value);
+  } catch (error) {
+    $('#editCustomerError').textContent = error.message;
+  }
+});
 $('#customerForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
@@ -355,6 +396,28 @@ $('#customerForm').addEventListener('submit', async (event) => {
 });
 
 $('#importButton').addEventListener('click', () => $('#importDialog').showModal());
+$('#importSpreadsheetButton').addEventListener('click', () => $('#spreadsheetDialog').showModal());
+$('#spreadsheetForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = $('button[type="submit"]', form);
+  $('#spreadsheetError').textContent = '';
+  button.disabled = true;
+  try {
+    const result = await api('/api/admin/customers/import-spreadsheet', {
+      method: 'POST',
+      body: new FormData(form)
+    });
+    $('#spreadsheetDialog').close();
+    form.reset();
+    toast(`${result.imported} cliente(s) processado(s); ${result.errors.length} erro(s).`);
+    await loadCustomers();
+  } catch (error) {
+    $('#spreadsheetError').textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
 $('#syncBitPanelButton').addEventListener('click', async (event) => {
   const button = event.currentTarget;
   button.disabled = true;

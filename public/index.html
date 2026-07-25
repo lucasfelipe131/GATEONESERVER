@@ -102,6 +102,7 @@
           <div class="section-actions">
             <div class="search"><span>⌕</span><input id="customerSearch" placeholder="Buscar nome ou WhatsApp" /></div>
             <button class="btn btn-success" id="syncBitPanelButton">↻ Sincronizar BitPanel</button>
+            <button class="btn btn-secondary" id="importSpreadsheetButton">Importar Excel</button>
             <button class="btn btn-secondary" id="importButton">Importar JSON</button>
             <button class="btn btn-primary" id="newCustomerButton">+ Novo cliente</button>
           </div>
@@ -237,6 +238,38 @@
         </div>
         <p class="form-error" id="customerError"></p>
         <div class="dialog-actions"><button class="btn btn-secondary" value="cancel">Cancelar</button><button class="btn btn-primary" type="submit" value="default">Salvar cliente</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="editCustomerDialog">
+      <form method="dialog" class="dialog-form" id="editCustomerForm">
+        <div class="dialog-head"><div><span class="eyebrow">EDIÇÃO</span><h2>Editar cliente</h2></div><button class="icon-button" value="cancel">×</button></div>
+        <input name="customerId" type="hidden" />
+        <div class="form-grid">
+          <label class="full">Nome<input name="name" placeholder="A preencher" /></label>
+          <label>WhatsApp<input name="whatsapp" placeholder="55 55 99999-9999" /></label>
+          <label>Plano<select name="planCode"><option value="monthly">Mensal — R$ 30</option><option value="quarterly">Trimestral — R$ 85</option><option value="semiannual">Semestral — R$ 150</option><option value="annual">Anual — R$ 270</option></select></label>
+          <label>Vencimento<input name="expiresOn" type="date" required /></label>
+          <label>Status<select name="status"><option value="active">Ativo</option><option value="late">Atrasado</option><option value="suspended">Suspenso</option><option value="cancelled">Cancelado</option></select></label>
+          <label>ID da lista BitPanel<input name="bitpanelListId" /></label>
+          <label>Login/referência BitPanel<input name="bitpanelReference" /></label>
+          <label>Proprietário<input name="bitpanelOwner" /></label>
+          <label class="check-row full"><input name="consentContact" type="checkbox" /> Cliente autorizou contato pelo WhatsApp</label>
+        </div>
+        <p class="hint">A automação só é liberada quando o proprietário é exatamente “Gate One Pro Server”.</p>
+        <p class="form-error" id="editCustomerError"></p>
+        <div class="dialog-actions"><button class="btn btn-secondary" value="cancel">Cancelar</button><button class="btn btn-primary" type="submit" value="default">Salvar alterações</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="spreadsheetDialog">
+      <form method="dialog" class="dialog-form" id="spreadsheetForm" enctype="multipart/form-data">
+        <div class="dialog-head"><div><span class="eyebrow">IMPORTAÇÃO</span><h2>Importar Excel</h2></div><button class="icon-button" value="cancel">×</button></div>
+        <p class="muted">Aceita arquivos .xls e .xlsx. A primeira linha deve conter os títulos das colunas.</p>
+        <label>Arquivo Excel<input name="file" type="file" accept=".xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required /></label>
+        <p class="hint">Colunas reconhecidas: Nome, WhatsApp, Plano, Vencimento, ID BitPanel, Login, Status e Autoriza contato. O ID BitPanel atualiza o cliente existente sem duplicá-lo.</p>
+        <p class="form-error" id="spreadsheetError"></p>
+        <div class="dialog-actions"><button class="btn btn-secondary" value="cancel">Cancelar</button><button class="btn btn-primary" type="submit" value="default">Importar planilha</button></div>
       </form>
     </dialog>
 

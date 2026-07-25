@@ -5,6 +5,7 @@ import cookie from '@fastify/cookie';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
+import multipart from '@fastify/multipart';
 import rawBody from 'fastify-raw-body';
 import { z } from 'zod';
 import { loadConfig } from './config.js';
@@ -33,6 +34,7 @@ import {
   saveIntegrationCredentials
 } from './integrations/runtime-config.js';
 import { fetchBitPanelCustomers, testBitPanelConnection } from './integrations/bitpanel.js';
+import { parseCustomerSpreadsheet } from './importers/spreadsheet.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -57,6 +59,9 @@ const app = Fastify({
 
 await app.register(cookie, { secret: config.COOKIE_SECRET });
 await app.register(rateLimit, { max: 180, timeWindow: '1 minute' });
+await app.register(multipart, {
+  limits: { files: 1, fileSize: 5 * 1024 * 1024 }
+});
 await app.register(helmet, {
   contentSecurityPolicy: {
     directives: {
@@ -476,7 +481,7 @@ app.get('/api/admin/customers', { preHandler: requireAuth }, async (request) => 
        FROM customers c
        LEFT JOIN LATERAL (
          SELECT * FROM subscriptions
-          WHERE customer_id = c.id AND status <> 'cancelled'
+          WHERE customer_id = c.id
           ORDER BY created_at DESC LIMIT 1
        ) s ON true
        LEFT JOIN plans p ON p.id = s.plan_id
@@ -667,6 +672,100 @@ app.post('/api/admin/customers', { preHandler: requireAuth }, async (request, re
   });
 });
 
+app.patch('/api/admin/customers/:id', { preHandler: requireAuth }, async (request, reply) => {
+  const body = parse(
+    z.object({
+      name: z.string().max(120).optional(),
+      whatsapp: z.string().max(30).optional(),
+      planCode: z.enum(['monthly', 'quarterly', 'semiannual', 'annual']),
+      expiresOn: z.iso.date(),
+      status: z.enum(['active', 'late', 'suspended', 'cancelled']),
+      bitpanelListId: z.string().max(100).optional(),
+      bitpanelReference: z.string().max(120).optional(),
+      bitpanelOwner: z.string().max(120).optional(),
+      consentContact: z.boolean().default(false)
+    }),
+    request.body
+  );
+  const phone = body.whatsapp?.trim() ? normalizePhone(body.whatsapp) : null;
+  const result = await db.transaction(async (client) => {
+    const before = await client.query(
+      `SELECT c.*, s.id AS subscription_id, s.expires_on::text, s.bitpanel_list_id,
+              p.code AS plan_code
+         FROM customers c
+         LEFT JOIN LATERAL (
+           SELECT * FROM subscriptions
+            WHERE customer_id = c.id
+            ORDER BY created_at DESC LIMIT 1
+         ) s ON true
+         LEFT JOIN plans p ON p.id = s.plan_id
+        WHERE c.id = $1`,
+      [request.params.id]
+    );
+    if (!before.rows[0]) return null;
+    const plan = await client.query('SELECT id FROM plans WHERE code = $1', [body.planCode]);
+    if (!plan.rows[0]) throw new Error('Plano não encontrado.');
+    const customer = await client.query(
+      `UPDATE customers
+          SET name = $2, whatsapp_e164 = $3, bitpanel_reference = $4,
+              bitpanel_owner = $5, automation_eligible = $6, status = $7,
+              consent_contact = $8, updated_at = now()
+        WHERE id = $1 RETURNING *`,
+      [
+        request.params.id,
+        body.name?.trim() || null,
+        phone,
+        body.bitpanelReference?.trim() || null,
+        body.bitpanelOwner?.trim() || null,
+        body.bitpanelOwner?.trim() === 'Gate One Pro Server',
+        body.status,
+        Boolean(phone && body.consentContact)
+      ]
+    );
+    if (before.rows[0].subscription_id) {
+      await client.query(
+        `UPDATE subscriptions
+            SET plan_id = $2, expires_on = $3, status = $4,
+                bitpanel_list_id = $5, updated_at = now()
+          WHERE id = $1`,
+        [
+          before.rows[0].subscription_id,
+          plan.rows[0].id,
+          body.expiresOn,
+          body.status,
+          body.bitpanelListId?.trim() || null
+        ]
+      );
+    } else {
+      await client.query(
+        `INSERT INTO subscriptions
+          (customer_id, plan_id, starts_on, expires_on, status, bitpanel_list_id)
+         VALUES ($1, $2, CURRENT_DATE, $3, $4, $5)`,
+        [
+          request.params.id,
+          plan.rows[0].id,
+          body.expiresOn,
+          body.status,
+          body.bitpanelListId?.trim() || null
+        ]
+      );
+    }
+    return { before: before.rows[0], customer: customer.rows[0] };
+  });
+  if (!result) return reply.code(404).send({ error: 'Cliente não encontrado.' });
+  await audit(db, {
+    actorType: 'user',
+    actorId: request.user.id,
+    action: 'customer.updated',
+    entityType: 'customer',
+    entityId: request.params.id,
+    before: result.before,
+    after: { ...body, whatsapp: maskPhone(phone) },
+    ip: request.ip
+  });
+  return { ok: true };
+});
+
 app.post('/api/admin/customers/:id/portal-link', { preHandler: requireAuth }, async (request, reply) => {
   const portalToken = randomToken(24);
   const result = await db.query(
@@ -802,6 +901,28 @@ app.post('/api/admin/customers/import', { preHandler: requireAuth }, async (requ
     ip: request.ip
   });
   return stats;
+});
+
+app.post('/api/admin/customers/import-spreadsheet', { preHandler: requireAuth }, async (request) => {
+  const upload = await request.file();
+  if (!upload) throw Object.assign(new Error('Selecione uma planilha.'), { statusCode: 400 });
+  if (!/\.(xlsx|xls)$/i.test(upload.filename || '')) {
+    throw Object.assign(new Error('Envie um arquivo .xls ou .xlsx.'), { statusCode: 400 });
+  }
+  const customers = parseCustomerSpreadsheet(await upload.toBuffer());
+  const result = await app.inject({
+    method: 'POST',
+    url: '/api/admin/customers/import',
+    headers: { cookie: request.headers.cookie || '' },
+    payload: { customers }
+  });
+  const response = result.json();
+  if (result.statusCode >= 400) {
+    throw Object.assign(new Error(response.error || response.message || 'Falha na importação.'), {
+      statusCode: result.statusCode
+    });
+  }
+  return { ...response, rows: customers.length };
 });
 
 app.get('/api/admin/charges', { preHandler: requireAuth }, async (request) => {
