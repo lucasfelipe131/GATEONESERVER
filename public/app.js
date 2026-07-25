@@ -562,6 +562,23 @@ $$('.integration-form').forEach((form) => {
       button.disabled = false;
     }
   });
+  const activateMercadoPago = $('.activate-mercadopago', form);
+  if (activateMercadoPago) {
+    activateMercadoPago.addEventListener('click', async () => {
+      activateMercadoPago.disabled = true;
+      try {
+        const result = await api('/api/admin/integrations/mercadopago/activate', {
+          method: 'POST'
+        });
+        toast(result.message);
+        await loadSettings();
+      } catch (error) {
+        toast(error.message, 'error');
+      } finally {
+        activateMercadoPago.disabled = false;
+      }
+    });
+  }
 });
 
 api('/api/auth/me')

@@ -1202,7 +1202,15 @@ app.post('/api/admin/integrations/:provider/test', { preHandler: requireAuth }, 
     if (!response.ok) {
       throw Object.assign(new Error('Access Token recusado pelo Mercado Pago.'), { statusCode: 409 });
     }
-    return { ok: true, message: 'Mercado Pago conectado.' };
+    const paymentMode = await getSetting(db, 'payment_mode', config.PAYMENT_MODE);
+    return {
+      ok: true,
+      paymentMode,
+      message:
+        paymentMode === 'live'
+          ? 'Mercado Pago conectado e Checkout real ativo.'
+          : 'Credenciais válidas, mas o Checkout ainda está em Simulação. Clique em “Ativar Checkout real”.'
+    };
   }
   if (!runtimeConfig.WHATSAPP_PHONE_NUMBER_ID || !runtimeConfig.WHATSAPP_ACCESS_TOKEN) {
     throw Object.assign(new Error('Complete o token e o ID do número.'), { statusCode: 409 });
@@ -1216,6 +1224,40 @@ app.post('/api/admin/integrations/:provider/test', { preHandler: requireAuth }, 
   }
   return { ok: true, message: 'WhatsApp Cloud API conectado.' };
 });
+
+app.post(
+  '/api/admin/integrations/mercadopago/activate',
+  { preHandler: requireAuth },
+  async (request) => {
+    const runtimeConfig = await getRuntimeConfig(db, config);
+    const readiness = getMercadoPagoReadiness(runtimeConfig);
+    if (!readiness.ready) {
+      throw Object.assign(
+        new Error(`Mercado Pago incompleto: ${readiness.missing.join(', ')}.`),
+        { statusCode: 409 }
+      );
+    }
+    const response = await fetch('https://api.mercadopago.com/users/me', {
+      headers: { Authorization: `Bearer ${runtimeConfig.MERCADOPAGO_ACCESS_TOKEN}` }
+    });
+    if (!response.ok) {
+      throw Object.assign(new Error('Access Token recusado pelo Mercado Pago.'), {
+        statusCode: 409
+      });
+    }
+    await setSetting(db, 'payment_mode', 'live', request.user.id);
+    await audit(db, {
+      actorType: 'user',
+      actorId: request.user.id,
+      action: 'mercadopago.checkout_activated',
+      entityType: 'system_settings',
+      entityId: 'payment_mode',
+      after: { payment_mode: 'live' },
+      ip: request.ip
+    });
+    return { ok: true, paymentMode: 'live', message: 'Checkout real do Mercado Pago ativado.' };
+  }
+);
 
 app.get('/api/portal/:token', async (request, reply) => {
   const result = await db.query(
