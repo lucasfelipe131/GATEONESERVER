@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS plans (
   sort_order integer NOT NULL DEFAULT 0,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE plans ADD COLUMN IF NOT EXISTS description text;
 
 CREATE TABLE IF NOT EXISTS customers (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

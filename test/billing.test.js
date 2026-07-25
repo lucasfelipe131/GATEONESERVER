@@ -42,3 +42,16 @@ test('mensagem contém nome, plano, data e valor', () => {
   assert.match(message, /25\/08\/2026/);
   assert.match(message, /30,00/);
 });
+
+test('mensagem de nova venda informa cobrança e ativação após pagamento', () => {
+  const message = renderChargeMessage({
+    name: 'Lucas Felipe',
+    planName: 'Anual',
+    expiresOn: '2026-08-25',
+    amountCents: 27000,
+    stage: 'new_sale'
+  });
+  assert.match(message, /Anual/);
+  assert.match(message, /270,00/);
+  assert.match(message, /Após a confirmação do pagamento/);
+});

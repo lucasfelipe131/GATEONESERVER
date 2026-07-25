@@ -215,6 +215,8 @@ dialog::backdrop { background: rgba(6,19,39,.6); backdrop-filter: blur(4px); }
 .renewal-choice.selected { border-color: var(--green); background: var(--green-soft); }
 .renewal-pending { display: grid; gap: 4px; padding: 16px; border: 1px solid #f0ca88; border-radius: 14px; background: var(--amber-soft); }
 .renewal-pending span { color: #7c632e; font-size: 13px; }
+.automation-flow { display: grid; gap: 6px; padding: 14px; border: 1px solid #9bbcff; border-radius: 14px; background: var(--blue-soft); }
+.automation-flow span { color: var(--muted); font-size: 13px; line-height: 1.5; }
 .portal-message { min-height: 18px; margin: 13px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .portal-message.success { color: #176b4d; }
 .portal-message.error { color: var(--red); }

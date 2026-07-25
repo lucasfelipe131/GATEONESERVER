@@ -4,15 +4,16 @@ import { createDb } from './db.js';
 
 export async function seed(db, config) {
   await db.query(
-    `INSERT INTO plans (code, name, duration_months, price_cents, sort_order)
-     VALUES ('monthly', 'Mensal', 1, 3000, 1),
-            ('quarterly', 'Trimestral', 3, 8500, 2),
-            ('semiannual', 'Semestral', 6, 15000, 3),
-            ('annual', 'Anual', 12, 27000, 4)
+    `INSERT INTO plans (code, name, duration_months, price_cents, description, sort_order)
+     VALUES ('monthly', 'Mensal', 1, 3000, 'Todos os canais de esportes, filmes on-demand e séries on-demand das principais plataformas.', 1),
+            ('quarterly', 'Trimestral', 3, 8500, 'Todos os canais de esportes, filmes on-demand e séries on-demand das principais plataformas, com economia no ciclo.', 2),
+            ('semiannual', 'Semestral', 6, 15000, 'Todos os canais de esportes, filmes on-demand e séries on-demand das principais plataformas, com seis meses de tranquilidade.', 3),
+            ('annual', 'Anual', 12, 27000, 'Todos os canais de esportes, filmes on-demand e séries on-demand das principais plataformas, pelo melhor valor anual.', 4)
      ON CONFLICT (code) DO UPDATE
        SET name = EXCLUDED.name,
            duration_months = EXCLUDED.duration_months,
            price_cents = EXCLUDED.price_cents,
+           description = EXCLUDED.description,
            active = true,
            sort_order = EXCLUDED.sort_order`
   );

@@ -33,7 +33,7 @@ function renderRenewalPlans(customer) {
         <button class="renewal-choice ${plan.code === 'quarterly' ? 'featured' : ''}" data-plan="${plan.code}">
           <span>
             <strong>${plan.name}</strong>
-            <small>${plan.duration_months === 1 ? '1 mês' : `${plan.duration_months} meses`}</small>
+            <small>${plan.description || (plan.duration_months === 1 ? '1 mês' : `${plan.duration_months} meses`)}</small>
           </span>
           <b>${money(plan.price_cents)}</b>
         </button>`

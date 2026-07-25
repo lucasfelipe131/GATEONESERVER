@@ -83,6 +83,30 @@ export async function handleInboundMessage({ db, queues, config, inbound }) {
   const initialStatus = salesMode === 'automatic' && !paused ? 'approved' : 'awaiting_approval';
 
   const result = await db.transaction(async (client) => {
+    const existingCharge = await client.query(
+      `SELECT ch.id, ch.status
+         FROM charges ch
+         JOIN subscriptions s ON s.id = ch.subscription_id
+        WHERE s.customer_id = $1
+          AND COALESCE(ch.plan_id, s.plan_id) = $2
+          AND ch.stage = 'new_sale'
+          AND ch.status IN ('awaiting_approval', 'approved', 'sent')
+          AND ch.created_at > now() - interval '2 hours'
+        ORDER BY ch.created_at DESC
+        LIMIT 1`,
+      [customer.id, plan.id]
+    );
+    if (existingCharge.rows[0]) {
+      if (initialStatus === 'approved' && existingCharge.rows[0].status === 'awaiting_approval') {
+        await client.query(
+          `UPDATE charges
+              SET status = 'approved', approved_at = now(), updated_at = now()
+            WHERE id = $1`,
+          [existingCharge.rows[0].id]
+        );
+      }
+      return { chargeId: existingCharge.rows[0].id, duplicate: true };
+    }
     const subscriptionResult = await client.query(
       `INSERT INTO subscriptions (customer_id, plan_id, starts_on, expires_on, status)
        VALUES ($1, $2, CURRENT_DATE, CURRENT_DATE, 'pending')
@@ -114,14 +138,20 @@ export async function handleInboundMessage({ db, queues, config, inbound }) {
        VALUES ($1, $2, 'whatsapp', $3, 'payment_pending')`,
       [customer.name, phone, planCode]
     );
-    return { chargeId: chargeResult.rows[0].id };
+    return { chargeId: chargeResult.rows[0].id, duplicate: false };
   });
 
   if (initialStatus === 'approved') {
     await queues.messages.add(
       'send-charge',
       { chargeId: result.chargeId, conversationWindow: true },
-      { jobId: `charge-${result.chargeId}` }
+      {
+        jobId: `charge-${result.chargeId}-${inbound.id}`,
+        attempts: 20,
+        backoff: { type: 'fixed', delay: 300_000 },
+        removeOnComplete: 1000,
+        removeOnFail: 2000
+      }
     );
   } else {
     await queues.messages.add(
@@ -129,7 +159,7 @@ export async function handleInboundMessage({ db, queues, config, inbound }) {
       {
         customerId: customer.id,
         to: phone,
-        text: `Perfeito! Separei o plano ${plan.name}. Seu Pix será preparado e enviado assim que a cobrança for conferida.`
+        text: `Perfeito! Você escolheu o plano ${plan.name}, no valor de ${(plan.price_cents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}. A cobrança está aguardando aprovação no administrador.`
       },
       { jobId: `pending-${result.chargeId}` }
     );
@@ -140,7 +170,7 @@ export async function handleInboundMessage({ db, queues, config, inbound }) {
     action: 'sales.plan_selected',
     entityType: 'charge',
     entityId: result.chargeId,
-    after: { planCode, salesMode, paused }
+    after: { planCode, salesMode, paused, duplicate: result.duplicate }
   });
   return { action: 'plan_selected', ...result };
 }

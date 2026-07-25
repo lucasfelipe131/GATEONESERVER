@@ -178,7 +178,7 @@ app.get('/api/auth/me', { preHandler: requireAuth }, async (request) => ({ user:
 
 app.get('/api/public/plans', async () => {
   const result = await db.query(
-    'SELECT code, name, duration_months, price_cents FROM plans WHERE active = true ORDER BY sort_order'
+    'SELECT code, name, duration_months, price_cents, description FROM plans WHERE active = true ORDER BY sort_order'
   );
   return { plans: result.rows };
 });
@@ -212,8 +212,18 @@ app.post(
       entityId: result.rows[0].id,
       ip: request.ip
     });
+    const planNames = {
+      monthly: 'Mensal',
+      quarterly: 'Trimestral',
+      semiannual: 'Semestral',
+      annual: 'Anual'
+    };
+    const selectedPlan = planNames[body.desiredPlan];
+    const whatsappText = selectedPlan
+      ? `Olá! Quero o plano ${selectedPlan} do Gate One Pro e gerar minha cobrança Pix.`
+      : 'Olá! Quero conhecer os planos do Gate One Pro.';
     const whatsappUrl = config.PUBLIC_WHATSAPP_NUMBER
-      ? `https://wa.me/${config.PUBLIC_WHATSAPP_NUMBER}?text=${encodeURIComponent('Olá! Quero conhecer os planos do Gate One Pro.')}`
+      ? `https://wa.me/${config.PUBLIC_WHATSAPP_NUMBER}?text=${encodeURIComponent(whatsappText)}`
       : null;
     return reply.code(201).send({
       ok: true,
@@ -1002,7 +1012,7 @@ app.get('/api/portal/:token', async (request, reply) => {
   const customer = result.rows[0];
   const [plans, pending] = await Promise.all([
     db.query(
-      'SELECT code, name, duration_months, price_cents FROM plans WHERE active = true ORDER BY sort_order'
+      'SELECT code, name, duration_months, price_cents, description FROM plans WHERE active = true ORDER BY sort_order'
     ),
     db.query(
       `SELECT ch.status, ch.amount_cents, ch.created_at, p.code AS plan_code, p.name AS plan_name
@@ -1147,8 +1157,8 @@ app.post(
       queued,
       planName: created.planName,
       message: created.status === 'approved'
-        ? 'Pedido confirmado. O Pix será enviado pelo WhatsApp.'
-        : 'Pedido recebido. O Pix será enviado pelo WhatsApp assim que a cobrança for aprovada.'
+        ? `Plano ${created.planName} escolhido. A cobrança Pix foi criada e será enviada agora pelo WhatsApp.`
+        : `Plano ${created.planName} escolhido. A cobrança está aguardando aprovação no administrador.`
     });
   }
 );

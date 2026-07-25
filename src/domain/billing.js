@@ -47,7 +47,7 @@ export function renderChargeMessage({ name, planName, expiresOn, amountCents, st
     d0: `Olá, ${firstName}! Seu Gate One Pro vence hoje. Valor da renovação: ${value}. Posso enviar o Pix?`,
     'd+2': `Olá, ${firstName}! Sua renovação está pendente desde ${date}. Valor: ${value}. Se já pagou, desconsidere esta mensagem.`,
     'd+5': `Olá, ${firstName}! Este é o último lembrete antes da suspensão. Vencimento: ${date}; renovação: ${value}.`,
-    new_sale: `Olá, ${firstName}! Seu plano ${planName} foi escolhido. O valor é ${value}. Vamos gerar o Pix para ativação.`,
+    new_sale: `Olá, ${firstName}! Você escolheu o plano ${planName}, no valor de ${value}. A cobrança Pix está pronta. Após a confirmação do pagamento, seu acesso será ativado automaticamente.`,
     manual: `Olá, ${firstName}! Preparamos sua renovação do plano ${planName}, no valor de ${value}.`
   };
   return templates[stage];

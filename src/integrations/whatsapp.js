@@ -50,17 +50,17 @@ export function sendPlanMenu(config, to) {
       type: 'list',
       body: {
         text:
-          'Bem-vindo ao Gate One Pro! Escolha um plano para receber as instruções de ativação:'
+          'Bem-vindo ao Gate One Pro! Todos os planos incluem canais de esportes, filmes on-demand e séries on-demand das principais plataformas. Escolha seu plano para gerar a cobrança Pix:'
       },
       action: {
         button: 'Ver planos',
         sections: [{
           title: 'Planos Gate One Pro',
           rows: [
-            { id: 'plan_monthly', title: 'Mensal', description: 'R$ 30 por 1 mês' },
-            { id: 'plan_quarterly', title: 'Trimestral', description: 'R$ 85 por 3 meses' },
-            { id: 'plan_semiannual', title: 'Semestral', description: 'R$ 150 por 6 meses' },
-            { id: 'plan_annual', title: 'Anual', description: 'R$ 270 por 12 meses' }
+            { id: 'plan_monthly', title: 'Mensal — R$ 30', description: '1 mês de acesso completo' },
+            { id: 'plan_quarterly', title: 'Trimestral — R$ 85', description: '3 meses com economia' },
+            { id: 'plan_semiannual', title: 'Semestral — R$ 150', description: '6 meses de acesso completo' },
+            { id: 'plan_annual', title: 'Anual — R$ 270', description: '12 meses pelo melhor valor' }
           ]
         }]
       }
