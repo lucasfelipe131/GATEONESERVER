@@ -244,6 +244,7 @@ app.post(
     const body = parse(
       z.object({
         name: z.string().min(2).max(120),
+        email: z.email().max(254),
         whatsapp: z.string().min(10).max(30),
         desiredPlan: z.enum(['monthly', 'quarterly', 'semiannual', 'annual']).optional(),
         campaign: z.string().max(100).optional(),
@@ -273,12 +274,13 @@ app.post(
         [body.name, phone, body.campaign || null, body.desiredPlan]
       );
       const customer = await client.query(
-        `INSERT INTO customers (name, whatsapp_e164, source, status, consent_contact)
-         VALUES ($1, $2, 'landing_page', 'lead', true)
+        `INSERT INTO customers (name, email, whatsapp_e164, source, status, consent_contact)
+         VALUES ($1, $2, $3, 'landing_page', 'lead', true)
          ON CONFLICT (whatsapp_e164) DO UPDATE
-           SET name = EXCLUDED.name, consent_contact = true, updated_at = now()
+           SET name = EXCLUDED.name, email = EXCLUDED.email,
+               consent_contact = true, updated_at = now()
          RETURNING id, name, email`,
-        [body.name, phone]
+        [body.name, body.email.toLowerCase(), phone]
       );
       let subscription = await client.query(
         `SELECT id, expires_on::text FROM subscriptions
