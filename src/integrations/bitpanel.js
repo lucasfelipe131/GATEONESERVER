@@ -2,6 +2,14 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
 
+export const BITPANEL_LOGIN_SELECTORS = Object.freeze({
+  username:
+    "input[name='username'], input[name='email'], input[autocomplete='username']",
+  password:
+    "input[name='password'], input[type='password'], input[autocomplete='current-password']",
+  submit: "button[type='submit']"
+});
+
 function safeName(value) {
   return String(value).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 80);
 }
@@ -40,22 +48,56 @@ export function bitPanelOperationFor(renewal) {
     : 'renew';
 }
 
-async function openSession(page, config) {
-  await page.goto(config.BITPANEL_LOGIN_URL, { waitUntil: 'domcontentloaded' });
-  if (!page.url().includes('/login')) return;
+export function resolveBitPanelLoginUrl(baseUrl, configuredLoginUrl) {
+  const base = new URL(baseUrl);
+  const login = new URL(configuredLoginUrl || '/login', base);
+  if (login.origin === base.origin && (login.pathname === '' || login.pathname === '/')) {
+    login.pathname = '/login';
+  }
+  login.hash = '';
+  return login.toString();
+}
 
-  const email = page.locator("input[name='email']");
-  const password = page.locator("input[name='password']");
-  const submit = page.locator("button[type='submit']");
-  if ((await email.count()) !== 1 || (await password.count()) !== 1 || (await submit.count()) !== 1) {
+async function firstVisible(page, selector) {
+  const candidates = page.locator(selector);
+  const count = await candidates.count();
+  for (let index = 0; index < count; index += 1) {
+    const candidate = candidates.nth(index);
+    if (await candidate.isVisible().catch(() => false)) return candidate;
+  }
+  return null;
+}
+
+async function openSession(page, config) {
+  const loginUrl = resolveBitPanelLoginUrl(
+    config.BITPANEL_BASE_URL,
+    config.BITPANEL_LOGIN_URL
+  );
+  await page.goto(loginUrl, { waitUntil: 'domcontentloaded' });
+
+  const username = await firstVisible(page, BITPANEL_LOGIN_SELECTORS.username);
+  const password = await firstVisible(page, BITPANEL_LOGIN_SELECTORS.password);
+  const submit = await firstVisible(page, BITPANEL_LOGIN_SELECTORS.submit);
+  const loginPage = new URL(page.url()).pathname.includes('/login');
+
+  if (!username && !password && !loginPage) return;
+  if (!username || !password || !submit) {
     throw new Error('Tela de login do BitPanel mudou. Revisão manual necessária.');
   }
-  await email.fill(config.BITPANEL_USERNAME);
+
+  await username.fill(config.BITPANEL_USERNAME);
   await password.fill(config.BITPANEL_PASSWORD);
-  await Promise.all([
-    page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 25_000 }),
-    submit.click()
-  ]);
+  await submit.click();
+  await page
+    .waitForURL((url) => !url.pathname.includes('/login'), { timeout: 25_000 })
+    .catch(() => null);
+
+  const loginStillVisible =
+    new URL(page.url()).pathname.includes('/login') ||
+    (await username.isVisible().catch(() => false));
+  if (loginStillVisible) {
+    throw new Error('O BitPanel recusou o acesso. Confira o usuário e a senha em Configurações.');
+  }
 }
 
 async function captureListDetails(page) {
