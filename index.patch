@@ -1,0 +1,9 @@
+--- a/public/index.html
++++ b/public/index.html
+@@
+     <link rel="icon" type="image/png" href="/assets/gate-one-mark.png" />
+     <link rel="stylesheet" href="/styles.css" />
++    <link rel="stylesheet" href="/expirations.css" />
+@@
+-    <script src="/app.js" type="module"></script>
++    <script src="/expirations.js" type="module"></script>
