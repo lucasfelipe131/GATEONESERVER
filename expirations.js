@@ -115,7 +115,7 @@ function createExpirationPage() {
         <div class="expiration-selects">
           <label>Plano<select id="expirationPlan"><option value="">Todos os planos</option></select></label>
           <label>Status<select id="expirationStatus"><option value="">Todos os status</option></select></label>
-          <label>Ordenar<select id="expirationSort"><option value="urgent">Mais urgente</option><option value="distant">Mais distante</option><option value="name">Nome do cliente</option></select></label>
+          <label>Ordenar<select id="expirationSort"><option value="urgent">Mais urgente (vence antes)</option><option value="distant">Mais distante (vence depois)</option><option value="name">Nome do cliente</option></select></label>
         </div>
       </div>
 
@@ -278,6 +278,8 @@ function filteredExpirationCustomers() {
     if (aDays === null && bDays === null) return 0;
     if (aDays === null) return 1;
     if (bDays === null) return -1;
+    // ALTERAÇÃO: "urgent" = ascendente (quem vence ANTES vem primeiro)
+    // "distant" = descendente (quem vence DEPOIS vem primeiro)
     return expirationState.sort === 'distant' ? bDays - aDays : aDays - bDays;
   });
 }
