@@ -17,6 +17,8 @@ Projeto de produção para centralizar na Railway:
 - área do cliente e pontos Gate Club;
 - fila de renovação no BitPanel por Playwright;
 - assistente OpenAI no painel e atendimento orientativo no WhatsApp;
+- memória de atendimento por cliente, com histórico e problemas recorrentes;
+- atualização diária das novidades de um canal público do Telegram;
 - auditoria, idempotência e pausa global.
 
 O sistema nasce travado em modo seguro:
@@ -98,6 +100,17 @@ GLOBAL_PAUSE=true
 As variáveis do Mercado Pago, Meta e BitPanel podem ficar vazias na primeira
 implantação. Os segredos devem existir somente nas Variables da Railway.
 
+Para as novidades do chatbot, configure no serviço `worker`:
+
+```text
+TELEGRAM_SYNC_ENABLED=true
+TELEGRAM_CONTENT_URL=https://bit.ly/telebit2
+```
+
+O worker segue o redirecionamento e consulta a visualização pública do canal
+uma vez ao dia, às 08h30 no fuso configurado. Canais privados não podem ser
+lidos por essa rotina; nesse caso use o endereço público `https://t.me/canal`.
+
 ### 4. Conferir a primeira implantação
 
 Abra:
@@ -149,7 +162,13 @@ O formato aceito na importação é:
 ]
 ```
 
-`plan` aceita `monthly`, `quarterly`, `mensal` ou `trimestral`.
+`plan` aceita `monthly`, `quarterly`, `semiannual`, `annual` ou os nomes
+`mensal`, `trimestral`, `semestral` e `anual`.
+
+No painel, a ação **Cobrar** da tabela de clientes permite escolher qualquer
+um desses ciclos e criar ou reaproveitar um Checkout Pro do Mercado Pago. O
+link pode ser copiado, aberto ou enviado pelo WhatsApp. O plano só é aplicado
+à assinatura depois que o webhook confirmar o pagamento como aprovado.
 
 ## Mercado Pago
 
