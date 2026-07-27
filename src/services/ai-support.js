@@ -140,7 +140,7 @@ export async function answerAdminQuestion({ db, config, user, question }) {
 }
 
 export async function answerCustomerQuestion({ db, config, customerId, question }) {
-  const [customer, history] = await Promise.all([
+  const [customer, history, whatsappHistory, issues] = await Promise.all([
     db.query(
       `SELECT c.name, c.status, c.bitpanel_reference,
               s.expires_on::text, p.name AS plan_name
@@ -159,10 +159,33 @@ export async function answerCustomerQuestion({ db, config, customerId, question 
         WHERE audience = 'customer' AND customer_id = $1
         ORDER BY created_at DESC LIMIT 6`,
       [customerId]
+    ),
+    db.query(
+      `SELECT direction, content, created_at
+         FROM message_logs
+        WHERE customer_id = $1 AND content IS NOT NULL
+        ORDER BY created_at DESC LIMIT 12`,
+      [customerId]
+    ),
+    db.query(
+      `SELECT summary, status, occurrences, first_reported_at, last_mentioned_at
+         FROM customer_issues
+        WHERE customer_id = $1
+        ORDER BY last_mentioned_at DESC LIMIT 5`,
+      [customerId]
     )
   ]);
   const input = [
     `Dados permitidos do cliente:\n${JSON.stringify(customer.rows[0] || {}, null, 2)}`,
+    issues.rows.length
+      ? `Problemas já registrados:\n${JSON.stringify(issues.rows, null, 2)}`
+      : '',
+    whatsappHistory.rows.length
+      ? `Mensagens recentes do WhatsApp:\n${whatsappHistory.rows
+          .reverse()
+          .map((item) => `${item.direction === 'outbound' ? 'Gate One' : 'Cliente'}: ${item.content}`)
+          .join('\n')}`
+      : '',
     history.rows.length ? `Conversa recente:\n${compactHistory(history.rows)}` : '',
     `Mensagem atual:\n${question}`
   ].filter(Boolean).join('\n\n');

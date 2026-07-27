@@ -19,6 +19,86 @@ function isOptOut(text) {
   return /^(sair|parar|stop|cancelar mensagens)$/i.test(String(text || '').trim());
 }
 
+function normalizeMessage(text) {
+  return String(text || '')
+    .trim()
+    .toLocaleLowerCase('pt-BR')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function wantsMenu(text) {
+  return /^(menu|oi|ola|bom dia|boa tarde|boa noite|inicio|começar|comecar)$/.test(normalizeMessage(text));
+}
+
+function wantsAccountStatus(text) {
+  return /\b(minha conta|meu plano|minha assinatura|vencimento|vence|validade|situacao|situação|status|renovar|renovacao|renovação|pix|pagamento|pagar)\b/.test(
+    normalizeMessage(text)
+  );
+}
+
+async function saveSession(db, phone, state, data = {}) {
+  await db.query(
+    `INSERT INTO conversation_sessions (whatsapp_e164, state, data, expires_at)
+     VALUES ($1, $2, $3::jsonb, now() + interval '24 hours')
+     ON CONFLICT (whatsapp_e164) DO UPDATE
+       SET state = EXCLUDED.state, data = EXCLUDED.data,
+           expires_at = EXCLUDED.expires_at, updated_at = now()`,
+    [phone, state, JSON.stringify(data)]
+  );
+}
+
+async function accountSummary(db, customer) {
+  const result = await db.query(
+    `SELECT p.name AS plan_name, s.expires_on::text AS expires_on, s.status AS subscription_status,
+            ch.status AS charge_status, ch.amount_cents, ch.checkout_url, ch.pix_copy_paste
+       FROM subscriptions s
+       LEFT JOIN plans p ON p.id = s.plan_id
+       LEFT JOIN LATERAL (
+         SELECT status, amount_cents, checkout_url, pix_copy_paste
+           FROM charges
+          WHERE subscription_id = s.id
+          ORDER BY created_at DESC
+          LIMIT 1
+       ) ch ON true
+      WHERE s.customer_id = $1
+      ORDER BY s.created_at DESC
+      LIMIT 1`,
+    [customer.id]
+  );
+  return result.rows[0] || null;
+}
+
+function formatAccountSummary(customer, account) {
+  if (!account) {
+    return `Olá, ${customer.name.split(/\s+/)[0]}! Ainda não encontramos um plano ativo neste número. Vou te mostrar as opções disponíveis.`;
+  }
+  const due = account.expires_on
+    ? new Date(`${account.expires_on}T12:00:00`).toLocaleDateString('pt-BR')
+    : 'em atualização';
+  const amount = account.amount_cents
+    ? (account.amount_cents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+    : null;
+  const payment = {
+    paid: 'Pagamento confirmado.',
+    pending: 'Pagamento ainda está pendente.',
+    approved: 'Cobrança em preparação.',
+    sent: 'Cobrança enviada.',
+    awaiting_approval: 'Cobrança aguardando validação.',
+    failed: 'Houve uma falha na cobrança; um atendente pode ajudar.'
+  }[account.charge_status] || '';
+  return [
+    `Olá, ${customer.name.split(/\s+/)[0]}! Aqui está sua conta:`,
+    `• Plano: ${account.plan_name || 'em definição'}`,
+    `• Validade: ${due}`,
+    payment && `• ${payment}${amount ? ` Valor: ${amount}` : ''}`,
+    account.checkout_url && account.charge_status !== 'paid' ? `• Pagar com segurança: ${account.checkout_url}` : '',
+    'Se precisar, responda *MENU* para ver os planos ou *ATENDENTE* para falar com a equipe.'
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
 export async function handleInboundMessage({ db, queues, config, inbound }) {
   const phone = normalizePhone(inbound.from);
   const customerResult = await db.query(
@@ -53,6 +133,32 @@ export async function handleInboundMessage({ db, queues, config, inbound }) {
       { jobId: `optout-${inbound.id}` }
     );
     return { action: 'opt_out' };
+  }
+
+  if (wantsAccountStatus(inbound.text)) {
+    const account = await accountSummary(db, customer);
+    await saveSession(db, phone, 'account_summary', { customerId: customer.id });
+    await queues.messages.add(
+      'send-free-text',
+      { customerId: customer.id, to: phone, text: formatAccountSummary(customer, account) },
+      { jobId: `account-${inbound.id}` }
+    );
+    return { action: 'account_summary' };
+  }
+
+  if (wantsMenu(inbound.text)) {
+    await saveSession(db, phone, 'menu', { customerId: customer.id });
+    await queues.messages.add(
+      'send-free-text',
+      {
+        customerId: customer.id,
+        to: phone,
+        text: `Olá, ${customer.name.split(/\s+/)[0]}! 👋\n\nPosso te ajudar com:\n• *PLANOS* — ver opções\n• *MINHA CONTA* — plano, validade e pagamento\n• *ATENDENTE* — falar com a equipe\n• *SAIR* — parar avisos\n\nOu toque em “Ver planos” abaixo.`
+      },
+      { jobId: `welcome-${inbound.id}` }
+    );
+    await queues.messages.add('send-plan-menu', { customerId: customer.id, to: phone }, { jobId: `menu-${inbound.id}` });
+    return { action: 'menu' };
   }
 
   const planCode = detectPlan(inbound.text);
@@ -116,6 +222,7 @@ export async function handleInboundMessage({ db, queues, config, inbound }) {
       { customerId: customer.id, to: phone },
       { jobId: `menu-${inbound.id}` }
     );
+    await saveSession(db, phone, 'menu', { customerId: customer.id });
     return { action: 'menu' };
   }
 
