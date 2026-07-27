@@ -244,7 +244,7 @@ function renderIntegrations(target, integrations) {
   const labels = {
     redis: ['Fila Redis', 'Processamento em segundo plano'],
     mercadoPago: ['Mercado Pago', 'Cobrança Pix e confirmação'],
-    whatsapp: ['WhatsApp Cloud API', 'Atendimento e lembretes'],
+    whatsapp: ['WhatsApp Gate One', 'QR, atendimento, Pix e notificações'],
     bitpanel: ['BitPanel', 'Renovação por navegador'],
     openai: ['OpenAI', 'Assistente do painel e WhatsApp']
   };
