@@ -4,6 +4,9 @@ import {
   BITPANEL_LOGIN_SELECTORS,
   bitPanelOperationFor,
   buildBitPanelUsername,
+  isGateOneOwner,
+  normalizeBitPanelText,
+  optionLabelsForMonths,
   parseBitPanelExpiry,
   resolveBitPanelLoginUrl
 } from '../src/integrations/bitpanel.js';
@@ -47,4 +50,15 @@ test('aceita o login atual por username e corrige a URL raiz do BitPanel', () =>
     resolveBitPanelLoginUrl('https://bitpanel.vip', 'https://bitpanel.vip/login'),
     'https://bitpanel.vip/login'
   );
+});
+
+test('tolera variações de proprietário e validade do BitPanel', () => {
+  assert.equal(isGateOneOwner('Gate One Pro Server'), true);
+  assert.equal(isGateOneOwner(' GATE ONE  PRO SERVER '), true);
+  assert.equal(isGateOneOwner('Outro Revendedor'), false);
+  assert.equal(normalizeBitPanelText('Situação'), 'situacao');
+  assert.ok(optionLabelsForMonths(1).includes('30 dias'));
+  assert.ok(optionLabelsForMonths(3).includes('90 dias'));
+  assert.ok(optionLabelsForMonths(6).includes('180 dias'));
+  assert.ok(optionLabelsForMonths(12).includes('1 Ano'));
 });
