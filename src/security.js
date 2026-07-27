@@ -53,7 +53,13 @@ export function decryptSecret(payload, secret) {
 }
 
 export function normalizePhone(value) {
-  const digits = String(value || '').replace(/\D/g, '');
+  // Baileys may include a device suffix in a WhatsApp JID, for example
+  // 5555999999999:12@s.whatsapp.net. It is not part of the phone number.
+  const identity = String(value || '')
+    .trim()
+    .replace(/@.+$/i, '')
+    .replace(/:\d+$/, '');
+  const digits = identity.replace(/\D/g, '');
   if (digits.length === 10 || digits.length === 11) return `55${digits}`;
   if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) return digits;
   throw new Error('WhatsApp inválido. Use DDD + número.');
