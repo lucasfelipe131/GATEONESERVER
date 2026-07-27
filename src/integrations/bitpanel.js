@@ -403,7 +403,8 @@ export async function renewInBitPanel(config, renewal) {
       afterExpiry: after.expiryDate,
       evidencePath,
       listId,
-      username: after.username
+      username: after.username,
+      password: after.password
     };
   });
 }
