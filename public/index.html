@@ -127,10 +127,42 @@
             <button class="btn btn-secondary" id="importButton">Importar JSON</button>
             <button class="btn btn-primary" id="newCustomerButton">+ Novo cliente</button>
           </div>
+          <div class="customer-toolbar">
+            <div class="customer-filters">
+              <label>Classificação
+                <select id="customerStageFilter">
+                  <option value="">Todas</option>
+                  <option value="ready">Pronto / ativo</option>
+                  <option value="create_login">Criar login</option>
+                  <option value="awaiting_payment">Aguardando pagamento</option>
+                  <option value="review">Revisar cadastro</option>
+                </select>
+              </label>
+              <label>Status
+                <select id="customerStatusFilter">
+                  <option value="">Todos</option>
+                  <option value="active">Ativo</option>
+                  <option value="late">Atrasado</option>
+                  <option value="suspended">Suspenso</option>
+                  <option value="cancelled">Cancelado</option>
+                </select>
+              </label>
+            </div>
+            <div class="bulk-actions">
+              <strong id="selectedCustomerCount">0 selecionados</strong>
+              <select id="bulkOperationalStage" aria-label="Nova classificação dos clientes selecionados">
+                <option value="create_login">Marcar: criar login</option>
+                <option value="awaiting_payment">Marcar: aguardando pagamento</option>
+                <option value="review">Marcar: revisar cadastro</option>
+                <option value="ready">Marcar: pronto / ativo</option>
+              </select>
+              <button class="btn btn-secondary btn-small" id="applyBulkStage" disabled>Aplicar classificação</button>
+            </div>
+          </div>
           <article class="panel table-panel">
             <div class="table-wrap">
               <table>
-                <thead><tr><th>ID</th><th>Cliente / Login</th><th>Plano</th><th>Vencimento</th><th>ID BitPanel</th><th>Proprietário</th><th>Status</th><th>Ações</th></tr></thead>
+                <thead><tr><th><input id="selectAllCustomers" type="checkbox" aria-label="Selecionar todos os clientes exibidos" /></th><th>ID Gate</th><th>Cliente / Login</th><th>Plano</th><th>Vencimento</th><th>ID BitPanel</th><th>Classificação</th><th>Status</th><th>Ações</th></tr></thead>
                 <tbody id="customersTable"></tbody>
               </table>
             </div>
@@ -298,6 +330,7 @@
           <label>Vencimento<input name="expiresOn" type="date" required /></label>
           <label>ID da lista BitPanel<input name="bitpanelListId" /></label>
           <label class="full">Referência/usuário no BitPanel<input name="bitpanelReference" /></label>
+          <label>Classificação operacional<select name="operationalStage"><option value="ready">Pronto / ativo</option><option value="create_login">Criar login</option><option value="awaiting_payment">Aguardando pagamento</option><option value="review">Revisar cadastro</option></select></label>
           <label class="check-row full"><input name="consentContact" type="checkbox" checked /> Cliente autorizou contato pelo WhatsApp</label>
         </div>
         <p class="form-error" id="customerError"></p>
@@ -317,6 +350,7 @@
           <label>Status<select name="status"><option value="active">Ativo</option><option value="late">Atrasado</option><option value="suspended">Suspenso</option><option value="cancelled">Cancelado</option></select></label>
           <label>ID da lista BitPanel<input name="bitpanelListId" /></label>
           <label>Login/referência BitPanel<input name="bitpanelReference" /></label>
+          <label>Classificação operacional<select name="operationalStage"><option value="ready">Pronto / ativo</option><option value="create_login">Criar login</option><option value="awaiting_payment">Aguardando pagamento</option><option value="review">Revisar cadastro</option></select></label>
           <label>Proprietário<input name="bitpanelOwner" /></label>
           <label class="check-row full"><input name="consentContact" type="checkbox" /> Cliente autorizou contato pelo WhatsApp</label>
         </div>
