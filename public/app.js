@@ -261,17 +261,18 @@ async function loadCustomers(search = '') {
         .map(
           (customer) => `
           <tr>
-            <td class="client-cell"><strong>${escapeHtml(customer.name || customer.bitpanel_reference || 'A preencher')}</strong><small>${escapeHtml(customer.whatsapp_masked || 'Telefone a preencher')}</small></td>
+            <td><strong>#${escapeHtml(customer.id)}</strong></td>
+            <td class="client-cell"><strong>${escapeHtml(customer.name || 'Nome a preencher')}</strong><small>${escapeHtml(customer.bitpanel_reference || 'Login BitPanel a preencher')}</small></td>
             <td>${escapeHtml(customer.plan_name || 'Sem plano')}</td>
             <td>${date(customer.expires_on)}</td>
-            <td>${customer.bitpanel_list_id ? `<span class="tag blue">Lista ${escapeHtml(customer.bitpanel_list_id)}</span>` : '<span class="tag">Não vinculado</span>'}</td>
+            <td>${customer.bitpanel_list_id ? `<span class="tag blue">#${escapeHtml(customer.bitpanel_list_id)}</span>` : '<span class="tag">Não vinculado</span>'}</td>
             <td>${escapeHtml(customer.bitpanel_owner || 'Gate One Pro Server')}${customer.automation_eligible === false ? '<small class="blocked-note">Automação bloqueada</small>' : ''}</td>
             <td>${statusTag(customer.status)}</td>
             <td><div class="table-actions"><button class="btn btn-secondary btn-small" data-edit-customer="${escapeHtml(customer.id)}">Editar</button><button class="btn btn-secondary btn-small" data-portal="${escapeHtml(customer.id)}">Copiar acesso</button></div></td>
           </tr>`
         )
         .join('')
-    : '<tr><td colspan="7"><div class="empty">Nenhum cliente encontrado.</div></td></tr>';
+    : '<tr><td colspan="8"><div class="empty">Nenhum cliente encontrado.</div></td></tr>';
 }
 
 async function loadCharges(status = state.chargeStatus) {
