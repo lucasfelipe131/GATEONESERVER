@@ -74,7 +74,7 @@ export async function scanBilling(db, { now = new Date(), timezone = 'America/Sa
 export async function markPaymentApproved(db, chargeId, payment) {
   return db.transaction(async (client) => {
     const charge = await client.query(
-      `SELECT ch.*, s.customer_id, p.duration_months
+      `SELECT ch.*, s.customer_id, s.bitpanel_list_id, p.duration_months
          FROM charges ch
          JOIN subscriptions s ON s.id = ch.subscription_id
          JOIN plans p ON p.id = COALESCE(ch.plan_id, s.plan_id)
@@ -120,6 +120,20 @@ export async function markPaymentApproved(db, chargeId, payment) {
            WHERE s.id = $1
         )`,
       [charge.rows[0].subscription_id]
+    );
+    await client.query(
+      `UPDATE customers
+          SET operational_stage = CASE
+                WHEN $2 = 'new_sale' OR $3::text IS NULL THEN 'create_login'
+                ELSE 'ready'
+              END,
+              updated_at = now()
+        WHERE id = $1`,
+      [
+        charge.rows[0].customer_id,
+        charge.rows[0].stage,
+        charge.rows[0].bitpanel_list_id
+      ]
     );
     return {
       duplicate: false,
