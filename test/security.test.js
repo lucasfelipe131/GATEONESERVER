@@ -18,6 +18,12 @@ import {
 test('normaliza telefone brasileiro', () => {
   assert.equal(normalizePhone('(55) 99999-9999'), '5555999999999');
   assert.equal(normalizePhone('+55 55 99999-9999'), '5555999999999');
+  assert.equal(
+    normalizePhone('5555999999999:12@s.whatsapp.net'),
+    '5555999999999'
+  );
+  assert.equal(normalizePhone('55999999999@s.whatsapp.net'), '5555999999999');
+  assert.throws(() => normalizePhone('123456789012345@lid'));
   assert.throws(() => normalizePhone('123'));
 });
 
