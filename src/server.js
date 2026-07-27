@@ -14,7 +14,7 @@ import { initializeDatabase } from './init.js';
 import { authenticate, clearSessionCookie, login, logout, setSessionCookie } from './auth.js';
 import { audit } from './audit.js';
 import { createQueues, createRedis } from './queue.js';
-import { maskPhone, normalizePhone, randomToken, sanitizeForLog, sha256 } from './security.js';
+import { maskPhone, normalizePhone, randomToken, safeEqual, sanitizeForLog, sha256 } from './security.js';
 import { scanBilling, markPaymentApproved } from './services/billing.js';
 import { buildIdempotencyKey, renderChargeMessage } from './domain/billing.js';
 import {
@@ -248,6 +248,190 @@ app.get('/api/public/plans', async () => {
   return { plans: result.rows };
 });
 
+function requireBotSecret(request, reply) {
+  const provided = String(request.headers['x-gate-one-bot-secret'] || '');
+  if (!config.GATE_ONE_BOT_SECRET || !safeEqual(provided, config.GATE_ONE_BOT_SECRET)) {
+    reply.code(401).send({ error: 'Serviço WhatsApp não autorizado.' });
+    return false;
+  }
+  return true;
+}
+
+async function sendQrWhatsApp(to, text) {
+  const response = await fetch(`${config.GATE_ONE_WHATSAPP_QR_URL.replace(/\/$/, '')}/api/gate-one/notify`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Gate-One-Notify-Secret': config.GATE_ONE_WHATSAPP_NOTIFY_SECRET
+    },
+    body: JSON.stringify({ to, text })
+  });
+  if (!response.ok) throw new Error(`Aviso WhatsApp recusado (${response.status}).`);
+}
+
+async function notifyPaymentByQr(chargeId, paymentId) {
+  if (!config.GATE_ONE_WHATSAPP_QR_URL || !config.GATE_ONE_WHATSAPP_NOTIFY_SECRET) {
+    return { skipped: true, reason: 'not_configured' };
+  }
+  const result = await db.query(
+    `SELECT ch.id, c.id AS customer_id, c.name AS customer_name, c.whatsapp_e164,
+            c.bitpanel_reference, p.name AS plan_name, ch.amount_cents
+       FROM charges ch
+       JOIN subscriptions s ON s.id = ch.subscription_id
+       JOIN customers c ON c.id = s.customer_id
+       JOIN plans p ON p.id = COALESCE(ch.plan_id, s.plan_id)
+      WHERE ch.id = $1`,
+    [chargeId]
+  );
+  const charge = result.rows[0];
+  if (!charge) return { skipped: true, reason: 'charge_not_found' };
+  const amount = (charge.amount_cents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+  const ownerText = [
+    '✅ *Pagamento confirmado — Gate One*',
+    `Cliente: ${charge.customer_name || 'Nome não informado'}`,
+    `ID Gate One: ${charge.customer_id}`,
+    charge.bitpanel_reference ? `Login: ${charge.bitpanel_reference}` : '',
+    `Plano: ${charge.plan_name}`,
+    `Valor: ${amount}`,
+    paymentId ? `Pagamento Mercado Pago: ${paymentId}` : ''
+  ].filter(Boolean).join('\n');
+  const customerText = [
+    `✅ Olá, ${String(charge.customer_name || 'cliente').split(/\s+/)[0]}!`,
+    `Seu pagamento de ${amount} foi confirmado.`,
+    `Plano: ${charge.plan_name}.`,
+    'Estamos processando a liberação do seu acesso. Se precisar, responda *4* para falar com o atendimento.'
+  ].join('\n');
+  const ownerPhone = config.GATE_ONE_OWNER_WHATSAPP
+    ? normalizePhone(config.GATE_ONE_OWNER_WHATSAPP)
+    : null;
+  const customerPhone = charge.whatsapp_e164 ? normalizePhone(charge.whatsapp_e164) : null;
+  const deliveries = [];
+  if (ownerPhone) deliveries.push({ to: ownerPhone, text: ownerText, type: 'owner' });
+  if (customerPhone && customerPhone !== ownerPhone) {
+    deliveries.push({ to: customerPhone, text: customerText, type: 'customer' });
+  }
+  if (!deliveries.length) return { skipped: true, reason: 'no_recipient' };
+  const results = await Promise.allSettled(
+    deliveries.map((delivery) => sendQrWhatsApp(delivery.to, delivery.text))
+  );
+  const failures = results
+    .map((entry, index) => ({ entry, delivery: deliveries[index] }))
+    .filter(({ entry }) => entry.status === 'rejected');
+  if (failures.length) {
+    throw new Error(`Falha ao enviar aviso para: ${failures.map(({ delivery }) => delivery.type).join(', ')}.`);
+  }
+  return { sent: deliveries.length };
+}
+
+// These two routes are for the separately deployed QR-code service only.
+// They expose a short, client-safe message rather than personal records or
+// administrative actions, and are protected by the Railway shared secret.
+app.post('/api/integrations/whatsapp/customer', async (request, reply) => {
+  if (!requireBotSecret(request, reply)) return;
+  const body = parse(z.object({ whatsapp: z.string().min(10).max(20), name: z.string().max(120).optional() }), request.body);
+  const phone = normalizePhone(body.whatsapp);
+  const result = await db.query(
+    `SELECT c.name, p.name AS plan_name, s.expires_on::text AS expires_on, ch.status AS charge_status,
+            ch.checkout_url
+       FROM customers c
+       LEFT JOIN LATERAL (
+         SELECT * FROM subscriptions WHERE customer_id = c.id ORDER BY created_at DESC LIMIT 1
+       ) s ON true
+       LEFT JOIN plans p ON p.id = s.plan_id
+       LEFT JOIN LATERAL (
+         SELECT status, checkout_url FROM charges WHERE subscription_id = s.id ORDER BY created_at DESC LIMIT 1
+       ) ch ON true
+      WHERE c.whatsapp_e164 = $1 LIMIT 1`,
+    [phone]
+  );
+  const customer = result.rows[0];
+  if (!customer) return { message: null };
+  const expires = customer.expires_on
+    ? new Date(`${customer.expires_on}T12:00:00`).toLocaleDateString('pt-BR')
+    : 'em atualização';
+  const firstName = String(customer.name || 'cliente').split(/\s+/)[0];
+  return {
+    message: [
+      `Olá, ${firstName}!`,
+      `Plano: ${customer.plan_name || 'em definição'}.`,
+      `Validade: ${expires}.`,
+      customer.checkout_url && customer.charge_status !== 'paid' ? `Pagamento pendente: ${customer.checkout_url}` : ''
+    ].filter(Boolean).join('\n')
+  };
+});
+
+app.post('/api/integrations/whatsapp/payment', async (request, reply) => {
+  if (!requireBotSecret(request, reply)) return;
+  const body = parse(z.object({ whatsapp: z.string().min(10).max(20), name: z.string().max(120).optional() }), request.body);
+  const phone = normalizePhone(body.whatsapp);
+  const runtimeConfig = {
+    ...(await getRuntimeConfig(db, config)),
+    PAYMENT_MODE: await getSetting(db, 'payment_mode', config.PAYMENT_MODE)
+  };
+  const created = await db.transaction(async (client) => {
+    const existing = await client.query(
+      `SELECT ch.id, ch.checkout_url, p.name AS plan_name
+         FROM charges ch
+         JOIN subscriptions s ON s.id = ch.subscription_id
+         JOIN customers c ON c.id = s.customer_id
+         JOIN plans p ON p.id = COALESCE(ch.plan_id, s.plan_id)
+        WHERE c.whatsapp_e164 = $1
+          AND ch.status IN ('awaiting_approval', 'approved', 'sent')
+          AND ch.checkout_url IS NOT NULL
+          AND ch.created_at >= now() - interval '2 hours'
+        ORDER BY ch.created_at DESC LIMIT 1`, [phone]
+    );
+    if (existing.rows[0]) return { ...existing.rows[0], existing: true };
+    const customerResult = await client.query(
+      `SELECT c.id, c.name, c.email, c.whatsapp_e164, s.id AS subscription_id, s.expires_on::text,
+              p.id AS plan_id, p.code AS plan_code, p.name AS plan_name, p.duration_months, p.price_cents
+         FROM customers c
+         JOIN LATERAL (
+           SELECT * FROM subscriptions WHERE customer_id = c.id AND status <> 'cancelled'
+           ORDER BY created_at DESC LIMIT 1
+         ) s ON true
+         JOIN plans p ON p.id = s.plan_id AND p.active = true
+        WHERE c.whatsapp_e164 = $1
+        FOR UPDATE OF c`, [phone]
+    );
+    const customer = customerResult.rows[0];
+    if (!customer) return null;
+    const checkoutWindow = new Date().toISOString().slice(0, 13);
+    const idempotencyKey = buildIdempotencyKey(
+      customer.subscription_id,
+      'whatsapp_checkout',
+      `${customer.expires_on}-${checkoutWindow}`
+    );
+    const inserted = await client.query(
+      `INSERT INTO charges (subscription_id, plan_id, stage, status, amount_cents, due_on, idempotency_key, message_text, approved_at)
+       VALUES ($1, $2, 'manual', 'approved', $3, CURRENT_DATE, $4, $5, now())
+       ON CONFLICT (idempotency_key) DO NOTHING
+       RETURNING id`,
+      [customer.subscription_id, customer.plan_id, customer.price_cents, idempotencyKey,
+       renderChargeMessage({ name: customer.name, planName: customer.plan_name, expiresOn: customer.expires_on, amountCents: customer.price_cents, stage: 'manual' })]
+    );
+    const chargeId = inserted.rows[0]?.id || (await client.query('SELECT id FROM charges WHERE idempotency_key = $1', [idempotencyKey])).rows[0]?.id;
+    return { id: chargeId, ...customer, existing: false };
+  });
+  if (!created) return { message: null };
+  if (created.existing) return { message: `Olá! Seu link de pagamento do plano ${created.plan_name} já está pronto:\n${created.checkout_url}` };
+  const preference = await createCheckoutPreference(runtimeConfig, {
+    id: created.id,
+    idempotency_key: `whatsapp-checkout-${created.id}`,
+    customer_name: created.name,
+    customer_email: created.email,
+    customer_phone: created.whatsapp_e164,
+    plan_code: created.plan_code,
+    plan_name: created.plan_name,
+    duration_months: created.duration_months,
+    amount_cents: created.price_cents
+  });
+  await db.query('UPDATE charges SET mercado_pago_preference_id = $2, checkout_url = $3, updated_at = now() WHERE id = $1', [created.id, preference.id, preference.checkoutUrl]);
+  return {
+    message: `Olá, ${String(created.name || 'cliente').split(/\s+/)[0]}! Aqui está o pagamento seguro do seu plano ${created.plan_name}:\n${preference.checkoutUrl}`
+  };
+});
+
 app.post(
   '/api/public/leads',
   { config: { rateLimit: { max: 8, timeWindow: '1 hour' } } },
@@ -466,6 +650,15 @@ app.post('/webhooks/mercadopago', async (request, reply) => {
             { jobId: `paid-${payment.external_reference}` }
           );
         }
+        if (!marked.duplicate) {
+          try {
+            await notifyPaymentByQr(payment.external_reference, payment.id);
+          } catch (notificationError) {
+            // The Mercado Pago event is already safely recorded. A temporary
+            // WhatsApp QR outage must not make the webhook fail or duplicate a payment.
+            app.log.warn({ chargeId: payment.external_reference, error: notificationError.message }, 'Pagamento confirmado, mas aviso ao responsável falhou');
+          }
+        }
         await maybeQueueBitPanelJob(marked.renewalId);
       }
     }
@@ -621,8 +814,10 @@ app.get('/api/admin/plans', { preHandler: requireAuth }, async () => {
 
 app.get('/api/admin/customers', { preHandler: requireAuth }, async (request) => {
   const search = String(request.query?.search || '').trim();
+  const stage = String(request.query?.stage || '').trim();
+  const status = String(request.query?.status || '').trim();
   const result = await db.query(
-    `SELECT c.id, c.name, c.whatsapp_e164, c.status, c.consent_contact, c.source,
+    `SELECT c.id, c.name, c.whatsapp_e164, c.status, c.operational_stage, c.consent_contact, c.source,
             c.bitpanel_reference, c.bitpanel_owner, c.automation_eligible, c.created_at,
             s.id AS subscription_id, s.expires_on::text, s.bitpanel_list_id,
             p.code AS plan_code, p.name AS plan_name, p.price_cents
@@ -637,9 +832,11 @@ app.get('/api/admin/customers', { preHandler: requireAuth }, async (request) => 
          OR COALESCE(c.whatsapp_e164, '') LIKE '%' || $1 || '%'
          OR COALESCE(c.bitpanel_reference, '') ILIKE '%' || $1 || '%'
          OR COALESCE(s.bitpanel_list_id, '') LIKE '%' || $1 || '%')
+        AND ($2 = '' OR c.operational_stage = $2)
+        AND ($3 = '' OR c.status = $3)
       ORDER BY COALESCE(s.expires_on, CURRENT_DATE + 9999), c.name
       LIMIT 300`,
-    [search]
+    [search, stage, status]
   );
   return {
     customers: result.rows.map((row) => ({ ...row, whatsapp_masked: maskPhone(row.whatsapp_e164) }))
@@ -778,6 +975,7 @@ app.post('/api/admin/customers', { preHandler: requireAuth }, async (request, re
       expiresOn: z.iso.date(),
       bitpanelListId: z.string().max(100).optional(),
       bitpanelReference: z.string().max(120).optional(),
+      operationalStage: z.enum(['ready', 'create_login', 'awaiting_payment', 'review']).default('ready'),
       consentContact: z.boolean().default(true)
     }),
     request.body
@@ -789,10 +987,10 @@ app.post('/api/admin/customers', { preHandler: requireAuth }, async (request, re
     if (!plan.rows[0]) throw new Error('Plano não encontrado.');
     const customer = await client.query(
       `INSERT INTO customers
-        (name, whatsapp_e164, bitpanel_reference, source, status, consent_contact, portal_token_hash)
-       VALUES ($1, $2, $3, 'manual', 'active', $4, $5)
+        (name, whatsapp_e164, bitpanel_reference, source, status, operational_stage, consent_contact, portal_token_hash)
+       VALUES ($1, $2, $3, 'manual', 'active', $4, $5, $6)
        RETURNING id`,
-      [body.name, phone, body.bitpanelReference || null, body.consentContact, sha256(portalToken)]
+      [body.name, phone, body.bitpanelReference || null, body.operationalStage, body.consentContact, sha256(portalToken)]
     );
     const subscription = await client.query(
       `INSERT INTO subscriptions
@@ -820,6 +1018,35 @@ app.post('/api/admin/customers', { preHandler: requireAuth }, async (request, re
   });
 });
 
+app.patch('/api/admin/customers/operational-stage', { preHandler: requireAuth }, async (request) => {
+  const body = parse(
+    z.object({
+      customerIds: z.array(z.uuid()).min(1).max(300),
+      operationalStage: z.enum(['ready', 'create_login', 'awaiting_payment', 'review'])
+    }),
+    request.body
+  );
+  const result = await db.query(
+    `UPDATE customers
+        SET operational_stage = $2, updated_at = now()
+      WHERE id = ANY($1::uuid[])
+      RETURNING id`,
+    [body.customerIds, body.operationalStage]
+  );
+  await audit(db, {
+    actorType: 'user',
+    actorId: request.user.id,
+    action: 'customer.operational_stage_bulk_updated',
+    entityType: 'customer',
+    after: {
+      customerIds: result.rows.map((row) => row.id),
+      operationalStage: body.operationalStage
+    },
+    ip: request.ip
+  });
+  return { ok: true, updated: result.rowCount };
+});
+
 app.patch('/api/admin/customers/:id', { preHandler: requireAuth }, async (request, reply) => {
   const body = parse(
     z.object({
@@ -836,6 +1063,7 @@ app.patch('/api/admin/customers/:id', { preHandler: requireAuth }, async (reques
       bitpanelListId: z.string().max(100).optional(),
       bitpanelReference: z.string().max(120).optional(),
       bitpanelOwner: z.string().max(120).optional(),
+      operationalStage: z.enum(['ready', 'create_login', 'awaiting_payment', 'review']).default('ready'),
       consentContact: z.boolean().default(false)
     }),
     request.body
@@ -862,7 +1090,7 @@ app.patch('/api/admin/customers/:id', { preHandler: requireAuth }, async (reques
       `UPDATE customers
           SET name = $2, whatsapp_e164 = $3, bitpanel_reference = $4,
               bitpanel_owner = $5, automation_eligible = $6, status = $7,
-              consent_contact = $8, updated_at = now()
+              operational_stage = $8, consent_contact = $9, updated_at = now()
         WHERE id = $1 RETURNING *`,
       [
         request.params.id,
@@ -872,6 +1100,7 @@ app.patch('/api/admin/customers/:id', { preHandler: requireAuth }, async (reques
         body.bitpanelOwner?.trim() || null,
         body.bitpanelOwner?.trim() === 'Gate One Pro Server',
         body.status,
+        body.operationalStage,
         Boolean(phone && body.consentContact)
       ]
     );
@@ -915,6 +1144,20 @@ app.patch('/api/admin/customers/:id', { preHandler: requireAuth }, async (reques
     before: result.before,
     after: { ...body, whatsapp: maskPhone(phone) },
     ip: request.ip
+  });
+  return { ok: true };
+});
+
+app.delete('/api/admin/customers/:id', { preHandler: requireAuth }, async (request, reply) => {
+  const result = await db.query(
+    'DELETE FROM customers WHERE id = $1 RETURNING id, name, bitpanel_reference',
+    [request.params.id]
+  );
+  if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado.' });
+  await audit(db, {
+    actorType: 'user', actorId: request.user.id, action: 'customer.deleted',
+    entityType: 'customer', entityId: result.rows[0].id,
+    before: result.rows[0], ip: request.ip
   });
   return { ok: true };
 });
