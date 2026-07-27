@@ -56,6 +56,7 @@
         <label>Nome<input name="name" required /></label>
         <label>E-mail do pagador<input name="email" type="email" autocomplete="email" required /></label>
         <label>WhatsApp com DDD<input name="whatsapp" placeholder="(55) 99999-9999" required /></label>
+        <label>Seu login de acesso<input name="desiredLogin" minlength="4" maxlength="32" pattern="[A-Za-z0-9._-]+" autocomplete="username" placeholder="ex.: ana.silva" required /><small>Use de 4 a 32 letras, números, ponto, hífen ou sublinhado. Ele será reservado após o pagamento.</small></label>
         <label>Plano<select name="desiredPlan"><option value="monthly">Mensal — R$ 30</option><option value="quarterly">Trimestral — R$ 85</option><option value="semiannual">Semestral — R$ 150</option><option value="annual">Anual — R$ 270</option></select></label>
         <label class="check-row"><input name="consent" type="checkbox" required /> Aceito receber o atendimento solicitado pelo WhatsApp.</label>
         <button class="btn btn-primary btn-block" type="submit">Ir para o pagamento</button>
