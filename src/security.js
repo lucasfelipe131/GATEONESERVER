@@ -59,9 +59,17 @@ export function normalizePhone(value) {
     .trim()
     .replace(/@.+$/i, '')
     .replace(/:\d+$/, '');
-  const digits = identity.replace(/\D/g, '');
-  if (digits.length === 10 || digits.length === 11) return `55${digits}`;
-  if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) return digits;
+  let digits = identity.replace(/\D/g, '');
+  if (digits.length === 10 || digits.length === 11) digits = `55${digits}`;
+  if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) {
+    // WhatsApp may expose Brazilian mobile accounts without the ninth digit.
+    // Normalize them to the same E.164 stored by spreadsheet imports while
+    // preserving 8-digit landlines (subscriber prefixes 2-5).
+    if (digits.length === 12 && /[6-9]/.test(digits[4])) {
+      digits = `${digits.slice(0, 4)}9${digits.slice(4)}`;
+    }
+    return digits;
+  }
   throw new Error('WhatsApp inválido. Use DDD + número.');
 }
 
