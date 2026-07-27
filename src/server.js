@@ -33,10 +33,27 @@ import {
   getRuntimeConfig,
   saveIntegrationCredentials
 } from './integrations/runtime-config.js';
-import { fetchBitPanelCustomers, testBitPanelConnection } from './integrations/bitpanel.js';
+import {
+  fetchBitPanelCustomers,
+  isGateOneOwner,
+  testBitPanelConnection
+} from './integrations/bitpanel.js';
 import { testOpenAIConnection } from './integrations/openai.js';
 import { parseCustomerSpreadsheet } from './importers/spreadsheet.js';
-import { answerAdminQuestion } from './services/ai-support.js';
+import { answerAdminQuestion, answerCustomerQuestion } from './services/ai-support.js';
+import {
+  confirmCustomerLogin,
+  confirmCustomerName,
+  customerHistoryMessage,
+  logQrOutbound,
+  registerQrInbound,
+  setConversationState
+} from './services/customer-memory.js';
+import {
+  formatTelegramDigest,
+  latestTelegramContent,
+  syncTelegramContent
+} from './services/telegram-content.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -167,7 +184,7 @@ async function maybeQueueBitPanelJob(renewalId, approvedBy = null) {
   const isProvision = target.stage === 'new_sale' || !target.bitpanel_list_id;
   if (
     !isProvision &&
-    (!target.automation_eligible || target.bitpanel_owner !== 'Gate One Pro Server')
+    (!target.automation_eligible || !isGateOneOwner(target.bitpanel_owner))
   ) {
     return { queued: false, reason: 'customer_not_eligible' };
   }
@@ -323,16 +340,285 @@ async function notifyPaymentByQr(chargeId, paymentId) {
   return { sent: deliveries.length };
 }
 
-// These two routes are for the separately deployed QR-code service only.
+async function createRenewalCheckout({
+  customerId = null,
+  phone = null,
+  planCode = null,
+  source = 'renewal'
+}) {
+  const runtimeConfig = {
+    ...(await getRuntimeConfig(db, config)),
+    PAYMENT_MODE: await getSetting(db, 'payment_mode', config.PAYMENT_MODE)
+  };
+  const created = await db.transaction(async (client) => {
+    const existing = await client.query(
+      `SELECT ch.id, ch.checkout_url, p.code AS plan_code, p.name AS plan_name,
+              p.duration_months, ch.amount_cents, c.id AS customer_id, c.name,
+              c.whatsapp_e164
+         FROM charges ch
+         JOIN subscriptions s ON s.id = ch.subscription_id
+         JOIN customers c ON c.id = s.customer_id
+         JOIN plans current_plan ON current_plan.id = s.plan_id
+         JOIN plans p ON p.id = COALESCE(ch.plan_id, s.plan_id)
+        WHERE (($1::uuid IS NOT NULL AND c.id = $1::uuid)
+            OR ($2::text IS NOT NULL AND c.whatsapp_e164 = $2::text))
+          AND p.code = COALESCE($3::text, current_plan.code)
+          AND ch.status IN ('awaiting_approval', 'approved', 'sent')
+          AND ch.checkout_url IS NOT NULL
+          AND ch.created_at >= now() - interval '6 hours'
+        ORDER BY ch.created_at DESC LIMIT 1`,
+      [customerId, phone, planCode]
+    );
+    if (existing.rows[0]) return { ...existing.rows[0], existing: true };
+
+    const customerResult = await client.query(
+      `SELECT c.id AS customer_id, c.name, c.email, c.whatsapp_e164,
+              s.id AS subscription_id, s.expires_on::text,
+              p.id AS plan_id, p.code AS plan_code, p.name AS plan_name,
+              p.duration_months, p.price_cents AS amount_cents
+         FROM customers c
+         JOIN LATERAL (
+           SELECT * FROM subscriptions
+            WHERE customer_id = c.id AND status <> 'cancelled'
+            ORDER BY created_at DESC LIMIT 1
+         ) s ON true
+         JOIN plans current_plan ON current_plan.id = s.plan_id
+         JOIN plans p
+           ON p.code = COALESCE($3::text, current_plan.code)
+          AND p.active = true
+        WHERE (($1::uuid IS NOT NULL AND c.id = $1::uuid)
+            OR ($2::text IS NOT NULL AND c.whatsapp_e164 = $2::text))
+        FOR UPDATE OF c`,
+      [customerId, phone, planCode]
+    );
+    const customer = customerResult.rows[0];
+    if (!customer) return null;
+
+    const checkoutWindow = new Date().toISOString().slice(0, 13);
+    const idempotencyKey = buildIdempotencyKey(
+      customer.subscription_id,
+      `${source}-${customer.plan_code}`,
+      `${customer.expires_on}-${checkoutWindow}`
+    );
+    const inserted = await client.query(
+      `INSERT INTO charges
+        (subscription_id, plan_id, stage, status, amount_cents, due_on,
+         idempotency_key, message_text, approved_at)
+       VALUES ($1, $2, 'manual', 'approved', $3, CURRENT_DATE, $4, $5, now())
+       ON CONFLICT (idempotency_key) DO NOTHING
+       RETURNING id`,
+      [
+        customer.subscription_id,
+        customer.plan_id,
+        customer.amount_cents,
+        idempotencyKey,
+        renderChargeMessage({
+          name: customer.name,
+          planName: customer.plan_name,
+          expiresOn: customer.expires_on,
+          amountCents: customer.amount_cents,
+          stage: 'manual'
+        })
+      ]
+    );
+    const chargeId =
+      inserted.rows[0]?.id ||
+      (await client.query('SELECT id FROM charges WHERE idempotency_key = $1', [idempotencyKey]))
+        .rows[0]?.id;
+    return { id: chargeId, ...customer, existing: false };
+  });
+
+  if (!created) return null;
+  await db.query(
+    `UPDATE customers
+        SET operational_stage = CASE
+              WHEN operational_stage = 'review' THEN operational_stage
+              ELSE 'awaiting_payment'
+            END,
+            updated_at = now()
+      WHERE id = $1`,
+    [created.customer_id]
+  );
+  if (created.existing) return created;
+  const preference = await createCheckoutPreference(runtimeConfig, {
+    id: created.id,
+    idempotency_key: `${source}-checkout-${created.id}`,
+    customer_name: created.name,
+    customer_email: created.email,
+    customer_phone: created.whatsapp_e164,
+    plan_code: created.plan_code,
+    plan_name: created.plan_name,
+    duration_months: created.duration_months,
+    amount_cents: created.amount_cents
+  });
+  await db.query(
+    `UPDATE charges
+        SET mercado_pago_preference_id = $2, checkout_url = $3, updated_at = now()
+      WHERE id = $1`,
+    [created.id, preference.id, preference.checkoutUrl]
+  );
+  return { ...created, checkout_url: preference.checkoutUrl, preference_id: preference.id };
+}
+
+// These routes are for the separately deployed QR-code service only.
 // They expose a short, client-safe message rather than personal records or
 // administrative actions, and are protected by the Railway shared secret.
+app.post('/api/integrations/whatsapp/plans', async (request, reply) => {
+  if (!requireBotSecret(request, reply)) return;
+  const result = await db.query(
+    `SELECT code, name, duration_months, price_cents
+       FROM plans WHERE active = true ORDER BY sort_order`
+  );
+  const lines = result.rows.map(
+    (plan) =>
+      `• *${plan.name}* — ${(plan.price_cents / 100).toLocaleString('pt-BR', {
+        style: 'currency',
+        currency: 'BRL'
+      })} (${plan.duration_months} ${plan.duration_months === 1 ? 'mês' : 'meses'})`
+  );
+  return {
+    plans: result.rows,
+    message: [
+      '*Planos Gate One Pro*',
+      '',
+      ...lines,
+      '',
+      'Responda *MENSAL*, *TRIMESTRAL*, *SEMESTRAL* ou *ANUAL* para gerar seu link de renovação.'
+    ].join('\n')
+  };
+});
+
+app.post('/api/integrations/whatsapp/inbound', async (request, reply) => {
+  if (!requireBotSecret(request, reply)) return;
+  const body = parse(
+    z.object({
+      whatsapp: z.string().min(10).max(30),
+      displayName: z.string().max(120).optional(),
+      text: z.string().min(1).max(4000),
+      messageId: z.string().max(250).optional()
+    }),
+    request.body
+  );
+  return registerQrInbound(db, {
+    phone: body.whatsapp,
+    displayName: body.displayName || null,
+    text: body.text,
+    providerId: body.messageId || null
+  });
+});
+
+app.post('/api/integrations/whatsapp/name', async (request, reply) => {
+  if (!requireBotSecret(request, reply)) return;
+  const body = parse(
+    z.object({
+      whatsapp: z.string().min(10).max(30),
+      name: z.string().min(2).max(120)
+    }),
+    request.body
+  );
+  return confirmCustomerName(db, body);
+});
+
+app.post('/api/integrations/whatsapp/login', async (request, reply) => {
+  if (!requireBotSecret(request, reply)) return;
+  const body = parse(
+    z.object({
+      whatsapp: z.string().min(10).max(30),
+      login: z.string().min(3).max(80)
+    }),
+    request.body
+  );
+  return confirmCustomerLogin(db, body);
+});
+
+app.post('/api/integrations/whatsapp/session', async (request, reply) => {
+  if (!requireBotSecret(request, reply)) return;
+  const body = parse(
+    z.object({
+      whatsapp: z.string().min(10).max(30),
+      state: z.enum(['menu', 'awaiting_name', 'awaiting_login', 'awaiting_plan', 'support']),
+      data: z.record(z.string(), z.unknown()).optional()
+    }),
+    request.body
+  );
+  await setConversationState(db, body.whatsapp, body.state, body.data || {});
+  return { ok: true };
+});
+
+app.post('/api/integrations/whatsapp/outbound', async (request, reply) => {
+  if (!requireBotSecret(request, reply)) return;
+  const body = parse(
+    z.object({
+      whatsapp: z.string().min(10).max(30),
+      text: z.string().min(1).max(4000),
+      messageId: z.string().max(250).optional()
+    }),
+    request.body
+  );
+  return logQrOutbound(db, {
+    phone: body.whatsapp,
+    text: body.text,
+    providerId: body.messageId || null
+  });
+});
+
+app.post('/api/integrations/whatsapp/history', async (request, reply) => {
+  if (!requireBotSecret(request, reply)) return;
+  const body = parse(
+    z.object({ whatsapp: z.string().min(10).max(30) }),
+    request.body
+  );
+  return { message: await customerHistoryMessage(db, body.whatsapp) };
+});
+
+app.post('/api/integrations/whatsapp/content', async (request, reply) => {
+  if (!requireBotSecret(request, reply)) return;
+  const posts = await latestTelegramContent(db, 6);
+  return { posts, message: formatTelegramDigest(posts) };
+});
+
+app.post('/api/integrations/whatsapp/assistant', async (request, reply) => {
+  if (!requireBotSecret(request, reply)) return;
+  const body = parse(
+    z.object({
+      whatsapp: z.string().min(10).max(30),
+      question: z.string().min(1).max(1200)
+    }),
+    request.body
+  );
+  const enabled = await getSetting(db, 'ai_whatsapp_enabled', config.AI_WHATSAPP_ENABLED);
+  if (!enabled || !config.OPENAI_API_KEY) return { message: null, reason: 'ai_disabled' };
+  const phone = normalizePhone(body.whatsapp);
+  const customer = await db.query(
+    `SELECT id FROM customers WHERE whatsapp_e164 = $1 LIMIT 1`,
+    [phone]
+  );
+  if (!customer.rows[0]) return { message: null, reason: 'customer_not_found' };
+  try {
+    const runtimeConfig = await getRuntimeConfig(db, config);
+    const answer = await answerCustomerQuestion({
+      db,
+      config: runtimeConfig,
+      customerId: customer.rows[0].id,
+      question: body.question
+    });
+    return { message: answer.text };
+  } catch (error) {
+    request.log.warn(
+      { customerId: customer.rows[0].id, error: error.message },
+      'Assistente do WhatsApp QR indisponível'
+    );
+    return { message: null, reason: 'assistant_unavailable' };
+  }
+});
+
 app.post('/api/integrations/whatsapp/customer', async (request, reply) => {
   if (!requireBotSecret(request, reply)) return;
   const body = parse(z.object({ whatsapp: z.string().min(10).max(20), name: z.string().max(120).optional() }), request.body);
   const phone = normalizePhone(body.whatsapp);
   const result = await db.query(
     `SELECT c.name, p.name AS plan_name, s.expires_on::text AS expires_on, ch.status AS charge_status,
-            ch.checkout_url
+            ch.checkout_url, issue.summary AS recent_issue, issue.status AS recent_issue_status
        FROM customers c
        LEFT JOIN LATERAL (
          SELECT * FROM subscriptions WHERE customer_id = c.id ORDER BY created_at DESC LIMIT 1
@@ -341,6 +627,11 @@ app.post('/api/integrations/whatsapp/customer', async (request, reply) => {
        LEFT JOIN LATERAL (
          SELECT status, checkout_url FROM charges WHERE subscription_id = s.id ORDER BY created_at DESC LIMIT 1
        ) ch ON true
+       LEFT JOIN LATERAL (
+         SELECT summary, status FROM customer_issues
+          WHERE customer_id = c.id
+          ORDER BY last_mentioned_at DESC LIMIT 1
+       ) issue ON true
       WHERE c.whatsapp_e164 = $1 LIMIT 1`,
     [phone]
   );
@@ -355,6 +646,9 @@ app.post('/api/integrations/whatsapp/customer', async (request, reply) => {
       `Olá, ${firstName}!`,
       `Plano: ${customer.plan_name || 'em definição'}.`,
       `Validade: ${expires}.`,
+      customer.recent_issue
+        ? `Último atendimento: ${customer.recent_issue} (${customer.recent_issue_status === 'resolved' ? 'resolvido' : 'em acompanhamento'}).`
+        : '',
       customer.checkout_url && customer.charge_status !== 'paid' ? `Pagamento pendente: ${customer.checkout_url}` : ''
     ].filter(Boolean).join('\n')
   };
@@ -362,73 +656,35 @@ app.post('/api/integrations/whatsapp/customer', async (request, reply) => {
 
 app.post('/api/integrations/whatsapp/payment', async (request, reply) => {
   if (!requireBotSecret(request, reply)) return;
-  const body = parse(z.object({ whatsapp: z.string().min(10).max(20), name: z.string().max(120).optional() }), request.body);
+  const body = parse(
+    z.object({
+      whatsapp: z.string().min(10).max(20),
+      name: z.string().max(120).optional(),
+      planCode: z.enum(['monthly', 'quarterly', 'semiannual', 'annual']).optional()
+    }),
+    request.body
+  );
   const phone = normalizePhone(body.whatsapp);
-  const runtimeConfig = {
-    ...(await getRuntimeConfig(db, config)),
-    PAYMENT_MODE: await getSetting(db, 'payment_mode', config.PAYMENT_MODE)
-  };
-  const created = await db.transaction(async (client) => {
-    const existing = await client.query(
-      `SELECT ch.id, ch.checkout_url, p.name AS plan_name
-         FROM charges ch
-         JOIN subscriptions s ON s.id = ch.subscription_id
-         JOIN customers c ON c.id = s.customer_id
-         JOIN plans p ON p.id = COALESCE(ch.plan_id, s.plan_id)
-        WHERE c.whatsapp_e164 = $1
-          AND ch.status IN ('awaiting_approval', 'approved', 'sent')
-          AND ch.checkout_url IS NOT NULL
-          AND ch.created_at >= now() - interval '2 hours'
-        ORDER BY ch.created_at DESC LIMIT 1`, [phone]
-    );
-    if (existing.rows[0]) return { ...existing.rows[0], existing: true };
-    const customerResult = await client.query(
-      `SELECT c.id, c.name, c.email, c.whatsapp_e164, s.id AS subscription_id, s.expires_on::text,
-              p.id AS plan_id, p.code AS plan_code, p.name AS plan_name, p.duration_months, p.price_cents
-         FROM customers c
-         JOIN LATERAL (
-           SELECT * FROM subscriptions WHERE customer_id = c.id AND status <> 'cancelled'
-           ORDER BY created_at DESC LIMIT 1
-         ) s ON true
-         JOIN plans p ON p.id = s.plan_id AND p.active = true
-        WHERE c.whatsapp_e164 = $1
-        FOR UPDATE OF c`, [phone]
-    );
-    const customer = customerResult.rows[0];
-    if (!customer) return null;
-    const checkoutWindow = new Date().toISOString().slice(0, 13);
-    const idempotencyKey = buildIdempotencyKey(
-      customer.subscription_id,
-      'whatsapp_checkout',
-      `${customer.expires_on}-${checkoutWindow}`
-    );
-    const inserted = await client.query(
-      `INSERT INTO charges (subscription_id, plan_id, stage, status, amount_cents, due_on, idempotency_key, message_text, approved_at)
-       VALUES ($1, $2, 'manual', 'approved', $3, CURRENT_DATE, $4, $5, now())
-       ON CONFLICT (idempotency_key) DO NOTHING
-       RETURNING id`,
-      [customer.subscription_id, customer.plan_id, customer.price_cents, idempotencyKey,
-       renderChargeMessage({ name: customer.name, planName: customer.plan_name, expiresOn: customer.expires_on, amountCents: customer.price_cents, stage: 'manual' })]
-    );
-    const chargeId = inserted.rows[0]?.id || (await client.query('SELECT id FROM charges WHERE idempotency_key = $1', [idempotencyKey])).rows[0]?.id;
-    return { id: chargeId, ...customer, existing: false };
+  const created = await createRenewalCheckout({
+    phone,
+    planCode: body.planCode || null,
+    source: 'whatsapp'
   });
   if (!created) return { message: null };
-  if (created.existing) return { message: `Olá! Seu link de pagamento do plano ${created.plan_name} já está pronto:\n${created.checkout_url}` };
-  const preference = await createCheckoutPreference(runtimeConfig, {
-    id: created.id,
-    idempotency_key: `whatsapp-checkout-${created.id}`,
-    customer_name: created.name,
-    customer_email: created.email,
-    customer_phone: created.whatsapp_e164,
-    plan_code: created.plan_code,
-    plan_name: created.plan_name,
-    duration_months: created.duration_months,
-    amount_cents: created.price_cents
+  const amount = (created.amount_cents / 100).toLocaleString('pt-BR', {
+    style: 'currency',
+    currency: 'BRL'
   });
-  await db.query('UPDATE charges SET mercado_pago_preference_id = $2, checkout_url = $3, updated_at = now() WHERE id = $1', [created.id, preference.id, preference.checkoutUrl]);
   return {
-    message: `Olá, ${String(created.name || 'cliente').split(/\s+/)[0]}! Aqui está o pagamento seguro do seu plano ${created.plan_name}:\n${preference.checkoutUrl}`
+    checkoutUrl: created.checkout_url,
+    planCode: created.plan_code,
+    message: [
+      `Olá, ${String(created.name || 'cliente').split(/\s+/)[0]}!`,
+      `Seu link seguro do plano *${created.plan_name}* (${amount}) está pronto:`,
+      created.checkout_url,
+      '',
+      'Após a aprovação pelo Mercado Pago, o Gate One recebe a confirmação automaticamente.'
+    ].join('\n')
   };
 });
 
@@ -812,6 +1068,67 @@ app.get('/api/admin/plans', { preHandler: requireAuth }, async () => {
   return { plans: result.rows };
 });
 
+app.get('/api/admin/content-updates', { preHandler: requireAuth }, async () => {
+  const [posts, status] = await Promise.all([
+    latestTelegramContent(db, 20),
+    getSetting(db, 'telegram_content_sync', null)
+  ]);
+  return { posts, status };
+});
+
+app.post('/api/admin/content-updates/sync', { preHandler: requireAuth }, async (request) => {
+  const result = await syncTelegramContent(db, { sourceUrl: config.TELEGRAM_CONTENT_URL });
+  await audit(db, {
+    actorType: 'user',
+    actorId: request.user.id,
+    action: 'content.telegram_synced',
+    entityType: 'content_update',
+    after: result,
+    ip: request.ip
+  });
+  return { ok: true, ...result };
+});
+
+app.post('/api/admin/customers/:id/payment-link', { preHandler: requireAuth }, async (request, reply) => {
+  const body = parse(
+    z.object({
+      planCode: z.enum(['monthly', 'quarterly', 'semiannual', 'annual'])
+    }),
+    request.body
+  );
+  const created = await createRenewalCheckout({
+    customerId: request.params.id,
+    planCode: body.planCode,
+    source: 'admin'
+  });
+  if (!created) {
+    return reply.code(404).send({
+      error: 'Cliente sem assinatura ativa. Revise o cadastro antes de gerar a renovação.'
+    });
+  }
+  await audit(db, {
+    actorType: 'user',
+    actorId: request.user.id,
+    action: 'billing.renewal_link_created',
+    entityType: 'charge',
+    entityId: created.id,
+    after: {
+      customerId: created.customer_id,
+      planCode: created.plan_code,
+      reused: Boolean(created.existing)
+    },
+    ip: request.ip
+  });
+  return {
+    ok: true,
+    reused: Boolean(created.existing),
+    checkoutUrl: created.checkout_url,
+    planCode: created.plan_code,
+    planName: created.plan_name,
+    amountCents: created.amount_cents
+  };
+});
+
 app.get('/api/admin/customers', { preHandler: requireAuth }, async (request) => {
   const search = String(request.query?.search || '').trim();
   const stage = String(request.query?.stage || '').trim();
@@ -884,7 +1201,7 @@ app.post('/api/admin/customers/import-bitpanel', { preHandler: requireAuth }, as
               item.bitpanelReference,
               item.status,
               item.owner || null,
-              item.owner === 'Gate One Pro Server'
+              isGateOneOwner(item.owner)
             ]
           );
           await client.query(
@@ -907,7 +1224,7 @@ app.post('/api/admin/customers/import-bitpanel', { preHandler: requireAuth }, as
             item.bitpanelReference,
             item.status,
             item.owner || null,
-            item.owner === 'Gate One Pro Server'
+            isGateOneOwner(item.owner)
           ]
         );
         await client.query(
@@ -955,7 +1272,7 @@ app.post('/api/admin/customers/sync-bitpanel', { preHandler: requireAuth }, asyn
       throw new Error('Não foi possível gravar os clientes sincronizados.');
     }
     const stats = result.json();
-    const blocked = customers.filter((item) => item.owner !== 'Gate One Pro Server').length;
+    const blocked = customers.filter((item) => !isGateOneOwner(item.owner)).length;
     return { ...stats, found: customers.length, blocked };
   } catch (error) {
     request.log.error(
@@ -1098,7 +1415,7 @@ app.patch('/api/admin/customers/:id', { preHandler: requireAuth }, async (reques
         phone,
         body.bitpanelReference?.trim() || null,
         body.bitpanelOwner?.trim() || null,
-        body.bitpanelOwner?.trim() === 'Gate One Pro Server',
+        isGateOneOwner(body.bitpanelOwner),
         body.status,
         body.operationalStage,
         Boolean(phone && body.consentContact)

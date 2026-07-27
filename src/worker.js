@@ -17,6 +17,7 @@ import {
 import {
   bitPanelOperationFor,
   buildBitPanelUsername,
+  isGateOneOwner,
   provisionInBitPanel,
   renewInBitPanel
 } from './integrations/bitpanel.js';
@@ -24,6 +25,7 @@ import { audit } from './audit.js';
 import { formatDate, formatMoney } from './domain/billing.js';
 import { getRuntimeConfig } from './integrations/runtime-config.js';
 import { answerCustomerQuestion } from './services/ai-support.js';
+import { syncTelegramContent } from './services/telegram-content.js';
 
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL, { ssl: config.DATABASE_SSL });
@@ -253,7 +255,7 @@ async function processRenewal(job) {
   const operation = bitPanelOperationFor(renewal);
   if (
     operation === 'renew' &&
-    (!renewal.automation_eligible || renewal.bitpanel_owner !== 'Gate One Pro Server')
+    (!renewal.automation_eligible || !isGateOneOwner(renewal.bitpanel_owner))
   ) {
     throw new Error('Automação bloqueada: o cliente não pertence ao Gate One Pro Server.');
   }
@@ -319,6 +321,7 @@ async function processRenewal(job) {
         await client.query(
           `UPDATE customers
               SET status = 'active',
+                  operational_stage = 'ready',
                   bitpanel_reference = COALESCE($2, bitpanel_reference),
                   bitpanel_owner = CASE
                     WHEN $3 = 'provision' THEN 'Gate One Pro Server'
@@ -446,11 +449,22 @@ async function start() {
       .then((stats) => console.log({ stats }, 'Varredura de vencimentos concluída'))
       .catch((error) => console.error({ error: error.message }, 'Varredura falhou'));
   const cron = new CronJob('0 9 * * *', scan, null, true, config.TIMEZONE);
+  const syncContent = () => {
+    if (!config.TELEGRAM_SYNC_ENABLED) return Promise.resolve({ skipped: true });
+    return syncTelegramContent(db, { sourceUrl: config.TELEGRAM_CONTENT_URL })
+      .then((stats) => console.log({ stats }, 'Conteúdos do Telegram sincronizados'))
+      .catch((error) =>
+        console.error({ error: error.message }, 'Falha na atualização de conteúdos do Telegram')
+      );
+  };
+  const contentCron = new CronJob('30 8 * * *', syncContent, null, true, config.TIMEZONE);
   await scan();
+  await syncContent();
   console.log('Worker Gate One Pro iniciado.');
 
   const shutdown = async () => {
     cron.stop();
+    contentCron.stop();
     await Promise.all([messageWorker.close(), renewalWorker.close()]);
     await redis.quit();
     await db.close();

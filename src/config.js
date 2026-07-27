@@ -56,6 +56,8 @@ const schema = z.object({
   GATE_ONE_WHATSAPP_QR_URL: optionalUrl,
   GATE_ONE_WHATSAPP_NOTIFY_SECRET: z.string().min(24).optional(),
   GATE_ONE_OWNER_WHATSAPP: z.string().optional(),
+  TELEGRAM_CONTENT_URL: z.string().url().default('https://bit.ly/telebit2'),
+  TELEGRAM_SYNC_ENABLED: bool(true),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default('gpt-5.6'),
   AI_ADMIN_ENABLED: bool(false),

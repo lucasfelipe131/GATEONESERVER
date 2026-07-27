@@ -57,6 +57,8 @@ ALTER TABLE customers ALTER COLUMN whatsapp_e164 DROP NOT NULL;
 ALTER TABLE customers ADD COLUMN IF NOT EXISTS bitpanel_owner text;
 ALTER TABLE customers ADD COLUMN IF NOT EXISTS automation_eligible boolean NOT NULL DEFAULT true;
 ALTER TABLE customers ADD COLUMN IF NOT EXISTS operational_stage text NOT NULL DEFAULT 'ready';
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS whatsapp_display_name text;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS name_confirmed_at timestamptz;
 ALTER TABLE customers DROP CONSTRAINT IF EXISTS customers_operational_stage_check;
 ALTER TABLE customers ADD CONSTRAINT customers_operational_stage_check
   CHECK (operational_stage IN ('ready', 'create_login', 'awaiting_payment', 'review'));
@@ -156,6 +158,40 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
   expires_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS customer_issues (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  customer_id uuid NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  category text NOT NULL,
+  summary text NOT NULL,
+  last_message text,
+  status text NOT NULL DEFAULT 'open'
+    CHECK (status IN ('open', 'monitoring', 'resolved')),
+  occurrences integer NOT NULL DEFAULT 1,
+  first_reported_at timestamptz NOT NULL DEFAULT now(),
+  last_mentioned_at timestamptz NOT NULL DEFAULT now(),
+  resolved_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS customer_issues_customer_idx
+  ON customer_issues (customer_id, last_mentioned_at DESC);
+CREATE INDEX IF NOT EXISTS customer_issues_open_idx
+  ON customer_issues (status, last_mentioned_at DESC);
+
+CREATE TABLE IF NOT EXISTS content_updates (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  source text NOT NULL,
+  source_post_id text NOT NULL,
+  content text NOT NULL,
+  url text,
+  published_at timestamptz NOT NULL,
+  fetched_at timestamptz NOT NULL DEFAULT now(),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (source, source_post_id)
+);
+CREATE INDEX IF NOT EXISTS content_updates_published_idx
+  ON content_updates (source, published_at DESC);
 
 CREATE TABLE IF NOT EXISTS loyalty_ledger (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
