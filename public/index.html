@@ -336,7 +336,8 @@
           <label>Plano<select name="planCode"><option value="monthly">Mensal — R$ 30</option><option value="quarterly">Trimestral — R$ 85</option><option value="semiannual">Semestral — R$ 150</option><option value="annual">Anual — R$ 270</option></select></label>
           <label>Vencimento<input name="expiresOn" type="date" required /></label>
           <label>ID da lista BitPanel<input name="bitpanelListId" /></label>
-          <label class="full">Referência/usuário no BitPanel<input name="bitpanelReference" /></label>
+          <label>Login/usuário IPTV<input name="bitpanelReference" autocomplete="off" /></label>
+          <label>Senha IPTV<input name="accessPassword" type="password" autocomplete="new-password" /></label>
           <label>Classificação operacional<select name="operationalStage"><option value="ready">Pronto / ativo</option><option value="create_login">Criar login</option><option value="awaiting_payment">Aguardando pagamento</option><option value="review">Revisar cadastro</option></select></label>
           <label class="check-row full"><input name="consentContact" type="checkbox" checked /> Cliente autorizou contato pelo WhatsApp</label>
         </div>
@@ -357,6 +358,7 @@
           <label>Status<select name="status"><option value="active">Ativo</option><option value="late">Atrasado</option><option value="suspended">Suspenso</option><option value="cancelled">Cancelado</option></select></label>
           <label>ID da lista BitPanel<input name="bitpanelListId" /></label>
           <label>Login/referência BitPanel<input name="bitpanelReference" /></label>
+          <label>Senha IPTV<input name="accessPassword" type="password" autocomplete="new-password" placeholder="Deixe vazio para manter a atual" /></label>
           <label>Classificação operacional<select name="operationalStage"><option value="ready">Pronto / ativo</option><option value="create_login">Criar login</option><option value="awaiting_payment">Aguardando pagamento</option><option value="review">Revisar cadastro</option></select></label>
           <label>Proprietário<input name="bitpanelOwner" /></label>
           <label class="check-row full"><input name="consentContact" type="checkbox" /> Cliente autorizou contato pelo WhatsApp</label>
@@ -392,7 +394,7 @@
         <div class="dialog-head"><div><span class="eyebrow">IMPORTAÇÃO</span><h2>Importar Excel</h2></div><button class="icon-button" value="cancel">×</button></div>
         <p class="muted">Aceita arquivos .xls e .xlsx. A primeira linha deve conter os títulos das colunas.</p>
         <label>Arquivo Excel<input name="file" type="file" accept=".xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required /></label>
-        <p class="hint">Colunas reconhecidas: Nome, WhatsApp, Plano, Vencimento, ID BitPanel, Login, Status e Autoriza contato. O ID BitPanel atualiza o cliente existente sem duplicá-lo.</p>
+        <p class="hint">Colunas reconhecidas: Nome, WhatsApp, Plano, Vencimento, ID BitPanel, Login, Senha, Status e Autoriza contato. O ID BitPanel atualiza o cliente existente sem duplicá-lo.</p>
         <p class="form-error" id="spreadsheetError"></p>
         <div class="dialog-actions"><button class="btn btn-secondary" value="cancel">Cancelar</button><button class="btn btn-primary" type="submit" value="default">Importar planilha</button></div>
       </form>
@@ -410,6 +412,7 @@
     "expiresOn": "2026-08-25",
     "bitpanelListId": "3353378",
     "bitpanelReference": "usuario",
+    "accessPassword": "senha-do-cliente",
     "consentContact": true
   }
 ]</textarea>
