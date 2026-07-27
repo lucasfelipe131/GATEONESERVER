@@ -7,6 +7,7 @@ const aliases = {
   expiresOn: ['vencimento', 'data de vencimento', 'vence em', 'expireson'],
   bitpanelListId: ['id bitpanel', 'id da lista', 'id lista', 'bitpanellistid', 'id'],
   bitpanelReference: ['login', 'usuario', 'usuário', 'referencia', 'referência', 'bitpanelreference'],
+  accessPassword: ['senha', 'senha iptv', 'password', 'accesspassword'],
   status: ['status', 'situacao', 'situação'],
   consentContact: ['autoriza contato', 'consentimento', 'consentcontact']
 };
@@ -84,6 +85,7 @@ export function parseCustomerSpreadsheet(buffer) {
       expiresOn,
       bitpanelListId: String(bitpanelListId || '').trim() || undefined,
       bitpanelReference: String(pick(row, aliases.bitpanelReference) || '').trim() || undefined,
+      accessPassword: String(pick(row, aliases.accessPassword) || '').trim() || undefined,
       status: normalizeStatus(pick(row, aliases.status)),
       consentContact: normalizeConsent(pick(row, aliases.consentContact), whatsapp)
     };
