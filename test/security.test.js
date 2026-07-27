@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  decryptSecret,
+  encryptSecret,
   hmacSha256,
   maskPhone,
   normalizePhone,
@@ -34,6 +36,12 @@ test('remove chaves de API antes da auditoria', () => {
     sanitizeForLog({ OPENAI_API_KEY: 'sk-secret', OPENAI_MODEL: 'gpt-5.6' }),
     { OPENAI_API_KEY: '[PROTEGIDO]', OPENAI_MODEL: 'gpt-5.6' }
   );
+});
+
+test('protege e recupera a senha IPTV sem armazenar texto puro', () => {
+  const encrypted = encryptSecret('senha-iptv-123', 'segredo-de-producao');
+  assert.notEqual(encrypted, 'senha-iptv-123');
+  assert.equal(decryptSecret(encrypted, 'segredo-de-producao'), 'senha-iptv-123');
 });
 
 test('valida assinatura do webhook do Mercado Pago', () => {

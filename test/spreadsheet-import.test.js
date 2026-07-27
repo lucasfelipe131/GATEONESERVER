@@ -12,6 +12,7 @@ function workbookBuffer(bookType) {
       Vencimento: '25/08/2026',
       'ID BitPanel': '5308987',
       Login: 'cliente.teste',
+      Senha: 'senha-iptv-123',
       Status: 'Ativo',
       'Autoriza contato': 'Sim'
     }
@@ -31,6 +32,7 @@ for (const bookType of ['xlsx', 'xls']) {
       expiresOn: '2026-08-25',
       bitpanelListId: '5308987',
       bitpanelReference: 'cliente.teste',
+      accessPassword: 'senha-iptv-123',
       status: 'active',
       consentContact: true
     });
