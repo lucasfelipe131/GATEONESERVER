@@ -1515,7 +1515,13 @@ app.get('/api/admin/settings', { preHandler: requireAuth }, async () => {
     integrations: {
       redis: Boolean(config.REDIS_URL),
       mercadoPago: mercadoPago.ready,
-      whatsapp: status.configured.whatsapp,
+      whatsapp:
+        status.configured.whatsapp ||
+        Boolean(
+          config.GATE_ONE_WHATSAPP_QR_URL &&
+          config.GATE_ONE_WHATSAPP_NOTIFY_SECRET &&
+          config.GATE_ONE_OWNER_WHATSAPP
+        ),
       bitpanel: status.configured.bitpanel,
       openai: status.configured.openai
     },
