@@ -12,6 +12,7 @@ document.querySelector('#leadForm').addEventListener('submit', async (event) => 
   const message = document.querySelector('#leadMessage');
   const data = Object.fromEntries(new FormData(form));
   data.consent = form.elements.consent.checked;
+  data.desiredLogin = String(data.desiredLogin || '').trim().toLowerCase();
   button.disabled = true;
   message.textContent = '';
   try {
