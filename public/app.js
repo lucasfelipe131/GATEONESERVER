@@ -326,7 +326,7 @@ async function loadCustomers(search = $('#customerSearch')?.value || '') {
           <tr>
             <td><input type="checkbox" data-select-customer="${escapeHtml(customer.id)}" aria-label="Selecionar ${escapeHtml(customer.name || customer.bitpanel_reference || 'cliente')}" /></td>
             <td><code title="${escapeHtml(customer.id)}">${escapeHtml(customer.id.slice(0, 8))}</code></td>
-            <td class="client-cell"><strong>${escapeHtml(customer.name || 'A preencher')}</strong><small>${escapeHtml(customer.bitpanel_reference || 'Login a criar')} · ${escapeHtml(customer.whatsapp_masked || 'Telefone a preencher')}</small></td>
+            <td class="client-cell"><strong>${escapeHtml(customer.name || 'A preencher')}</strong><small>${escapeHtml(customer.bitpanel_reference || 'Login a criar')} · ${customer.has_access_password ? 'Senha cadastrada' : 'Senha a cadastrar'} · ${escapeHtml(customer.whatsapp_masked || 'Telefone a preencher')}</small></td>
             <td>${escapeHtml(customer.plan_name || 'Sem plano')}</td>
             <td>${date(customer.expires_on)}</td>
             <td>${customer.bitpanel_list_id ? `<span class="tag blue">${escapeHtml(customer.bitpanel_list_id)}</span>` : '<span class="tag">Não vinculado</span>'}</td>
@@ -596,6 +596,10 @@ $('#customersTable').addEventListener('click', async (event) => {
     form.elements.status.value = customer.status || 'active';
     form.elements.bitpanelListId.value = customer.bitpanel_list_id || '';
     form.elements.bitpanelReference.value = customer.bitpanel_reference || '';
+    form.elements.accessPassword.value = '';
+    form.elements.accessPassword.placeholder = customer.has_access_password
+      ? 'Senha cadastrada — deixe vazio para manter'
+      : 'Cadastre a senha IPTV';
     form.elements.operationalStage.value = customer.operational_stage || 'ready';
     form.elements.bitpanelOwner.value = customer.bitpanel_owner || 'Gate One Pro Server';
     form.elements.consentContact.checked = Boolean(customer.consent_contact);

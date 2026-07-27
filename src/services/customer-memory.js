@@ -222,6 +222,7 @@ export async function registerQrInbound(db, {
       displayName: customer.whatsapp_display_name || displayName || null
     },
     needsName,
+    duplicate: !saved,
     sessionState: session?.state || 'menu',
     recentIssues: recentIssues.rows,
     supportMessage: buildSupportMessage(issue, issueRecord.previous)
@@ -236,14 +237,13 @@ export async function confirmCustomerName(db, { phone, name }) {
       statusCode: 400
     });
   }
+  await findOrCreateCustomer(db, { phone: normalized });
   return db.transaction(async (client) => {
     const current = await client.query(
       `SELECT * FROM customers WHERE whatsapp_e164 = $1 FOR UPDATE`,
       [normalized]
     );
-    if (!current.rows[0]) {
-      throw Object.assign(new Error('Cadastro temporário não encontrado.'), { statusCode: 404 });
-    }
+    if (!current.rows[0]) throw new Error('Não foi possível preparar o cadastro.');
     const matches = await client.query(
       `SELECT id, name, bitpanel_reference, whatsapp_e164
          FROM customers

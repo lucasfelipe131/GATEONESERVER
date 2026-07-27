@@ -26,6 +26,7 @@ import { formatDate, formatMoney } from './domain/billing.js';
 import { getRuntimeConfig } from './integrations/runtime-config.js';
 import { answerCustomerQuestion } from './services/ai-support.js';
 import { syncTelegramContent } from './services/telegram-content.js';
+import { encryptSecret } from './security.js';
 
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL, { ssl: config.DATABASE_SSL });
@@ -281,6 +282,9 @@ async function processRenewal(job) {
         ? await provisionInBitPanel(runtimeConfig, renewal)
         : await renewInBitPanel(runtimeConfig, renewal);
     const renewedUntil = await db.transaction(async (client) => {
+      const encryptedAccessPassword = outcome.password
+        ? encryptSecret(outcome.password, config.COOKIE_SECRET)
+        : null;
       await client.query(
         `UPDATE renewal_jobs
             SET status = $2, before_expiry = $3, after_expiry = $4,
@@ -320,9 +324,10 @@ async function processRenewal(job) {
         );
         await client.query(
           `UPDATE customers
-              SET status = 'active',
+          SET status = 'active',
                   operational_stage = 'ready',
                   bitpanel_reference = COALESCE($2, bitpanel_reference),
+                  access_password_encrypted = COALESCE($4, access_password_encrypted),
                   bitpanel_owner = CASE
                     WHEN $3 = 'provision' THEN 'Gate One Pro Server'
                     ELSE bitpanel_owner
@@ -336,7 +341,8 @@ async function processRenewal(job) {
           [
             renewal.customer_id,
             outcome.username || renewal.bitpanel_reference,
-            operation
+            operation,
+            encryptedAccessPassword
           ]
         );
         await client.query(
