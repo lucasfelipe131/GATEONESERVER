@@ -82,6 +82,13 @@
             <button class="btn btn-light" id="scanButton">↻ Verificar vencimentos</button>
           </div>
           <div class="metrics" id="metrics"></div>
+          <article class="panel plan-catalog-panel">
+            <div class="panel-head">
+              <div><span class="eyebrow">CATÁLOGO OFICIAL</span><h3>Planos sincronizados com captação, portal e WhatsApp</h3></div>
+              <button class="text-button" data-go="customers">Gerar renovação →</button>
+            </div>
+            <div class="plan-summary-grid" id="planCatalog"></div>
+          </article>
           <div class="analytics-grid">
             <article class="panel chart-panel">
               <div class="panel-head">
@@ -357,6 +364,26 @@
         <p class="hint">A automação só é liberada quando o proprietário é exatamente “Gate One Pro Server”.</p>
         <p class="form-error" id="editCustomerError"></p>
         <div class="dialog-actions"><button class="btn btn-secondary" value="cancel">Cancelar</button><button class="btn btn-primary" type="submit" value="default">Salvar alterações</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="paymentLinkDialog">
+      <form method="dialog" class="dialog-form" id="paymentLinkForm">
+        <div class="dialog-head"><div><span class="eyebrow">RENOVAÇÃO SEGURA</span><h2>Link Mercado Pago</h2></div><button class="icon-button" type="button" data-close-payment-dialog>×</button></div>
+        <input name="customerId" type="hidden" />
+        <p class="muted" id="paymentCustomerName">Selecione o plano para criar a cobrança.</p>
+        <label>Plano de renovação<select name="planCode" id="paymentPlanCode" required></select></label>
+        <p class="hint">O plano escolhido será aplicado somente depois que o Mercado Pago confirmar o pagamento. O BitPanel seguirá a regra de aprovação definida nas Configurações.</p>
+        <div class="payment-link-result hidden" id="paymentLinkResult">
+          <label>Link criado<input id="paymentLinkValue" readonly /></label>
+          <div class="payment-link-actions">
+            <button class="btn btn-secondary" id="copyPaymentLink" type="button">Copiar link</button>
+            <a class="btn btn-secondary" id="openPaymentLink" target="_blank" rel="noopener">Abrir checkout</a>
+            <a class="btn btn-success" id="sendPaymentWhatsApp" target="_blank" rel="noopener">Enviar no WhatsApp</a>
+          </div>
+        </div>
+        <p class="form-error" id="paymentLinkError"></p>
+        <div class="dialog-actions"><button class="btn btn-secondary" type="button" data-close-payment-dialog>Fechar</button><button class="btn btn-primary" id="generatePaymentLink" type="submit" value="default">Gerar link</button></div>
       </form>
     </dialog>
 

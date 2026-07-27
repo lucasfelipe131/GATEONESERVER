@@ -5,6 +5,8 @@ const state = {
   analytics: null,
   chargeStatus: '',
   customers: [],
+  plans: [],
+  paymentCustomer: null,
   selectedCustomers: new Set()
 };
 
@@ -118,15 +120,17 @@ function stageTag(stage) {
 }
 
 async function loadDashboard() {
-  const [summary, charges, settings, analytics] = await Promise.all([
+  const [summary, charges, settings, analytics, planData] = await Promise.all([
     api('/api/admin/summary'),
     api('/api/admin/charges?status=awaiting_approval'),
     api('/api/admin/settings'),
-    api('/api/admin/analytics')
+    api('/api/admin/analytics'),
+    api('/api/admin/plans')
   ]);
   state.summary = summary;
   state.settings = settings;
   state.analytics = analytics;
+  state.plans = planData.plans;
   $('#metrics').innerHTML = [
     ['Clientes ativos', summary.customers, '◎', 'base total'],
     ['Para aprovar', summary.charges.awaiting, '◇', 'cobranças pendentes'],
@@ -144,6 +148,7 @@ async function loadDashboard() {
   renderRevenueChart(analytics.revenueTrend);
   renderChargeChart(analytics.chargeStatus);
   renderExpirationChart(analytics.expirations);
+  renderPlanCatalog(state.plans);
   $('#dashboardCharges').innerHTML = charges.charges.length
     ? charges.charges
         .slice(0, 5)
@@ -158,6 +163,38 @@ async function loadDashboard() {
     : '<div class="empty">Nenhuma cobrança aguardando aprovação.</div>';
   renderIntegrations('#integrationStatus', settings.integrations);
   updateSafety(summary.settings.globalPause);
+}
+
+function renderPlanCatalog(plans) {
+  $('#planCatalog').innerHTML = plans
+    .filter((plan) => plan.active)
+    .map(
+      (plan) => `
+        <div class="plan-summary-card ${plan.code === 'quarterly' ? 'featured' : ''}">
+          <span>${escapeHtml(plan.duration_months)} ${plan.duration_months === 1 ? 'mês' : 'meses'}</span>
+          <strong>${escapeHtml(plan.name)}</strong>
+          <b>${money(plan.price_cents)}</b>
+        </div>`
+    )
+    .join('');
+}
+
+async function ensurePlans() {
+  if (state.plans.length) return state.plans;
+  const result = await api('/api/admin/plans');
+  state.plans = result.plans;
+  return state.plans;
+}
+
+function fillPlanSelect(select, selectedCode = 'monthly') {
+  select.innerHTML = state.plans
+    .filter((plan) => plan.active)
+    .map(
+      (plan) =>
+        `<option value="${escapeHtml(plan.code)}">${escapeHtml(plan.name)} — ${money(plan.price_cents)}</option>`
+    )
+    .join('');
+  select.value = selectedCode;
 }
 
 function renderRevenueChart(points) {
@@ -295,7 +332,7 @@ async function loadCustomers(search = $('#customerSearch')?.value || '') {
             <td>${customer.bitpanel_list_id ? `<span class="tag blue">${escapeHtml(customer.bitpanel_list_id)}</span>` : '<span class="tag">Não vinculado</span>'}</td>
             <td>${stageTag(customer.operational_stage)}</td>
             <td>${statusTag(customer.status)}</td>
-            <td><div class="table-actions"><button class="btn btn-secondary btn-small" data-edit-customer="${escapeHtml(customer.id)}">Editar</button><button class="btn btn-secondary btn-small" data-portal="${escapeHtml(customer.id)}">Acesso</button><button class="btn btn-danger btn-small" data-delete-customer="${escapeHtml(customer.id)}">Excluir</button></div></td>
+            <td><div class="table-actions"><button class="btn btn-primary btn-small" data-payment-customer="${escapeHtml(customer.id)}">Cobrar</button><button class="btn btn-secondary btn-small" data-edit-customer="${escapeHtml(customer.id)}">Editar</button><button class="btn btn-secondary btn-small" data-portal="${escapeHtml(customer.id)}">Acesso</button><button class="btn btn-danger btn-small" data-delete-customer="${escapeHtml(customer.id)}">Excluir</button></div></td>
           </tr>`
         )
         .join('')
@@ -524,6 +561,28 @@ $('#applyBulkStage').addEventListener('click', async (event) => {
 });
 
 $('#customersTable').addEventListener('click', async (event) => {
+  const paymentButton = event.target.closest('[data-payment-customer]');
+  if (paymentButton) {
+    const customer = state.customers.find((item) => item.id === paymentButton.dataset.paymentCustomer);
+    if (!customer) return;
+    paymentButton.disabled = true;
+    try {
+      await ensurePlans();
+      state.paymentCustomer = customer;
+      const form = $('#paymentLinkForm');
+      form.elements.customerId.value = customer.id;
+      fillPlanSelect(form.elements.planCode, customer.plan_code || 'monthly');
+      $('#paymentCustomerName').textContent = `${customer.name || customer.bitpanel_reference || 'Cliente'} · plano atual ${customer.plan_name || 'não informado'}`;
+      $('#paymentLinkError').textContent = '';
+      $('#paymentLinkResult').classList.add('hidden');
+      $('#paymentLinkDialog').showModal();
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      paymentButton.disabled = false;
+    }
+    return;
+  }
   const editButton = event.target.closest('[data-edit-customer]');
   if (editButton) {
     const customer = state.customers.find((item) => item.id === editButton.dataset.editCustomer);
@@ -577,6 +636,57 @@ $('#customersTable').addEventListener('click', async (event) => {
   } finally {
     button.disabled = false;
   }
+});
+
+$('#paymentLinkForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = $('#generatePaymentLink');
+  const customer = state.paymentCustomer;
+  button.disabled = true;
+  $('#paymentLinkError').textContent = '';
+  try {
+    const result = await api(`/api/admin/customers/${form.elements.customerId.value}/payment-link`, {
+      method: 'POST',
+      body: JSON.stringify({ planCode: form.elements.planCode.value })
+    });
+    const link = result.checkoutUrl;
+    const message = [
+      `Olá, ${(customer?.name || 'cliente').split(/\s+/)[0]}!`,
+      `Seu link seguro para renovar o plano ${result.planName} (${money(result.amountCents)}) está pronto:`,
+      link,
+      'Após o pagamento, a confirmação será processada automaticamente pelo Gate One.'
+    ].join('\n');
+    $('#paymentLinkValue').value = link;
+    $('#openPaymentLink').href = link;
+    const phone = String(customer?.whatsapp_e164 || '').replace(/\D/g, '');
+    $('#sendPaymentWhatsApp').href = phone
+      ? `https://wa.me/${phone}?text=${encodeURIComponent(message)}`
+      : `https://wa.me/?text=${encodeURIComponent(message)}`;
+    $('#paymentLinkResult').classList.remove('hidden');
+    toast(result.reused ? 'Link recente reaproveitado.' : 'Link Mercado Pago criado.');
+  } catch (error) {
+    $('#paymentLinkError').textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$('#copyPaymentLink').addEventListener('click', async () => {
+  const link = $('#paymentLinkValue').value;
+  if (!link) return;
+  try {
+    await navigator.clipboard.writeText(link);
+    toast('Link de pagamento copiado.');
+  } catch {
+    $('#paymentLinkValue').select();
+    document.execCommand('copy');
+    toast('Link de pagamento copiado.');
+  }
+});
+
+$$('[data-close-payment-dialog]').forEach((button) => {
+  button.addEventListener('click', () => $('#paymentLinkDialog').close());
 });
 
 $('#newCustomerButton').addEventListener('click', () => $('#customerDialog').showModal());
