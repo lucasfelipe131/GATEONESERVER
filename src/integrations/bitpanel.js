@@ -14,8 +14,32 @@ function safeName(value) {
   return String(value).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 80);
 }
 
-function optionLabelForMonths(months) {
-  return Number(months) === 1 ? '1 Mês' : `${Number(months)} Meses`;
+export function normalizeBitPanelText(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+export function isGateOneOwner(value) {
+  const owner = normalizeBitPanelText(value).replace(/[^a-z0-9]/g, '');
+  return owner === 'gateoneproserver' || owner === 'gateoneserver';
+}
+
+export function optionLabelsForMonths(months) {
+  const duration = Number(months);
+  const labels = [
+    `${duration} ${duration === 1 ? 'Mês' : 'Meses'}`,
+    `${duration} ${duration === 1 ? 'Mes' : 'Meses'}`,
+    `${duration} ${duration === 1 ? 'mês' : 'meses'}`
+  ];
+  if (duration === 1) labels.push('30 dias');
+  if (duration === 3) labels.push('90 dias');
+  if (duration === 6) labels.push('180 dias');
+  if (duration === 12) labels.push('365 dias', '1 Ano', '1 ano');
+  return [...new Set(labels)];
 }
 
 function stripPrefix(value, prefix) {
@@ -117,8 +141,11 @@ async function captureListDetails(page) {
 
 async function findListByUsername(page, config, username) {
   await page.goto(`${config.BITPANEL_BASE_URL}/list`, { waitUntil: 'domcontentloaded' });
-  const search = page.getByRole('textbox', { name: 'Buscar por nome' });
-  if ((await search.count()) !== 1) {
+  const search = await firstVisible(
+    page,
+    "input[placeholder*='Buscar' i], input[placeholder*='Pesquisar' i], input[type='search']"
+  );
+  if (!search) {
     throw new Error('Busca de listas do BitPanel não encontrada.');
   }
   await search.fill(username);
@@ -140,17 +167,44 @@ async function findListByUsername(page, config, username) {
   return null;
 }
 
-async function selectVuetifyOption(page, scope, buttonName, optionName) {
+async function selectVuetifyOption(page, scope, buttonName, optionNames) {
   const button = scope.getByRole('button', { name: buttonName });
   if ((await button.count()) !== 1) {
     throw new Error(`Campo do BitPanel não encontrado: ${buttonName}`);
   }
   await button.click();
-  const option = page.getByRole('option', { name: optionName, exact: true });
-  if ((await option.count()) !== 1) {
-    throw new Error(`Opção do BitPanel não encontrada: ${optionName}`);
+  const expected = (Array.isArray(optionNames) ? optionNames : [optionNames])
+    .map(normalizeBitPanelText);
+  const options = page.locator(
+    '[role="option"], .v-menu__content:visible .v-list-item, .v-overlay--active .v-list-item'
+  );
+  const count = await options.count();
+  for (let index = 0; index < count; index += 1) {
+    const option = options.nth(index);
+    if (!(await option.isVisible().catch(() => false))) continue;
+    const label = normalizeBitPanelText(await option.innerText().catch(() => ''));
+    if (expected.some((candidate) => label === candidate || label.includes(candidate))) {
+      await option.click();
+      return;
+    }
   }
-  await option.click();
+  throw new Error(`Opção do BitPanel não encontrada: ${expected.join(' / ')}`);
+}
+
+async function tableColumnMap(page) {
+  const headers = await page.locator('table thead th').allInnerTexts().catch(() => []);
+  const normalized = headers.map(normalizeBitPanelText);
+  const find = (patterns, fallback) => {
+    const index = normalized.findIndex((header) => patterns.some((pattern) => pattern.test(header)));
+    return index >= 0 ? index : fallback;
+  };
+  return {
+    id: find([/^#?id$/, /codigo/], 0),
+    owner: find([/proprietario/, /revendedor/, /owner/], 2),
+    status: find([/status/, /situacao/], 3),
+    username: find([/usuario/, /login/, /^nome do usuario$/], 4),
+    expiry: find([/validade/, /vencimento/, /expira/], 6)
+  };
 }
 
 async function setConnections(scope, connections) {
@@ -218,6 +272,8 @@ export async function fetchBitPanelCustomers(config) {
     await page.goto(`${config.BITPANEL_BASE_URL}/list`, { waitUntil: 'domcontentloaded' });
     await page.locator('table tbody').waitFor({ state: 'visible' });
     const customers = new Map();
+    const columns = await tableColumnMap(page);
+    const highestColumn = Math.max(...Object.values(columns));
 
     for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
       const rows = page.locator('table tbody tr');
@@ -225,13 +281,13 @@ export async function fetchBitPanelCustomers(config) {
       let firstIdOnPage = '';
       for (let index = 0; index < count; index += 1) {
         const cells = rows.nth(index).locator('td');
-        if ((await cells.count()) < 7) continue;
-        const id = (await cells.nth(0).innerText()).trim().replace(/^#/, '');
+        if ((await cells.count()) <= highestColumn) continue;
+        const id = (await cells.nth(columns.id).innerText()).trim().replace(/^#/, '');
         if (!firstIdOnPage) firstIdOnPage = id;
-        const owner = (await cells.nth(2).innerText()).trim();
-        const rawStatus = (await cells.nth(3).innerText()).trim();
-        const username = (await cells.nth(4).innerText()).trim();
-        const expiresText = (await cells.nth(6).innerText()).trim();
+        const owner = (await cells.nth(columns.owner).innerText()).trim();
+        const rawStatus = (await cells.nth(columns.status).innerText()).trim();
+        const username = (await cells.nth(columns.username).innerText()).trim();
+        const expiresText = (await cells.nth(columns.expiry).innerText()).trim();
         const expiresOn = parseBitPanelExpiry(expiresText);
         if (!id || !username || !expiresOn) continue;
         customers.set(id, {
@@ -322,7 +378,7 @@ export async function renewInBitPanel(config, renewal) {
       page,
       dialog,
       /^Selecione a validade/,
-      optionLabelForMonths(renewal.duration_months)
+      optionLabelsForMonths(renewal.duration_months)
     );
 
     const evidencePath = join(
@@ -418,7 +474,7 @@ export async function provisionInBitPanel(config, renewal) {
       page,
       main,
       /^Selecione a validade/,
-      optionLabelForMonths(renewal.duration_months)
+      optionLabelsForMonths(renewal.duration_months)
     );
 
     const note = main.getByRole('textbox', { name: 'Nota' });
