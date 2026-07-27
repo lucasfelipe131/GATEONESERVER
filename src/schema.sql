@@ -59,6 +59,7 @@ ALTER TABLE customers ADD COLUMN IF NOT EXISTS automation_eligible boolean NOT N
 ALTER TABLE customers ADD COLUMN IF NOT EXISTS operational_stage text NOT NULL DEFAULT 'ready';
 ALTER TABLE customers ADD COLUMN IF NOT EXISTS whatsapp_display_name text;
 ALTER TABLE customers ADD COLUMN IF NOT EXISTS name_confirmed_at timestamptz;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS access_password_encrypted text;
 ALTER TABLE customers DROP CONSTRAINT IF EXISTS customers_operational_stage_check;
 ALTER TABLE customers ADD CONSTRAINT customers_operational_stage_check
   CHECK (operational_stage IN ('ready', 'create_login', 'awaiting_payment', 'review'));

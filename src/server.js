@@ -14,7 +14,16 @@ import { initializeDatabase } from './init.js';
 import { authenticate, clearSessionCookie, login, logout, setSessionCookie } from './auth.js';
 import { audit } from './audit.js';
 import { createQueues, createRedis } from './queue.js';
-import { maskPhone, normalizePhone, randomToken, safeEqual, sanitizeForLog, sha256 } from './security.js';
+import {
+  decryptSecret,
+  encryptSecret,
+  maskPhone,
+  normalizePhone,
+  randomToken,
+  safeEqual,
+  sanitizeForLog,
+  sha256
+} from './security.js';
 import { scanBilling, markPaymentApproved } from './services/billing.js';
 import { buildIdempotencyKey, renderChargeMessage } from './domain/billing.js';
 import {
@@ -617,7 +626,8 @@ app.post('/api/integrations/whatsapp/customer', async (request, reply) => {
   const body = parse(z.object({ whatsapp: z.string().min(10).max(20), name: z.string().max(120).optional() }), request.body);
   const phone = normalizePhone(body.whatsapp);
   const result = await db.query(
-    `SELECT c.name, p.name AS plan_name, s.expires_on::text AS expires_on, ch.status AS charge_status,
+    `SELECT c.name, c.bitpanel_reference, c.access_password_encrypted,
+            p.name AS plan_name, s.expires_on::text AS expires_on, ch.status AS charge_status,
             ch.checkout_url, issue.summary AS recent_issue, issue.status AS recent_issue_status
        FROM customers c
        LEFT JOIN LATERAL (
@@ -637,6 +647,20 @@ app.post('/api/integrations/whatsapp/customer', async (request, reply) => {
   );
   const customer = result.rows[0];
   if (!customer) return { message: null };
+  let accessPassword = null;
+  if (customer.access_password_encrypted) {
+    try {
+      accessPassword = decryptSecret(
+        customer.access_password_encrypted,
+        config.COOKIE_SECRET
+      );
+    } catch (error) {
+      request.log.warn(
+        { error: error.message },
+        'Senha de acesso do cliente não pôde ser descriptografada'
+      );
+    }
+  }
   const expires = customer.expires_on
     ? new Date(`${customer.expires_on}T12:00:00`).toLocaleDateString('pt-BR')
     : 'em atualização';
@@ -645,7 +669,11 @@ app.post('/api/integrations/whatsapp/customer', async (request, reply) => {
     message: [
       `Olá, ${firstName}!`,
       `Plano: ${customer.plan_name || 'em definição'}.`,
-      `Validade: ${expires}.`,
+      `Vencimento: ${expires}.`,
+      '',
+      '*Dados de acesso*',
+      `Login: ${customer.bitpanel_reference || 'não cadastrado'}`,
+      `Senha: ${accessPassword || 'não cadastrada'}`,
       customer.recent_issue
         ? `Último atendimento: ${customer.recent_issue} (${customer.recent_issue_status === 'resolved' ? 'resolvido' : 'em acompanhamento'}).`
         : '',
@@ -1136,6 +1164,7 @@ app.get('/api/admin/customers', { preHandler: requireAuth }, async (request) => 
   const result = await db.query(
     `SELECT c.id, c.name, c.whatsapp_e164, c.status, c.operational_stage, c.consent_contact, c.source,
             c.bitpanel_reference, c.bitpanel_owner, c.automation_eligible, c.created_at,
+            (c.access_password_encrypted IS NOT NULL) AS has_access_password,
             s.id AS subscription_id, s.expires_on::text, s.bitpanel_list_id,
             p.code AS plan_code, p.name AS plan_name, p.price_cents
        FROM customers c
@@ -1292,22 +1321,35 @@ app.post('/api/admin/customers', { preHandler: requireAuth }, async (request, re
       expiresOn: z.iso.date(),
       bitpanelListId: z.string().max(100).optional(),
       bitpanelReference: z.string().max(120).optional(),
+      accessPassword: z.string().max(120).optional(),
       operationalStage: z.enum(['ready', 'create_login', 'awaiting_payment', 'review']).default('ready'),
       consentContact: z.boolean().default(true)
     }),
     request.body
   );
   const phone = normalizePhone(body.whatsapp);
+  const encryptedAccessPassword = body.accessPassword?.trim()
+    ? encryptSecret(body.accessPassword.trim(), config.COOKIE_SECRET)
+    : null;
   const portalToken = randomToken(24);
   const result = await db.transaction(async (client) => {
     const plan = await client.query('SELECT id FROM plans WHERE code = $1', [body.planCode]);
     if (!plan.rows[0]) throw new Error('Plano não encontrado.');
     const customer = await client.query(
       `INSERT INTO customers
-        (name, whatsapp_e164, bitpanel_reference, source, status, operational_stage, consent_contact, portal_token_hash)
-       VALUES ($1, $2, $3, 'manual', 'active', $4, $5, $6)
+        (name, whatsapp_e164, bitpanel_reference, access_password_encrypted,
+         source, status, operational_stage, consent_contact, portal_token_hash)
+       VALUES ($1, $2, $3, $4, 'manual', 'active', $5, $6, $7)
        RETURNING id`,
-      [body.name, phone, body.bitpanelReference || null, body.operationalStage, body.consentContact, sha256(portalToken)]
+      [
+        body.name,
+        phone,
+        body.bitpanelReference || null,
+        encryptedAccessPassword,
+        body.operationalStage,
+        body.consentContact,
+        sha256(portalToken)
+      ]
     );
     const subscription = await client.query(
       `INSERT INTO subscriptions
@@ -1324,7 +1366,11 @@ app.post('/api/admin/customers', { preHandler: requireAuth }, async (request, re
     action: 'customer.created',
     entityType: 'customer',
     entityId: result.customerId,
-    after: { ...body, whatsapp: maskPhone(phone) },
+    after: {
+      ...body,
+      accessPassword: body.accessPassword ? '[armazenada]' : null,
+      whatsapp: maskPhone(phone)
+    },
     ip: request.ip
   });
   return reply.code(201).send({
@@ -1379,6 +1425,7 @@ app.patch('/api/admin/customers/:id', { preHandler: requireAuth }, async (reques
       ),
       bitpanelListId: z.string().max(100).optional(),
       bitpanelReference: z.string().max(120).optional(),
+      accessPassword: z.string().max(120).optional(),
       bitpanelOwner: z.string().max(120).optional(),
       operationalStage: z.enum(['ready', 'create_login', 'awaiting_payment', 'review']).default('ready'),
       consentContact: z.boolean().default(false)
@@ -1386,6 +1433,9 @@ app.patch('/api/admin/customers/:id', { preHandler: requireAuth }, async (reques
     request.body
   );
   const phone = body.whatsapp?.trim() ? normalizePhone(body.whatsapp) : null;
+  const encryptedAccessPassword = body.accessPassword?.trim()
+    ? encryptSecret(body.accessPassword.trim(), config.COOKIE_SECRET)
+    : null;
   const result = await db.transaction(async (client) => {
     const before = await client.query(
       `SELECT c.*, s.id AS subscription_id, s.expires_on::text, s.bitpanel_list_id,
@@ -1407,7 +1457,9 @@ app.patch('/api/admin/customers/:id', { preHandler: requireAuth }, async (reques
       `UPDATE customers
           SET name = $2, whatsapp_e164 = $3, bitpanel_reference = $4,
               bitpanel_owner = $5, automation_eligible = $6, status = $7,
-              operational_stage = $8, consent_contact = $9, updated_at = now()
+              operational_stage = $8, consent_contact = $9,
+              access_password_encrypted = COALESCE($10, access_password_encrypted),
+              updated_at = now()
         WHERE id = $1 RETURNING *`,
       [
         request.params.id,
@@ -1418,7 +1470,8 @@ app.patch('/api/admin/customers/:id', { preHandler: requireAuth }, async (reques
         isGateOneOwner(body.bitpanelOwner),
         body.status,
         body.operationalStage,
-        Boolean(phone && body.consentContact)
+        Boolean(phone && body.consentContact),
+        encryptedAccessPassword
       ]
     );
     if (before.rows[0].subscription_id) {
@@ -1459,7 +1512,11 @@ app.patch('/api/admin/customers/:id', { preHandler: requireAuth }, async (reques
     entityType: 'customer',
     entityId: request.params.id,
     before: result.before,
-    after: { ...body, whatsapp: maskPhone(phone) },
+    after: {
+      ...body,
+      accessPassword: body.accessPassword ? '[atualizada]' : '[mantida]',
+      whatsapp: maskPhone(phone)
+    },
     ip: request.ip
   });
   return { ok: true };
@@ -1519,6 +1576,7 @@ app.post('/api/admin/customers/import', { preHandler: requireAuth }, async (requ
             expiresOn: z.iso.date(),
             bitpanelListId: z.string().max(100).optional(),
             bitpanelReference: z.string().max(120).optional(),
+            accessPassword: z.string().max(120).optional(),
             status: z.enum(['active', 'late', 'suspended', 'cancelled']).default('active'),
             consentContact: z.boolean().default(true)
           })
@@ -1535,6 +1593,9 @@ app.post('/api/admin/customers/import', { preHandler: requireAuth }, async (requ
         throw new Error('Informe o WhatsApp ou o ID da lista BitPanel.');
       }
       const phone = item.whatsapp ? normalizePhone(item.whatsapp) : null;
+      const encryptedAccessPassword = item.accessPassword?.trim()
+        ? encryptSecret(item.accessPassword.trim(), config.COOKIE_SECRET)
+        : null;
       const planCode = ({
         mensal: 'monthly',
         trimestral: 'quarterly',
@@ -1559,23 +1620,44 @@ app.post('/api/admin/customers/import', { preHandler: requireAuth }, async (requ
                 SET name = COALESCE($2, name),
                     whatsapp_e164 = COALESCE($3, whatsapp_e164),
                     bitpanel_reference = COALESCE($4, bitpanel_reference),
-                    status = $5, consent_contact = $6, updated_at = now()
+                    access_password_encrypted = COALESCE($5, access_password_encrypted),
+                    status = $6, consent_contact = $7, updated_at = now()
               WHERE id = $1 RETURNING id`,
-            [linked.rows[0].id, item.name || null, phone, item.bitpanelReference || null, item.status, item.consentContact]
+            [
+              linked.rows[0].id,
+              item.name || null,
+              phone,
+              item.bitpanelReference || null,
+              encryptedAccessPassword,
+              item.status,
+              item.consentContact
+            ]
           );
         } else {
           customer = await client.query(
             `INSERT INTO customers
-              (name, whatsapp_e164, bitpanel_reference, source, status, consent_contact)
-             VALUES ($1, $2, $3, 'import', $4, $5)
+              (name, whatsapp_e164, bitpanel_reference, access_password_encrypted,
+               source, status, consent_contact)
+             VALUES ($1, $2, $3, $4, 'import', $5, $6)
              ON CONFLICT (whatsapp_e164) DO UPDATE
                SET name = COALESCE(EXCLUDED.name, customers.name),
                    bitpanel_reference = COALESCE(EXCLUDED.bitpanel_reference, customers.bitpanel_reference),
+                   access_password_encrypted = COALESCE(
+                     EXCLUDED.access_password_encrypted,
+                     customers.access_password_encrypted
+                   ),
                    status = EXCLUDED.status,
                    consent_contact = EXCLUDED.consent_contact,
                    updated_at = now()
              RETURNING id`,
-            [item.name || null, phone, item.bitpanelReference || null, item.status, item.consentContact]
+            [
+              item.name || null,
+              phone,
+              item.bitpanelReference || null,
+              encryptedAccessPassword,
+              item.status,
+              item.consentContact
+            ]
           );
         }
         await client.query(
