@@ -4,7 +4,8 @@ import {
   buildSupportMessage,
   cleanCustomerName,
   detectCustomerIssue,
-  isProbableCustomerName
+  isProbableCustomerName,
+  resolveIntegrationPhone
 } from '../src/services/customer-memory.js';
 
 test('valida e normaliza o nome informado pelo cliente', () => {
@@ -27,4 +28,9 @@ test('reconhece problemas comuns e produz orientação com continuidade', () => 
 
 test('não classifica uma escolha normal de pagamento como problema', () => {
   assert.equal(detectCustomerIssue('Quero o plano mensal e pagar por Pix'), null);
+});
+
+test('aceita o campo whatsapp usado pelas rotas de confirmação', () => {
+  assert.equal(resolveIntegrationPhone({ whatsapp: '553586334218' }), '5535986334218');
+  assert.equal(resolveIntegrationPhone({ phone: '5535986334218' }), '5535986334218');
 });

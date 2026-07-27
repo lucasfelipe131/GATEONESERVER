@@ -69,6 +69,10 @@ export function isProbableCustomerName(value) {
   );
 }
 
+export function resolveIntegrationPhone({ phone = null, whatsapp = null } = {}) {
+  return normalizePhone(phone || whatsapp);
+}
+
 export function detectCustomerIssue(text) {
   const value = String(text || '').trim();
   if (!value) return null;
@@ -229,8 +233,9 @@ export async function registerQrInbound(db, {
   };
 }
 
-export async function confirmCustomerName(db, { phone, name }) {
-  const normalized = normalizePhone(phone);
+export async function confirmCustomerName(db, payload) {
+  const { name } = payload;
+  const normalized = resolveIntegrationPhone(payload);
   const cleaned = cleanCustomerName(name);
   if (!cleaned) {
     throw Object.assign(new Error('Informe um nome válido, usando apenas letras.'), {
@@ -300,8 +305,9 @@ export async function confirmCustomerName(db, { phone, name }) {
   });
 }
 
-export async function confirmCustomerLogin(db, { phone, login }) {
-  const normalized = normalizePhone(phone);
+export async function confirmCustomerLogin(db, payload) {
+  const { login } = payload;
+  const normalized = resolveIntegrationPhone(payload);
   const normalizedLogin = String(login || '').trim().toLocaleLowerCase('pt-BR');
   if (normalizedLogin.length < 3 || normalizedLogin.length > 80) {
     throw Object.assign(new Error('Informe o login/ID usado no Gate One.'), { statusCode: 400 });
