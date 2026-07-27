@@ -118,6 +118,17 @@ function safeBitPanelSyncError(error) {
   return 'O BitPanel não concluiu a sincronização. Use “Testar conexão” em Configurações e tente novamente.';
 }
 
+function normalizeDesiredLogin(value) {
+  const login = String(value || '').trim().toLowerCase();
+  if (!/^[a-z0-9._-]{4,32}$/.test(login)) {
+    throw Object.assign(
+      new Error('O login deve ter de 4 a 32 caracteres: letras, números, ponto, hífen ou sublinhado.'),
+      { statusCode: 400 }
+    );
+  }
+  return login;
+}
+
 async function requireAuth(request, reply) {
   request.user = await authenticate(db, request);
   if (!request.user) return reply.code(401).send({ error: 'Sessão expirada. Entre novamente.' });
@@ -246,6 +257,7 @@ app.post(
         name: z.string().min(2).max(120),
         email: z.email().max(254),
         whatsapp: z.string().min(10).max(30),
+        desiredLogin: z.string().min(4).max(32),
         desiredPlan: z.enum(['monthly', 'quarterly', 'semiannual', 'annual']).optional(),
         campaign: z.string().max(100).optional(),
         consent: z.literal(true)
@@ -253,6 +265,7 @@ app.post(
       request.body
     );
     const phone = normalizePhone(body.whatsapp);
+    const desiredLogin = normalizeDesiredLogin(body.desiredLogin);
     if (!body.desiredPlan) {
       return reply.code(400).send({ error: 'Escolha um plano para continuar ao pagamento.' });
     }
@@ -267,6 +280,16 @@ app.post(
       );
       const plan = planResult.rows[0];
       if (!plan) throw Object.assign(new Error('Plano indisponível.'), { statusCode: 409 });
+      const loginInUse = await client.query(
+        `SELECT id FROM customers
+          WHERE lower(COALESCE(bitpanel_reference, '')) = $1
+            AND COALESCE(whatsapp_e164, '') <> $2
+          LIMIT 1`,
+        [desiredLogin, phone]
+      );
+      if (loginInUse.rows[0]) {
+        throw Object.assign(new Error('Esse login já foi escolhido. Tente outro.'), { statusCode: 409 });
+      }
       const lead = await client.query(
         `INSERT INTO leads (name, whatsapp_e164, source, campaign, desired_plan, status)
          VALUES ($1, $2, 'landing_page', $3, $4, 'payment_pending')
@@ -274,13 +297,14 @@ app.post(
         [body.name, phone, body.campaign || null, body.desiredPlan]
       );
       const customer = await client.query(
-        `INSERT INTO customers (name, email, whatsapp_e164, source, status, consent_contact)
-         VALUES ($1, $2, $3, 'landing_page', 'lead', true)
+        `INSERT INTO customers (name, email, whatsapp_e164, bitpanel_reference, source, status, consent_contact)
+         VALUES ($1, $2, $3, $4, 'landing_page', 'lead', true)
          ON CONFLICT (whatsapp_e164) DO UPDATE
            SET name = EXCLUDED.name, email = EXCLUDED.email,
+               bitpanel_reference = EXCLUDED.bitpanel_reference,
                consent_contact = true, updated_at = now()
-         RETURNING id, name, email`,
-        [body.name, body.email.toLowerCase(), phone]
+         RETURNING id, name, email, bitpanel_reference`,
+        [body.name, body.email.toLowerCase(), phone, desiredLogin]
       );
       let subscription = await client.query(
         `SELECT id, expires_on::text FROM subscriptions
@@ -329,6 +353,7 @@ app.post(
         customer_name: body.name,
         customer_email: customer.rows[0].email,
         customer_phone: phone,
+        desired_login: customer.rows[0].bitpanel_reference,
         plan_code: plan.code,
         plan_name: plan.name,
         duration_months: plan.duration_months,
@@ -802,7 +827,12 @@ app.patch('/api/admin/customers/:id', { preHandler: requireAuth }, async (reques
       whatsapp: z.string().max(30).optional(),
       planCode: z.enum(['monthly', 'quarterly', 'semiannual', 'annual']),
       expiresOn: z.iso.date(),
-      status: z.enum(['active', 'late', 'suspended', 'cancelled']),
+      // Front-end forms from older deployments occasionally submit an empty
+      // status. Treat it as active instead of rejecting a whole edit.
+      status: z.preprocess(
+        (value) => (String(value || '').trim() === '' ? undefined : value),
+        z.enum(['active', 'late', 'suspended', 'cancelled']).optional().default('active')
+      ),
       bitpanelListId: z.string().max(100).optional(),
       bitpanelReference: z.string().max(120).optional(),
       bitpanelOwner: z.string().max(120).optional(),
