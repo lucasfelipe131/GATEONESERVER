@@ -203,6 +203,12 @@ td { padding: 15px 18px; border-top: 1px solid var(--line); font-size: 13px; }
 .check-row input { width: 17px; height: 17px; }
 .hint { color: var(--muted); font-size: 11px; line-height: 1.5; }
 .empty { padding: 35px 18px; border: 1px dashed #cad4e1; border-radius: 14px; color: var(--muted); text-align: center; }
+.customer-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 14px; margin: 14px 0; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: #fff; box-shadow: 0 8px 24px rgba(9, 30, 66, .04); }
+.customer-filters, .bulk-actions { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
+.customer-filters label { display: grid; gap: 5px; color: var(--muted); font-size: 10px; font-weight: 800; text-transform: uppercase; }
+.customer-toolbar select { min-height: 38px; }
+.bulk-actions strong { padding: 10px 12px; border-radius: 10px; color: var(--blue); background: var(--blue-soft); font-size: 11px; white-space: nowrap; }
+.table-panel input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--blue); }
 .assistant-layout { display: grid; grid-template-columns: minmax(280px, .75fr) minmax(0, 1.5fr); gap: 20px; }
 .assistant-info { align-self: start; }
 .assistant-info h2 { margin: 10px 0; font-size: 30px; letter-spacing: -.04em; }
@@ -295,7 +301,10 @@ dialog::backdrop { background: rgba(6,19,39,.6); backdrop-filter: blur(4px); }
   .hero { min-height: 250px; align-items: flex-start; flex-direction: column; }
   .metrics { grid-template-columns: 1fr 1fr; }
   .section-actions { align-items: stretch; flex-direction: column; }
+  .customer-toolbar { align-items: stretch; flex-direction: column; }
+  .customer-filters, .bulk-actions { align-items: stretch; flex-direction: column; }
   .section-actions .btn { width: 100%; }
+  .customer-toolbar .btn { width: 100%; }
   .form-grid, .plan-section { grid-template-columns: 1fr; }
   .analytics-grid { grid-template-columns: 1fr; }
   .analytics-grid > :last-child { grid-column: auto; }
