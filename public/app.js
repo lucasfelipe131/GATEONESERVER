@@ -4,7 +4,8 @@ const state = {
   settings: null,
   analytics: null,
   chargeStatus: '',
-  customers: []
+  customers: [],
+  selectedCustomers: new Set()
 };
 
 const $ = (selector, parent = document) => parent.querySelector(selector);
@@ -102,6 +103,17 @@ function statusTag(status) {
     cancelled: ['Cancelado', 'red']
   };
   const [label, color] = map[status] || [status || '—', ''];
+  return `<span class="tag ${color}">${escapeHtml(label)}</span>`;
+}
+
+function stageTag(stage) {
+  const map = {
+    ready: ['Pronto / ativo', 'green'],
+    create_login: ['Criar login', 'amber'],
+    awaiting_payment: ['Aguardando pagamento', 'blue'],
+    review: ['Revisar cadastro', 'red']
+  };
+  const [label, color] = map[stage] || map.ready;
   return `<span class="tag ${color}">${escapeHtml(label)}</span>`;
 }
 
@@ -253,26 +265,42 @@ function updateSafety(paused) {
   badge.innerHTML = `<span></span>${paused ? 'Automações pausadas' : 'Automações liberadas'}`;
 }
 
-async function loadCustomers(search = '') {
-  const { customers } = await api(`/api/admin/customers?search=${encodeURIComponent(search)}`);
+function updateCustomerSelection() {
+  const count = state.selectedCustomers.size;
+  $('#selectedCustomerCount').textContent = `${count} ${count === 1 ? 'selecionado' : 'selecionados'}`;
+  $('#applyBulkStage').disabled = count === 0;
+  const allVisible = state.customers.length > 0 && state.customers.every((customer) => state.selectedCustomers.has(customer.id));
+  $('#selectAllCustomers').checked = allVisible;
+}
+
+async function loadCustomers(search = $('#customerSearch')?.value || '') {
+  const params = new URLSearchParams({
+    search,
+    stage: $('#customerStageFilter')?.value || '',
+    status: $('#customerStatusFilter')?.value || ''
+  });
+  const { customers } = await api(`/api/admin/customers?${params}`);
   state.customers = customers;
+  state.selectedCustomers = new Set();
   $('#customersTable').innerHTML = customers.length
     ? customers
         .map(
           (customer) => `
           <tr>
-            <td><strong>#${escapeHtml(customer.id)}</strong></td>
-            <td class="client-cell"><strong>${escapeHtml(customer.name || 'Nome a preencher')}</strong><small>${escapeHtml(customer.bitpanel_reference || 'Login BitPanel a preencher')}</small></td>
+            <td><input type="checkbox" data-select-customer="${escapeHtml(customer.id)}" aria-label="Selecionar ${escapeHtml(customer.name || customer.bitpanel_reference || 'cliente')}" /></td>
+            <td><code title="${escapeHtml(customer.id)}">${escapeHtml(customer.id.slice(0, 8))}</code></td>
+            <td class="client-cell"><strong>${escapeHtml(customer.name || 'A preencher')}</strong><small>${escapeHtml(customer.bitpanel_reference || 'Login a criar')} · ${escapeHtml(customer.whatsapp_masked || 'Telefone a preencher')}</small></td>
             <td>${escapeHtml(customer.plan_name || 'Sem plano')}</td>
             <td>${date(customer.expires_on)}</td>
-            <td>${customer.bitpanel_list_id ? `<span class="tag blue">#${escapeHtml(customer.bitpanel_list_id)}</span>` : '<span class="tag">Não vinculado</span>'}</td>
-            <td>${escapeHtml(customer.bitpanel_owner || 'Gate One Pro Server')}${customer.automation_eligible === false ? '<small class="blocked-note">Automação bloqueada</small>' : ''}</td>
+            <td>${customer.bitpanel_list_id ? `<span class="tag blue">${escapeHtml(customer.bitpanel_list_id)}</span>` : '<span class="tag">Não vinculado</span>'}</td>
+            <td>${stageTag(customer.operational_stage)}</td>
             <td>${statusTag(customer.status)}</td>
-            <td><div class="table-actions"><button class="btn btn-secondary btn-small" data-edit-customer="${escapeHtml(customer.id)}">Editar</button><button class="btn btn-secondary btn-small" data-portal="${escapeHtml(customer.id)}">Copiar acesso</button></div></td>
+            <td><div class="table-actions"><button class="btn btn-secondary btn-small" data-edit-customer="${escapeHtml(customer.id)}">Editar</button><button class="btn btn-secondary btn-small" data-portal="${escapeHtml(customer.id)}">Acesso</button><button class="btn btn-danger btn-small" data-delete-customer="${escapeHtml(customer.id)}">Excluir</button></div></td>
           </tr>`
         )
         .join('')
-    : '<tr><td colspan="8"><div class="empty">Nenhum cliente encontrado.</div></td></tr>';
+    : '<tr><td colspan="9"><div class="empty">Nenhum cliente encontrado.</div></td></tr>';
+  updateCustomerSelection();
 }
 
 async function loadCharges(status = state.chargeStatus) {
@@ -455,6 +483,45 @@ $('#customerSearch').addEventListener('input', (event) => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => loadCustomers(event.target.value), 250);
 });
+$('#customerStageFilter').addEventListener('change', () => loadCustomers());
+$('#customerStatusFilter').addEventListener('change', () => loadCustomers());
+
+$('#selectAllCustomers').addEventListener('change', (event) => {
+  state.selectedCustomers = event.target.checked
+    ? new Set(state.customers.map((customer) => customer.id))
+    : new Set();
+  $$('[data-select-customer]', $('#customersTable')).forEach((checkbox) => {
+    checkbox.checked = event.target.checked;
+  });
+  updateCustomerSelection();
+});
+
+$('#customersTable').addEventListener('change', (event) => {
+  const checkbox = event.target.closest('[data-select-customer]');
+  if (!checkbox) return;
+  if (checkbox.checked) state.selectedCustomers.add(checkbox.dataset.selectCustomer);
+  else state.selectedCustomers.delete(checkbox.dataset.selectCustomer);
+  updateCustomerSelection();
+});
+
+$('#applyBulkStage').addEventListener('click', async (event) => {
+  if (!state.selectedCustomers.size) return;
+  event.currentTarget.disabled = true;
+  try {
+    const result = await api('/api/admin/customers/operational-stage', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        customerIds: [...state.selectedCustomers],
+        operationalStage: $('#bulkOperationalStage').value
+      })
+    });
+    toast(`${result.updated} cliente(s) classificado(s).`);
+    await loadCustomers();
+  } catch (error) {
+    toast(error.message, 'error');
+    updateCustomerSelection();
+  }
+});
 
 $('#customersTable').addEventListener('click', async (event) => {
   const editButton = event.target.closest('[data-edit-customer]');
@@ -470,10 +537,26 @@ $('#customersTable').addEventListener('click', async (event) => {
     form.elements.status.value = customer.status || 'active';
     form.elements.bitpanelListId.value = customer.bitpanel_list_id || '';
     form.elements.bitpanelReference.value = customer.bitpanel_reference || '';
+    form.elements.operationalStage.value = customer.operational_stage || 'ready';
     form.elements.bitpanelOwner.value = customer.bitpanel_owner || 'Gate One Pro Server';
     form.elements.consentContact.checked = Boolean(customer.consent_contact);
     $('#editCustomerError').textContent = '';
     $('#editCustomerDialog').showModal();
+    return;
+  }
+  const deleteButton = event.target.closest('[data-delete-customer]');
+  if (deleteButton) {
+    const customer = state.customers.find((item) => item.id === deleteButton.dataset.deleteCustomer);
+    if (!customer || !window.confirm(`Excluir definitivamente ${customer.name || customer.bitpanel_reference || 'este cliente'}? Cobranças, assinaturas e histórico vinculados também serão removidos.`)) return;
+    deleteButton.disabled = true;
+    try {
+      await api(`/api/admin/customers/${customer.id}`, { method: 'DELETE' });
+      toast('Cliente excluído com sucesso.');
+      await loadCustomers($('#customerSearch').value);
+    } catch (error) {
+      toast(error.message, 'error');
+      deleteButton.disabled = false;
+    }
     return;
   }
   const button = event.target.closest('[data-portal]');
