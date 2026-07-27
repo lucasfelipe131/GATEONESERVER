@@ -1,0 +1,276 @@
+.expiration-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 20px;
+  padding: 24px 26px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: linear-gradient(115deg, #ffffff, #f1f6ff);
+  box-shadow: 0 10px 36px rgba(30, 55, 90, .04);
+}
+
+.expiration-heading h2 {
+  margin: 7px 0 6px;
+  font-size: clamp(25px, 3vw, 34px);
+  letter-spacing: -.04em;
+}
+
+.expiration-heading p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.expiration-metrics {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.expiration-metric {
+  position: relative;
+  overflow: hidden;
+}
+
+.expiration-metric::after {
+  content: "";
+  position: absolute;
+  right: -32px;
+  bottom: -38px;
+  width: 92px;
+  height: 92px;
+  border-radius: 50%;
+  background: rgba(23, 105, 255, .045);
+}
+
+.expiration-metric.danger .metric-icon {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.expiration-metric.warning .metric-icon {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.expiration-metric.calm .metric-icon {
+  color: #55769e;
+  background: #edf3fa;
+}
+
+.expiration-metric.neutral .metric-icon {
+  color: var(--muted);
+  background: #edf1f6;
+}
+
+.expiration-panel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.expiration-controls {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto;
+  gap: 16px;
+  align-items: end;
+  padding: 20px 22px 14px;
+}
+
+.expiration-search {
+  width: 100%;
+}
+
+.expiration-selects {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(145px, 1fr));
+  gap: 10px;
+}
+
+.expiration-selects label {
+  gap: 5px;
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.expiration-selects select {
+  min-width: 145px;
+  height: 40px;
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.expiration-periods {
+  padding: 0 22px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.expiration-result-line {
+  padding: 12px 22px;
+  color: var(--muted);
+  background: #fbfcfe;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.expiration-table-wrap {
+  max-height: calc(100vh - 390px);
+}
+
+.expiration-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.expiration-table td {
+  vertical-align: middle;
+}
+
+.expiration-row.is-overdue {
+  background: linear-gradient(90deg, rgba(223, 75, 85, .055), transparent 30%);
+}
+
+.expiration-row.is-today {
+  background: linear-gradient(90deg, rgba(233, 155, 32, .07), transparent 30%);
+}
+
+.expiration-reference {
+  display: inline-block;
+  max-width: 190px;
+  overflow: hidden;
+  color: #52637b;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+@media (max-width: 1180px) {
+  .expiration-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .expiration-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .expiration-selects {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 760px) {
+  .expiration-heading {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 20px;
+  }
+
+  .expiration-heading .btn {
+    width: 100%;
+  }
+
+  .expiration-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .expiration-controls {
+    padding: 16px;
+  }
+
+  .expiration-selects {
+    grid-template-columns: 1fr;
+  }
+
+  .expiration-selects select {
+    min-width: 0;
+  }
+
+  .expiration-periods {
+    padding: 0 16px 16px;
+  }
+
+  .expiration-result-line {
+    padding: 11px 16px;
+  }
+
+  .expiration-table-wrap {
+    max-height: none;
+    padding: 0 12px 14px;
+    overflow: visible;
+  }
+
+  .expiration-table,
+  .expiration-table tbody,
+  .expiration-table tr,
+  .expiration-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .expiration-table thead {
+    display: none;
+  }
+
+  .expiration-table tr {
+    margin: 12px 0;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: white;
+    box-shadow: 0 7px 24px rgba(30, 55, 90, .04);
+  }
+
+  .expiration-table tr.is-overdue {
+    border-color: #ffd1d5;
+  }
+
+  .expiration-table tr.is-today {
+    border-color: #f4d9a7;
+  }
+
+  .expiration-table td {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    min-height: 48px;
+    padding: 12px 14px;
+    white-space: normal;
+  }
+
+  .expiration-table td::before {
+    content: attr(data-label);
+    flex: 0 0 92px;
+    color: #7c8ba1;
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+  }
+
+  .expiration-table td.client-cell {
+    display: block;
+  }
+
+  .expiration-table td.client-cell::before {
+    display: block;
+    margin-bottom: 8px;
+  }
+
+  .expiration-table td[colspan]::before {
+    display: none;
+  }
+
+  .expiration-table .btn {
+    width: 100%;
+  }
+}
+
+@media (max-width: 460px) {
+  .expiration-metrics {
+    grid-template-columns: 1fr;
+  }
+}
