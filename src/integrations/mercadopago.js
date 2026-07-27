@@ -117,9 +117,6 @@ export async function createCheckoutPreference(config, charge) {
   }
 
   requireLiveConfig(config);
-  if (!charge.customer_email) {
-    throw new Error('Informe o e-mail real do pagador antes de abrir o Mercado Pago.');
-  }
   if (!config.PUBLIC_BASE_URL) {
     throw new Error('URL pública do Gate One Pro não configurada.');
   }
@@ -144,11 +141,16 @@ export async function createCheckoutPreference(config, charge) {
         currency_id: 'BRL',
         unit_price: charge.amount_cents / 100
       }],
-      payer: {
-        name: charge.customer_name,
-        email: charge.customer_email,
-        phone: charge.customer_phone ? { number: charge.customer_phone } : undefined
-      },
+      // Checkout can collect the payer details itself. This keeps renewals by
+      // WhatsApp working for imported BitPanel customers that do not have an
+      // email stored in Gate One yet.
+      ...(charge.customer_email ? {
+        payer: {
+          name: charge.customer_name,
+          email: charge.customer_email,
+          phone: charge.customer_phone ? { number: charge.customer_phone } : undefined
+        }
+      } : {}),
       external_reference: charge.id,
       notification_url: notificationUrl,
       back_urls: {
