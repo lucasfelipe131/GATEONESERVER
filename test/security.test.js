@@ -22,6 +22,14 @@ test('normaliza telefone brasileiro', () => {
     normalizePhone('5555999999999:12@s.whatsapp.net'),
     '5555999999999'
   );
+  assert.equal(
+    normalizePhone('555599998633@s.whatsapp.net'),
+    '5555999998633'
+  );
+  assert.equal(
+    normalizePhone('555533338633@s.whatsapp.net'),
+    '555533338633'
+  );
   assert.equal(normalizePhone('55999999999@s.whatsapp.net'), '5555999999999');
   assert.throws(() => normalizePhone('123456789012345@lid'));
   assert.throws(() => normalizePhone('123'));
