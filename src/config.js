@@ -60,6 +60,7 @@ const schema = z.object({
   TELEGRAM_SYNC_ENABLED: bool(true),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default('gpt-5.6'),
+  OPENAI_TRANSCRIBE_MODEL: z.string().default('gpt-4o-mini-transcribe'),
   AI_ADMIN_ENABLED: bool(false),
   AI_WHATSAPP_ENABLED: bool(false),
   AI_MAX_OUTPUT_TOKENS: z.coerce.number().int().min(100).max(2000).default(700),
