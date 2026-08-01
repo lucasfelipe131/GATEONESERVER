@@ -47,7 +47,7 @@ import {
   isGateOneOwner,
   testBitPanelConnection
 } from './integrations/bitpanel.js';
-import { testOpenAIConnection } from './integrations/openai.js';
+import { testOpenAIConnection, transcribeAudio } from './integrations/openai.js';
 import { parseCustomerSpreadsheet } from './importers/spreadsheet.js';
 import { answerAdminQuestion, answerCustomerQuestion } from './services/ai-support.js';
 import {
@@ -620,6 +620,56 @@ app.post('/api/integrations/whatsapp/assistant', async (request, reply) => {
     return { message: null, reason: 'assistant_unavailable' };
   }
 });
+
+app.post(
+  '/api/integrations/whatsapp/transcribe',
+  {
+    bodyLimit: 18 * 1024 * 1024,
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } }
+  },
+  async (request, reply) => {
+    if (!requireBotSecret(request, reply)) return;
+    const body = parse(
+      z.object({
+        whatsapp: z.string().min(10).max(30),
+        audioBase64: z.string().min(4).max(16 * 1024 * 1024),
+        mimetype: z.string().min(3).max(120).optional(),
+        fileName: z.string().min(1).max(180).optional()
+      }),
+      request.body
+    );
+    const phone = normalizePhone(body.whatsapp);
+    const encoded = body.audioBase64.replace(/\s+/g, '');
+    const audio = Buffer.from(encoded, 'base64');
+    const normalizedInput = encoded.replace(/=+$/g, '');
+    const normalizedAudio = audio.toString('base64').replace(/=+$/g, '');
+    if (!audio.length || normalizedAudio !== normalizedInput) {
+      return reply.code(400).send({ error: 'Áudio inválido.' });
+    }
+    if (audio.length > 12 * 1024 * 1024) {
+      return reply.code(413).send({ error: 'O áudio excede o limite de 12 MB.' });
+    }
+
+    try {
+      const runtimeConfig = await getRuntimeConfig(db, config);
+      const result = await transcribeAudio(runtimeConfig, {
+        audio,
+        mimetype: body.mimetype,
+        fileName: body.fileName,
+        language: 'pt'
+      });
+      return { text: result.text, model: result.model };
+    } catch (error) {
+      request.log.warn(
+        { whatsapp: maskPhone(phone), error: error.message },
+        'Transcrição de áudio do WhatsApp indisponível'
+      );
+      return reply.code(502).send({
+        error: 'Não foi possível transcrever o áudio agora. O atendimento humano continuará disponível.'
+      });
+    }
+  }
+);
 
 app.post('/api/integrations/whatsapp/customer', async (request, reply) => {
   if (!requireBotSecret(request, reply)) return;

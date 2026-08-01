@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {
   createAIResponse,
   extractResponseText,
-  testOpenAIConnection
+  testOpenAIConnection,
+  transcribeAudio
 } from '../src/integrations/openai.js';
 import { requestsHumanSupport } from '../src/services/ai-support.js';
 
@@ -59,6 +60,37 @@ test('testa a disponibilidade do modelo configurado', async () => {
     }
   );
   assert.equal(result.ok, true);
+});
+
+test('transcreve áudio em português sem expor a chave no formulário', async () => {
+  let request;
+  const result = await transcribeAudio(
+    {
+      OPENAI_API_KEY: 'test-key',
+      OPENAI_TRANSCRIBE_MODEL: 'gpt-4o-mini-transcribe'
+    },
+    {
+      audio: Buffer.from('audio-de-teste'),
+      mimetype: 'audio/ogg; codecs=opus',
+      fileName: 'mensagem.ogg'
+    },
+    async (url, options) => {
+      request = { url, options };
+      return {
+        ok: true,
+        json: async () => ({ text: 'Quero renovar meu plano.' })
+      };
+    }
+  );
+  assert.equal(result.text, 'Quero renovar meu plano.');
+  assert.equal(request.url, 'https://api.openai.com/v1/audio/transcriptions');
+  assert.equal(request.options.headers.Authorization, 'Bearer test-key');
+  assert.equal(request.options.headers['Content-Type'], undefined);
+  assert.equal(request.options.body.get('model'), 'gpt-4o-mini-transcribe');
+  assert.equal(request.options.body.get('language'), 'pt');
+  assert.equal(request.options.body.get('response_format'), 'json');
+  assert.equal(request.options.body.get('file').name, 'mensagem.ogg');
+  assert.equal(request.options.body.get('file').type, 'audio/ogg');
 });
 
 test('reconhece pedido de atendimento humano', () => {

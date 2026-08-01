@@ -25,7 +25,8 @@ const ENV_FIELDS = {
   ],
   openai: [
     'OPENAI_API_KEY',
-    'OPENAI_MODEL'
+    'OPENAI_MODEL',
+    'OPENAI_TRANSCRIBE_MODEL'
   ]
 };
 
