@@ -1,0 +1,1 @@
+const fs=require('fs');const zlib=require('zlib');const src=zlib.gunzipSync(fs.readFileSync('app.js.gz')).toString('utf8');eval(src);
