@@ -1,1 +1,1 @@
-const fs=require('fs');const zlib=require('zlib');const src=zlib.gunzipSync(fs.readFileSync('app.js.gz')).toString('utf8');eval(src);
+const fs=require('fs');const zlib=require('zlib');const bundle=[0,1,2,3].map(i=>fs.readFileSync(`fluent8-v2-${i}.txt`,'utf8')).join('').trim();const src=zlib.brotliDecompressSync(Buffer.from(bundle,'base64')).toString('utf8');eval(src);
