@@ -23,7 +23,7 @@ import {
 } from './integrations/bitpanel.js';
 import { audit } from './audit.js';
 import { formatDate, formatMoney } from './domain/billing.js';
-import { getRuntimeConfig } from './integrations/runtime-config.js';
+import { getRuntimeConfig, saveBitPanelStorageState } from './integrations/runtime-config.js';
 import { answerCustomerQuestion } from './services/ai-support.js';
 import { syncTelegramContent } from './services/telegram-content.js';
 import { encryptSecret } from './security.js';
@@ -44,6 +44,7 @@ async function effectiveConfig() {
     ]);
   return {
     ...(await getRuntimeConfig(db, config)),
+    saveBitPanelStorageState: (state) => saveBitPanelStorageState(db, config, state),
     PAYMENT_MODE: paymentMode,
     WHATSAPP_MODE: whatsappMode,
     BITPANEL_MODE: bitpanelMode,

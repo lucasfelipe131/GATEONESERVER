@@ -246,6 +246,22 @@ BITPANEL_DEFAULT_CONNECTIONS=1
 BITPANEL_HEADLESS=true
 ```
 
+Se o BitPanel solicitar CAPTCHA, não tente automatizá-lo. Em um computador
+confiável, com Node.js e o projeto instalados, execute:
+
+```bash
+npx playwright install chromium
+npm run bitpanel:auth
+```
+
+Faça o login e resolva o CAPTCHA na janela aberta. Quando a lista de clientes
+aparecer, confirme no terminal. O arquivo `bitpanel-session.json` será criado
+localmente; importe-o em **Configurações → BitPanel → Sessão autenticada**. O
+arquivo é criptografado antes de ser salvo e seu conteúdo nunca aparece no
+painel ou nos logs. Não envie esse arquivo por WhatsApp ou e-mail. Quando a
+sessão expirar, gere e importe outra — o sistema pausa com uma mensagem clara,
+sem tentar contornar a verificação humana.
+
 Mantenha `BITPANEL_MODE=simulation` e
 `RENEWAL_REQUIRES_APPROVAL=true` no primeiro piloto. Clientes novos são
 identificados pelo estágio `new_sale` ou pela ausência de ID de lista. O robô

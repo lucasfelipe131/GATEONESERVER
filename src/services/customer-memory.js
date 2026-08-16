@@ -330,55 +330,84 @@ export async function confirmCustomerLogin(db, payload) {
   return db.transaction(async (client) => {
     const session = await client.query(
       `SELECT data FROM conversation_sessions
-        WHERE whatsapp_e164 = $1 AND state = 'awaiting_login' AND expires_at > now()
+        WHERE whatsapp_e164 = $1 AND expires_at > now()
         FOR UPDATE`,
       [normalized]
     );
-    const temporaryId = session.rows[0]?.data?.customerId;
-    const candidateId = session.rows[0]?.data?.candidateId;
+    const current = await client.query(
+      `SELECT * FROM customers WHERE whatsapp_e164 = $1 FOR UPDATE`,
+      [normalized]
+    );
+    const temporaryId = current.rows[0]?.id || session.rows[0]?.data?.customerId;
     const pending = pendingIntentFields(session.rows[0]?.data || {});
-    if (!temporaryId || !candidateId) {
-      throw Object.assign(new Error('A confirmação expirou. Diga o que deseja consultar para eu recomeçar.'), {
-        statusCode: 409
-      });
-    }
     const candidate = await client.query(
       `SELECT * FROM customers
-        WHERE id = $1 AND lower(trim(bitpanel_reference)) = $2
-        FOR UPDATE`,
-      [candidateId, normalizedLogin]
+        WHERE lower(trim(bitpanel_reference)) = $1
+        ORDER BY updated_at DESC
+        LIMIT 2 FOR UPDATE`,
+      [normalizedLogin]
     );
-    if (!candidate.rows[0]) {
+    if (candidate.rows.length !== 1) {
       return { matched: false };
     }
-    await client.query(
-      `UPDATE customers SET whatsapp_e164 = NULL, updated_at = now() WHERE id = $1`,
-      [temporaryId]
-    );
+    const target = candidate.rows[0];
+    if (target.whatsapp_e164 && target.whatsapp_e164 !== normalized) {
+      await client.query(
+        `INSERT INTO customer_identity_links
+          (whatsapp_e164, source_customer_id, candidate_customer_id,
+           claimed_login, status, reason, confidence)
+         VALUES ($1, $2, $3, $4, 'pending', 'login_already_has_phone', 100)
+         ON CONFLICT (whatsapp_e164, lower(claimed_login)) WHERE status = 'pending'
+         DO UPDATE SET candidate_customer_id = EXCLUDED.candidate_customer_id,
+                       source_customer_id = EXCLUDED.source_customer_id,
+                       updated_at = now()`,
+        [normalized, temporaryId || null, target.id, normalizedLogin]
+      );
+      return { matched: false, needsReview: true, reason: 'login_already_has_phone' };
+    }
+    if (target.whatsapp_e164 === normalized) {
+      await client.query(
+        `UPDATE conversation_sessions
+            SET state = 'menu', data = $2::jsonb,
+                expires_at = now() + interval '24 hours', updated_at = now()
+          WHERE whatsapp_e164 = $1`,
+        [normalized, JSON.stringify({ customerId: target.id })]
+      );
+      return { matched: true, alreadyLinked: true, name: target.name, ...pending };
+    }
     await client.query(
       `UPDATE customers
           SET whatsapp_e164 = $2, name_confirmed_at = now(),
               consent_contact = true, opt_out_at = NULL, updated_at = now()
         WHERE id = $1`,
-      [candidateId, normalized]
+      [target.id, normalized]
     );
+    if (temporaryId && temporaryId !== target.id) {
+      await client.query(
+        `UPDATE message_logs SET customer_id = $2 WHERE customer_id = $1`,
+        [temporaryId, target.id]
+      );
+      await client.query(
+        `UPDATE customer_issues SET customer_id = $2 WHERE customer_id = $1`,
+        [temporaryId, target.id]
+      );
+      await client.query(`DELETE FROM customers WHERE id = $1`, [temporaryId]);
+    }
     await client.query(
-      `UPDATE message_logs SET customer_id = $2 WHERE customer_id = $1`,
-      [temporaryId, candidateId]
+      `INSERT INTO customer_identity_links
+        (whatsapp_e164, source_customer_id, candidate_customer_id,
+         claimed_login, status, reason, confidence, resolved_at)
+       VALUES ($1, NULL, $2, $3, 'confirmed', 'exact_login', 100, now())`,
+      [normalized, target.id, normalizedLogin]
     );
-    await client.query(
-      `UPDATE customer_issues SET customer_id = $2 WHERE customer_id = $1`,
-      [temporaryId, candidateId]
-    );
-    await client.query(`DELETE FROM customers WHERE id = $1`, [temporaryId]);
     await client.query(
       `UPDATE conversation_sessions
           SET state = 'menu', data = $2::jsonb,
               expires_at = now() + interval '24 hours', updated_at = now()
         WHERE whatsapp_e164 = $1`,
-      [normalized, JSON.stringify({ customerId: candidateId })]
+      [normalized, JSON.stringify({ customerId: target.id })]
     );
-    return { matched: true, name: candidate.rows[0].name, ...pending };
+    return { matched: true, name: target.name, ...pending };
   });
 }
 

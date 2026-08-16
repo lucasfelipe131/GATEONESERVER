@@ -202,6 +202,14 @@
             <div class="search"><span>⌕</span><input id="conversationSearch" placeholder="Buscar cliente, mensagem ou problema" /></div>
           </div>
           <div class="conversation-summary" id="conversationSummary"></div>
+          <article class="panel identity-review-panel">
+            <div class="panel-head">
+              <div><span class="eyebrow">ASSOCIAÇÃO SEGURA</span><h3>Logins com conflito de telefone</h3></div>
+              <span class="status-dot" id="identityReviewCount">0 pendentes</span>
+            </div>
+            <p class="hint">O vínculo exato é automático quando o login está livre. Se ele já possui outro telefone, o sistema preserva os dois cadastros e envia o caso para revisão.</p>
+            <div id="identityReviewList" class="identity-review-list"></div>
+          </article>
           <div id="conversationsList" class="conversation-list"></div>
         </section>
 
@@ -341,6 +349,8 @@
                 <label>Pacote de TV<input name="BITPANEL_TV_PACKAGE" value="Full HD + H265 + HD + SD + VOD + Adulto" /></label>
                 <label>Conexões padrão<input name="BITPANEL_DEFAULT_CONNECTIONS" type="number" min="1" max="10" value="1" /></label>
                 <p class="hint">A sincronização importa todas as listas, mas só libera automação para o proprietário Gate One Pro Server.</p>
+                <label>Sessão autenticada (.json)<input id="bitpanelSessionFile" type="file" accept="application/json,.json" /></label>
+                <p class="hint" id="bitpanelSessionStatus">O CAPTCHA é resolvido manualmente uma vez. Depois, esta sessão é reutilizada e renovada pelo sistema.</p>
                 <div class="integration-actions"><button class="btn btn-secondary test-integration" type="button">Testar conexão</button><button class="btn btn-primary" type="submit">Salvar BitPanel</button></div>
               </form>
             </article>

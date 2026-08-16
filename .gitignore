@@ -2,6 +2,8 @@ node_modules/
 .env
 artifacts/
 data/bitpanel-logins-*.json
+bitpanel-session.json
+data/bitpanel-auth/
 coverage/
 *.log
 .DS_Store

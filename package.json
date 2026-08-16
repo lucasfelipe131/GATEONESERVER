@@ -13,7 +13,8 @@
     "migrate": "node src/migrate.js",
     "seed": "node src/seed.js",
     "test": "node --test",
-    "check": "node --check src/server.js && node --check src/worker.js && node --check public/app.js && node --check public/portal.js"
+    "check": "node --check src/server.js && node --check src/worker.js && node --check public/app.js && node --check public/portal.js",
+    "bitpanel:auth": "node scripts/bitpanel-auth.js"
   },
   "dependencies": {
     "@fastify/cookie": "11.1.2",

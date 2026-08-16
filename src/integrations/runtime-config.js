@@ -21,7 +21,8 @@ const ENV_FIELDS = {
     'BITPANEL_LOGIN_URL',
     'BITPANEL_PLAN_LABEL',
     'BITPANEL_TV_PACKAGE',
-    'BITPANEL_DEFAULT_CONNECTIONS'
+    'BITPANEL_DEFAULT_CONNECTIONS',
+    'BITPANEL_STORAGE_STATE'
   ],
   openai: [
     'OPENAI_API_KEY',
@@ -69,6 +70,22 @@ export async function getRuntimeConfig(db, baseConfig) {
   return Object.assign({}, baseConfig, ...stored);
 }
 
+export async function saveBitPanelStorageState(db, baseConfig, storageState, userId = null) {
+  const parsed = typeof storageState === 'string' ? JSON.parse(storageState) : storageState;
+  if (!parsed || !Array.isArray(parsed.cookies) || !Array.isArray(parsed.origins)) {
+    throw new Error('Arquivo de sessão inválido. Gere-o com o assistente do Gate One.');
+  }
+  const serialized = JSON.stringify(parsed);
+  if (serialized.length > 2_000_000) throw new Error('Arquivo de sessão maior que o permitido.');
+  await saveIntegrationCredentials(
+    db,
+    baseConfig,
+    'bitpanel',
+    { BITPANEL_STORAGE_STATE: serialized },
+    userId
+  );
+}
+
 export async function credentialStatus(db, baseConfig) {
   const runtime = await getRuntimeConfig(db, baseConfig);
   return {
@@ -83,7 +100,11 @@ export async function credentialStatus(db, baseConfig) {
           runtime.WHATSAPP_VERIFY_TOKEN &&
           runtime.META_APP_SECRET
       ),
-      bitpanel: Boolean(runtime.BITPANEL_USERNAME && runtime.BITPANEL_PASSWORD),
+      bitpanel: Boolean(
+        runtime.BITPANEL_STORAGE_STATE ||
+        (runtime.BITPANEL_USERNAME && runtime.BITPANEL_PASSWORD)
+      ),
+      bitpanelSession: Boolean(runtime.BITPANEL_STORAGE_STATE),
       openai: Boolean(runtime.OPENAI_API_KEY && runtime.OPENAI_MODEL)
     }
   };
