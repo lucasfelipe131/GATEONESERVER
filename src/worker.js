@@ -3,9 +3,9 @@ import { CronJob } from 'cron';
 import { loadConfig } from './config.js';
 import { createDb, getSetting } from './db.js';
 import { initializeDatabase } from './init.js';
-import { createRedis } from './queue.js';
+import { createQueues, createRedis } from './queue.js';
 import { scanBilling } from './services/billing.js';
-import { createPixPayment } from './integrations/mercadopago.js';
+import { createCheckoutPreference, createPixPayment } from './integrations/mercadopago.js';
 import {
   sendAccessCreatedTemplate,
   sendChargeTemplate,
@@ -31,6 +31,7 @@ import { encryptSecret } from './security.js';
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL, { ssl: config.DATABASE_SSL });
 const redis = createRedis(config.REDIS_URL);
+const queues = createQueues(redis);
 
 async function effectiveConfig() {
   const [paymentMode, whatsappMode, bitpanelMode, renewalApproval, aiWhatsAppEnabled] =
@@ -48,6 +49,63 @@ async function effectiveConfig() {
     BITPANEL_MODE: bitpanelMode,
     RENEWAL_REQUIRES_APPROVAL: renewalApproval,
     AI_WHATSAPP_ENABLED: aiWhatsAppEnabled
+  };
+}
+
+async function sendQrNotice(runtimeConfig, to, text) {
+  if (!runtimeConfig.GATE_ONE_WHATSAPP_QR_URL || !runtimeConfig.GATE_ONE_WHATSAPP_NOTIFY_SECRET) {
+    return null;
+  }
+  const response = await fetch(
+    `${runtimeConfig.GATE_ONE_WHATSAPP_QR_URL.replace(/\/$/, '')}/api/gate-one/notify`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Gate-One-Notify-Secret': runtimeConfig.GATE_ONE_WHATSAPP_NOTIFY_SECRET
+      },
+      body: JSON.stringify({ to, text })
+    }
+  );
+  if (!response.ok) {
+    throw new Error(`WhatsApp QR recusou a confirmação da renovação (${response.status}).`);
+  }
+  return { channel: 'whatsapp_qr', providerId: null, simulated: false, content: text };
+}
+
+async function deliverRenewalResult(runtimeConfig, renewal, outcome, operation, renewedUntilBr) {
+  const content = operation === 'provision'
+    ? [
+        `✅ Olá, ${String(renewal.customer_name || 'cliente').split(/\s+/)[0]}! Seu acesso Gate One Pro foi criado.`,
+        `Plano: ${renewal.plan_name}.`,
+        `Login: ${outcome.username || renewal.bitpanel_reference || 'em atualização'}`,
+        `Senha: ${outcome.password || 'em atualização'}`,
+        `Validade: ${renewedUntilBr}.`,
+        'Guarde esses dados e não os compartilhe.'
+      ].join('\n')
+    : [
+        `✅ Olá, ${String(renewal.customer_name || 'cliente').split(/\s+/)[0]}! Sua renovação foi concluída.`,
+        `Plano: ${renewal.plan_name}.`,
+        `Nova validade: ${renewedUntilBr}.`
+      ].join('\n');
+
+  try {
+    const qr = await sendQrNotice(runtimeConfig, renewal.whatsapp_e164, content);
+    if (qr) return qr;
+  } catch (error) {
+    if (!runtimeConfig.WHATSAPP_ACCESS_TOKEN || !runtimeConfig.WHATSAPP_PHONE_NUMBER_ID) {
+      throw error;
+    }
+  }
+
+  const message = operation === 'provision'
+    ? await sendAccessCreatedTemplate(runtimeConfig, renewal, outcome, renewedUntilBr)
+    : await sendRenewedTemplate(runtimeConfig, renewal, renewedUntilBr);
+  return {
+    channel: 'whatsapp',
+    providerId: message.messages?.[0]?.id || null,
+    simulated: Boolean(message.simulated),
+    content
   };
 }
 
@@ -81,6 +139,29 @@ async function ensurePix(runtimeConfig, charge) {
       WHERE id = $1
       RETURNING *`,
     [charge.id, payment.id, payment.qrCode, payment.ticketUrl, payment.expiration]
+  );
+  return { ...charge, ...result.rows[0] };
+}
+
+async function ensureCheckout(runtimeConfig, charge) {
+  if (charge.checkout_url) return charge;
+  const preference = await createCheckoutPreference(runtimeConfig, {
+    id: charge.id,
+    idempotency_key: `${charge.idempotency_key}:checkout`,
+    customer_name: charge.customer_name,
+    customer_email: charge.customer_email,
+    customer_phone: charge.whatsapp_e164,
+    plan_code: charge.plan_code,
+    plan_name: charge.plan_name,
+    duration_months: charge.duration_months,
+    amount_cents: charge.amount_cents
+  });
+  const result = await db.query(
+    `UPDATE charges
+        SET mercado_pago_preference_id = $2, checkout_url = $3, updated_at = now()
+      WHERE id = $1
+      RETURNING *`,
+    [charge.id, preference.id, preference.checkoutUrl]
   );
   return { ...charge, ...result.rows[0] };
 }
@@ -163,6 +244,13 @@ async function processMessage(job) {
   }
 
   if (job.name === 'send-payment-confirmation') {
+    if (
+      runtimeConfig.GATE_ONE_WHATSAPP_QR_URL &&
+      runtimeConfig.GATE_ONE_WHATSAPP_NOTIFY_SECRET &&
+      (!runtimeConfig.WHATSAPP_ACCESS_TOKEN || !runtimeConfig.WHATSAPP_PHONE_NUMBER_ID)
+    ) {
+      return { skipped: true, reason: 'qr_confirmation_sent_by_webhook' };
+    }
     const charge = await loadCharge(job.data.chargeId);
     const response = await sendPaymentConfirmationTemplate(runtimeConfig, charge);
     await db.query(
@@ -187,31 +275,42 @@ async function processMessage(job) {
     throw new Error('Cobrança não aprovada. Envio bloqueado.');
   }
   if (charge.opt_out_at) throw new Error('Cliente solicitou saída das mensagens.');
-  charge = await ensurePix(runtimeConfig, charge);
+  const qrDelivery = Boolean(
+    runtimeConfig.GATE_ONE_WHATSAPP_QR_URL &&
+      runtimeConfig.GATE_ONE_WHATSAPP_NOTIFY_SECRET
+  );
+  charge = qrDelivery
+    ? await ensureCheckout(runtimeConfig, charge)
+    : await ensurePix(runtimeConfig, charge);
   const enriched = {
     ...charge,
     amount_br: formatMoney(charge.amount_cents),
     due_on_br: formatDate(charge.due_on)
   };
-  const response = job.data.conversationWindow
-    ? await sendText(
-        runtimeConfig,
-        charge.whatsapp_e164,
-        `${charge.message_text}\n\nPix copia e cola:\n${charge.pix_copy_paste}`
-      )
-    : await sendChargeTemplate(runtimeConfig, enriched);
+  const qrText = `${charge.message_text}\n\nPague pelo link seguro:\n${charge.checkout_url}`;
+  const response = qrDelivery
+    ? await sendQrNotice(runtimeConfig, charge.whatsapp_e164, qrText)
+    : job.data.conversationWindow
+      ? await sendText(
+          runtimeConfig,
+          charge.whatsapp_e164,
+          `${charge.message_text}\n\nPix copia e cola:\n${charge.pix_copy_paste}`
+        )
+      : await sendChargeTemplate(runtimeConfig, enriched);
+  const providerId = qrDelivery ? response.providerId : response.messages?.[0]?.id;
 
   await db.transaction(async (client) => {
     await client.query(
       `INSERT INTO message_logs
-        (customer_id, charge_id, direction, template_name, content, provider_id, status, simulated)
-       VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7)`,
+        (customer_id, charge_id, direction, channel, template_name, content, provider_id, status, simulated)
+       VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7, $8)`,
       [
         charge.customer_id,
         charge.id,
-        job.data.conversationWindow ? null : `stage:${charge.stage}`,
-        charge.message_text,
-        response.messages?.[0]?.id,
+        qrDelivery ? 'whatsapp_qr' : 'whatsapp',
+        qrDelivery || job.data.conversationWindow ? null : `stage:${charge.stage}`,
+        qrDelivery ? qrText : charge.message_text,
+        providerId,
         response.simulated ? 'simulated' : 'sent',
         response.simulated
       ]
@@ -223,7 +322,7 @@ async function processMessage(job) {
       );
     }
   });
-  return { providerId: response.messages?.[0]?.id, simulated: response.simulated };
+  return { providerId, simulated: response.simulated };
 }
 
 async function processRenewal(job) {
@@ -378,31 +477,30 @@ async function processRenewal(job) {
     if (!outcome.simulated && renewedUntil) {
       try {
         const renewedUntilBr = renewedUntil.split('-').reverse().join('/');
-        const message =
-          operation === 'provision'
-            ? await sendAccessCreatedTemplate(
-                runtimeConfig,
-                renewal,
-                outcome,
-                renewedUntilBr
-              )
-            : await sendRenewedTemplate(runtimeConfig, renewal, renewedUntilBr);
+        const delivery = await deliverRenewalResult(
+          runtimeConfig,
+          renewal,
+          outcome,
+          operation,
+          renewedUntilBr
+        );
         await db.query(
           `INSERT INTO message_logs
-            (customer_id, charge_id, direction, template_name, content, provider_id, status, simulated)
-           VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7)`,
+            (customer_id, charge_id, direction, channel, template_name, content, provider_id, status, simulated)
+           VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7, $8)`,
           [
             renewal.customer_id,
             renewal.charge_id,
-            operation === 'provision'
+            delivery.channel,
+            delivery.channel === 'whatsapp' && operation === 'provision'
               ? runtimeConfig.WHATSAPP_TEMPLATE_ACCESS_CREATED
-              : runtimeConfig.WHATSAPP_TEMPLATE_RENEWED,
-            operation === 'provision'
-              ? `Acesso criado até ${renewedUntil}`
-              : `Renovação concluída até ${renewedUntil}`,
-            message.messages?.[0]?.id,
-            message.simulated ? 'simulated' : 'sent',
-            message.simulated
+              : delivery.channel === 'whatsapp'
+                ? runtimeConfig.WHATSAPP_TEMPLATE_RENEWED
+                : null,
+            delivery.content,
+            delivery.providerId,
+            delivery.simulated ? 'simulated' : 'sent',
+            delivery.simulated
           ]
         );
       } catch (messageError) {
@@ -434,6 +532,113 @@ async function processRenewal(job) {
   }
 }
 
+async function recoverAutomaticRenewals() {
+  const runtimeConfig = await effectiveConfig();
+  const paused = await getSetting(db, 'global_pause', config.GLOBAL_PAUSE);
+  if (
+    paused ||
+    runtimeConfig.RENEWAL_REQUIRES_APPROVAL ||
+    runtimeConfig.BITPANEL_MODE !== 'live'
+  ) {
+    return { recovered: 0, skipped: true };
+  }
+  const pending = await db.query(
+    `SELECT r.id, ch.stage, s.bitpanel_list_id,
+            c.automation_eligible, c.bitpanel_owner
+       FROM renewal_jobs r
+       JOIN charges ch ON ch.id = r.charge_id
+       JOIN subscriptions s ON s.id = ch.subscription_id
+       JOIN customers c ON c.id = s.customer_id
+      WHERE r.status IN ('awaiting_approval', 'manual_review')
+        AND ch.status = 'paid'
+      ORDER BY r.created_at
+      LIMIT 100`
+  );
+  let recovered = 0;
+  for (const item of pending.rows) {
+    const provision = item.stage === 'new_sale' || !item.bitpanel_list_id;
+    if (!provision && (!item.automation_eligible || !isGateOneOwner(item.bitpanel_owner))) {
+      continue;
+    }
+    const updated = await db.query(
+      `UPDATE renewal_jobs
+          SET status = 'queued', approved_at = COALESCE(approved_at, now()),
+              error = NULL, updated_at = now()
+        WHERE id = $1 AND status IN ('awaiting_approval', 'manual_review')
+        RETURNING id`,
+      [item.id]
+    );
+    if (!updated.rows[0]) continue;
+    try {
+      await queues.renewals.add(
+        'execute-renewal',
+        { renewalId: item.id },
+        {
+          jobId: `renewal-recovery-${item.id}`,
+          attempts: 5,
+          backoff: { type: 'exponential', delay: 60_000 },
+          removeOnComplete: 1000,
+          removeOnFail: 2000
+        }
+      );
+    } catch (error) {
+      await db.query(
+        `UPDATE renewal_jobs SET status = 'awaiting_approval', updated_at = now()
+          WHERE id = $1 AND status = 'queued'`,
+        [item.id]
+      );
+      throw error;
+    }
+    recovered += 1;
+    await audit(db, {
+      actorType: 'system',
+      action: 'bitpanel.automatic_job_recovered',
+      entityType: 'renewal_job',
+      entityId: item.id
+    });
+  }
+  return { recovered, skipped: false };
+}
+
+async function queueAutomaticCharge(chargeId) {
+  await queues.messages.add(
+    'send-charge',
+    { chargeId },
+    {
+      jobId: `charge-auto-${chargeId}`,
+      attempts: 20,
+      backoff: { type: 'fixed', delay: 300_000 },
+      removeOnComplete: 1000,
+      removeOnFail: 2000
+    }
+  );
+}
+
+async function recoverAutomaticCharges() {
+  const [salesMode, paymentMode, paused] = await Promise.all([
+    getSetting(db, 'sales_mode', config.SALES_MODE),
+    getSetting(db, 'payment_mode', config.PAYMENT_MODE),
+    getSetting(db, 'global_pause', config.GLOBAL_PAUSE)
+  ]);
+  if (salesMode !== 'automatic' || paymentMode !== 'live' || paused) {
+    return { recovered: 0, skipped: true };
+  }
+  const result = await db.query(
+    `SELECT ch.id
+       FROM charges ch
+       JOIN subscriptions s ON s.id = ch.subscription_id
+       JOIN customers c ON c.id = s.customer_id
+      WHERE ch.status = 'approved'
+        AND ch.approved_at IS NULL
+        AND c.consent_contact = true
+        AND c.opt_out_at IS NULL
+      ORDER BY ch.created_at
+      LIMIT 100`
+  );
+  for (const charge of result.rows) await queueAutomaticCharge(charge.id);
+  return { recovered: result.rowCount, skipped: false };
+}
+
 async function start() {
   await initializeDatabase(db, config);
   const messageWorker = new Worker('gate-one-messages', processMessage, {
@@ -450,10 +655,28 @@ async function start() {
     });
   }
 
-  const scan = () =>
-    scanBilling(db, { timezone: config.TIMEZONE })
-      .then((stats) => console.log({ stats }, 'Varredura de vencimentos concluída'))
-      .catch((error) => console.error({ error: error.message }, 'Varredura falhou'));
+  const scan = async () => {
+    try {
+      const [salesMode, paymentMode, paused] = await Promise.all([
+        getSetting(db, 'sales_mode', config.SALES_MODE),
+        getSetting(db, 'payment_mode', config.PAYMENT_MODE),
+        getSetting(db, 'global_pause', config.GLOBAL_PAUSE)
+      ]);
+      const automatic = salesMode === 'automatic' && paymentMode === 'live' && !paused;
+      const stats = await scanBilling(db, {
+        timezone: config.TIMEZONE,
+        initialStatus: automatic ? 'approved' : 'awaiting_approval'
+      });
+      if (automatic) {
+        for (const chargeId of stats.chargeIds) await queueAutomaticCharge(chargeId);
+      }
+      console.log({ stats, automatic }, 'Varredura de vencimentos concluída');
+      return stats;
+    } catch (error) {
+      console.error({ error: error.message }, 'Varredura falhou');
+      return { checked: 0, created: 0, skipped: 0, chargeIds: [], error: error.message };
+    }
+  };
   const cron = new CronJob('0 9 * * *', scan, null, true, config.TIMEZONE);
   const syncContent = () => {
     if (!config.TELEGRAM_SYNC_ENABLED) return Promise.resolve({ skipped: true });
@@ -464,14 +687,26 @@ async function start() {
       );
   };
   const contentCron = new CronJob('30 8 * * *', syncContent, null, true, config.TIMEZONE);
+  const recoveryCron = new CronJob(
+    '*/5 * * * *',
+    () => Promise.all([recoverAutomaticRenewals(), recoverAutomaticCharges()]).catch((error) =>
+      console.error({ error: error.message }, 'Recuperação de automações falhou')
+    ),
+    null,
+    true,
+    config.TIMEZONE
+  );
   await scan();
   await syncContent();
+  await Promise.all([recoverAutomaticRenewals(), recoverAutomaticCharges()]);
   console.log('Worker Gate One Pro iniciado.');
 
   const shutdown = async () => {
     cron.stop();
     contentCron.stop();
+    recoveryCron.stop();
     await Promise.all([messageWorker.close(), renewalWorker.close()]);
+    await Promise.all([queues.messages.close(), queues.renewals.close()]);
     await redis.quit();
     await db.close();
     process.exit(0);

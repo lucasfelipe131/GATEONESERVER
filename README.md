@@ -3,6 +3,7 @@
 Projeto de produção para centralizar na Railway:
 
 - painel administrativo responsivo;
+- central de atendimentos recentes, problemas abertos e pedidos de suporte humano;
 - gráficos de receita, cobranças e vencimentos;
 - clientes e assinaturas;
 - planos Mensal (R$ 30), Trimestral (R$ 85), Semestral (R$ 150) e Anual (R$ 270);
@@ -12,12 +13,13 @@ Projeto de produção para centralizar na Railway:
 - detecção de vencimentos D−3, D0, D+2 e D+5;
 - fila de aprovação de cobranças;
 - Pix pelo Mercado Pago;
-- atendimento e mensagens pela WhatsApp Cloud API;
+- atendimento principal pelo WhatsApp QR, com Cloud API opcional;
 - captação de leads;
 - área do cliente e pontos Gate Club;
 - fila de renovação no BitPanel por Playwright;
 - assistente OpenAI no painel e atendimento orientativo no WhatsApp;
 - memória de atendimento por cliente, com histórico e problemas recorrentes;
+- conversa natural: o menu só aparece quando solicitado e o bot faz no máximo uma pergunta necessária por vez;
 - atualização diária das novidades de um canal público do Telegram;
 - auditoria, idempotência e pausa global.
 
@@ -255,6 +257,7 @@ Para liberar a renovação automática após o piloto, o administrador exige:
 
 ```text
 PAYMENT_MODE=live
+SALES_MODE=automatic
 BITPANEL_MODE=live
 RENEWAL_REQUIRES_APPROVAL=false
 GLOBAL_PAUSE=false
@@ -264,6 +267,10 @@ Mesmo nesse modo, o worker só executa depois do pagamento confirmado pelo
 Mercado Pago e somente para listas do proprietário `Gate One Pro Server`.
 Antes de clicar novamente no BitPanel, o worker confere se a validade já foi
 alterada, protegendo contra renovação duplicada em uma repetição de job.
+Tarefas pagas que tenham ficado sem fila por uma oscilação temporária são
+recuperadas automaticamente a cada cinco minutos. No WhatsApp QR, os avisos de
+vencimento usam um link seguro do Checkout e a confirmação final volta pelo
+mesmo número conectado.
 
 ## Assistente de IA
 

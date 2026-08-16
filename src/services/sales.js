@@ -28,11 +28,23 @@ function normalizeMessage(text) {
 }
 
 function wantsMenu(text) {
-  return /^(menu|oi|ola|bom dia|boa tarde|boa noite|inicio|começar|comecar)$/.test(normalizeMessage(text));
+  return /^(menu|inicio|começar|comecar|0)$/.test(normalizeMessage(text));
+}
+
+function isGreeting(text) {
+  return /^(oi|ola|opa|e ai|bom dia|boa tarde|boa noite|tudo bem|blz)$/.test(
+    normalizeMessage(text)
+  );
 }
 
 function wantsAccountStatus(text) {
-  return /\b(minha conta|meu plano|minha assinatura|vencimento|vence|validade|situacao|situação|status|renovar|renovacao|renovação|pix|pagamento|pagar)\b/.test(
+  return /\b(minha conta|meu plano|minha assinatura|vencimento|vence|validade|situacao|situação|status)\b/.test(
+    normalizeMessage(text)
+  );
+}
+
+function wantsRenewal(text) {
+  return /\b(renovar|renovacao|renovação|quero pagar|gerar pix|novo pix)\b/.test(
     normalizeMessage(text)
   );
 }
@@ -93,10 +105,21 @@ function formatAccountSummary(customer, account) {
     `• Validade: ${due}`,
     payment && `• ${payment}${amount ? ` Valor: ${amount}` : ''}`,
     account.checkout_url && account.charge_status !== 'paid' ? `• Pagar com segurança: ${account.checkout_url}` : '',
-    'Se precisar, responda *MENU* para ver os planos ou *ATENDENTE* para falar com a equipe.'
+    'Se precisar de ajuda da equipe, responda *ATENDENTE*.'
   ]
     .filter(Boolean)
     .join('\n');
+}
+
+function formatNaturalGreeting(customer, account) {
+  const first = customer.name && customer.name !== 'Cliente'
+    ? customer.name.split(/\s+/)[0]
+    : 'cliente';
+  if (account?.plan_name && account?.expires_on) {
+    const due = new Date(`${account.expires_on}T12:00:00`).toLocaleDateString('pt-BR');
+    return `Oi, ${first}! 👋 Seu plano ${account.plan_name} está válido até ${due}. Como posso ajudar hoje?`;
+  }
+  return `Oi, ${first}! 👋 Pode me contar do seu jeito o que você precisa.`;
 }
 
 export async function handleInboundMessage({ db, queues, config, inbound }) {
@@ -146,6 +169,17 @@ export async function handleInboundMessage({ db, queues, config, inbound }) {
     return { action: 'account_summary' };
   }
 
+  if (isGreeting(inbound.text)) {
+    const account = await accountSummary(db, customer);
+    await saveSession(db, phone, 'conversation', { customerId: customer.id });
+    await queues.messages.add(
+      'send-free-text',
+      { customerId: customer.id, to: phone, text: formatNaturalGreeting(customer, account) },
+      { jobId: `greeting-${inbound.id}` }
+    );
+    return { action: 'greeting' };
+  }
+
   if (wantsMenu(inbound.text)) {
     await saveSession(db, phone, 'menu', { customerId: customer.id });
     await queues.messages.add(
@@ -159,6 +193,20 @@ export async function handleInboundMessage({ db, queues, config, inbound }) {
     );
     await queues.messages.add('send-plan-menu', { customerId: customer.id, to: phone }, { jobId: `menu-${inbound.id}` });
     return { action: 'menu' };
+  }
+
+  if (wantsRenewal(inbound.text)) {
+    await saveSession(db, phone, 'awaiting_plan', { customerId: customer.id });
+    await queues.messages.add(
+      'send-free-text',
+      {
+        customerId: customer.id,
+        to: phone,
+        text: 'Perfeito. Qual período você prefere: Mensal, Trimestral, Semestral ou Anual?'
+      },
+      { jobId: `renewal-choice-${inbound.id}` }
+    );
+    return { action: 'awaiting_plan' };
   }
 
   const planCode = detectPlan(inbound.text);
@@ -218,12 +266,16 @@ export async function handleInboundMessage({ db, queues, config, inbound }) {
       return { action: 'ai_queued' };
     }
     await queues.messages.add(
-      'send-plan-menu',
-      { customerId: customer.id, to: phone },
-      { jobId: `menu-${inbound.id}` }
+      'send-free-text',
+      {
+        customerId: customer.id,
+        to: phone,
+        text: 'Não consegui entender bem. Pode me explicar em uma frase? Se quiser ver as opções, escreva *MENU*.'
+      },
+      { jobId: `clarify-${inbound.id}` }
     );
-    await saveSession(db, phone, 'menu', { customerId: customer.id });
-    return { action: 'menu' };
+    await saveSession(db, phone, 'conversation', { customerId: customer.id });
+    return { action: 'clarify' };
   }
 
   const planResult = await db.query('SELECT * FROM plans WHERE code = $1 AND active = true', [

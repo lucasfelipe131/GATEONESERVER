@@ -160,6 +160,8 @@ async function findListByUsername(page, config, username) {
     if (rowUsername !== username) continue;
     return {
       id: (await cells.nth(0).innerText()).trim().replace(/^#/, ''),
+      owner: (await cells.nth(2).innerText()).trim(),
+      status: (await cells.nth(3).innerText()).trim(),
       username: rowUsername,
       expiryText: (await cells.nth(6).innerText()).trim()
     };
@@ -195,13 +197,18 @@ async function tableColumnMap(page) {
   const headers = await page.locator('table thead th').allInnerTexts().catch(() => []);
   const normalized = headers.map(normalizeBitPanelText);
   const find = (patterns, fallback) => {
-    const index = normalized.findIndex((header) => patterns.some((pattern) => pattern.test(header)));
-    return index >= 0 ? index : fallback;
+    for (const pattern of patterns) {
+      const index = normalized.findIndex((header) => pattern.test(header));
+      if (index >= 0) return index;
+    }
+    return fallback;
   };
   return {
     id: find([/^#?id$/, /codigo/], 0),
     owner: find([/proprietario/, /revendedor/, /owner/], 2),
-    status: find([/status/, /situacao/], 3),
+    // O BitPanel separa presenca (Status: Online/Offline) da situacao da
+    // assinatura (Estado: Ativa/Expirada). Renovacao usa sempre o Estado.
+    status: find([/^estado$/, /situacao/, /^status$/], 3),
     username: find([/usuario/, /login/, /^nome do usuario$/], 4),
     expiry: find([/validade/, /vencimento/, /expira/], 6)
   };
@@ -357,6 +364,9 @@ export async function renewInBitPanel(config, renewal) {
     );
     if (!row || row.id !== listId) {
       throw new Error('Lista não encontrada na busca do BitPanel.');
+    }
+    if (!isGateOneOwner(row.owner)) {
+      throw new Error('Automação bloqueada: a lista não pertence ao Gate One Pro Server.');
     }
 
     const menuIcon = page.locator(`i[title="Mais opções, lista ${listId}"]`);

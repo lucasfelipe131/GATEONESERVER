@@ -206,12 +206,8 @@ export async function registerQrInbound(db, {
   const issueRecord = saved
     ? await recordIssue(db, customer.id, text, issue)
     : { current: null, previous: null };
-  let session = await loadSession(db, normalized);
+  const session = await loadSession(db, normalized);
   const needsName = !cleanCustomerName(customer.name);
-  if (needsName && session?.state !== 'awaiting_login') {
-    await setConversationState(db, normalized, 'awaiting_name', { customerId: customer.id });
-    session = { state: 'awaiting_name', data: { customerId: customer.id } };
-  }
   const recentIssues = await db.query(
     `SELECT category, summary, status, occurrences, first_reported_at, last_mentioned_at
        FROM customer_issues
@@ -227,9 +223,20 @@ export async function registerQrInbound(db, {
     },
     needsName,
     duplicate: !saved,
-    sessionState: session?.state || 'menu',
+    sessionState: session?.state || 'idle',
     recentIssues: recentIssues.rows,
     supportMessage: buildSupportMessage(issue, issueRecord.previous)
+  };
+}
+
+function pendingIntentFields(data = {}) {
+  const intent = ['account', 'payment'].includes(data?.intent) ? data.intent : null;
+  const planCode = ['monthly', 'quarterly', 'semiannual', 'annual'].includes(data?.planCode)
+    ? data.planCode
+    : null;
+  return {
+    pendingIntent: intent,
+    pendingPlanCode: intent === 'payment' ? planCode : null
   };
 }
 
@@ -244,6 +251,13 @@ export async function confirmCustomerName(db, payload) {
   }
   await findOrCreateCustomer(db, { phone: normalized });
   return db.transaction(async (client) => {
+    const activeSession = await client.query(
+      `SELECT state, data FROM conversation_sessions
+        WHERE whatsapp_e164 = $1 AND expires_at > now()
+        FOR UPDATE`,
+      [normalized]
+    );
+    const pendingData = activeSession.rows[0]?.data || {};
     const current = await client.query(
       `SELECT * FROM customers WHERE whatsapp_e164 = $1 FOR UPDATE`,
       [normalized]
@@ -275,12 +289,13 @@ export async function confirmCustomerName(db, payload) {
         [
           normalized,
           JSON.stringify({
+            ...pendingData,
             customerId: current.rows[0].id,
             candidateId: matches.rows[0].id
           })
         ]
       );
-      return { name: cleaned, needsLogin: true };
+      return { name: cleaned, needsLogin: true, ...pendingIntentFields(pendingData) };
     }
     await client.query(
       `UPDATE customers
@@ -301,7 +316,7 @@ export async function confirmCustomerName(db, payload) {
              expires_at = EXCLUDED.expires_at, updated_at = now()`,
       [normalized, JSON.stringify({ customerId: current.rows[0].id })]
     );
-    return { name: cleaned, needsLogin: false };
+    return { name: cleaned, needsLogin: false, ...pendingIntentFields(pendingData) };
   });
 }
 
@@ -321,8 +336,9 @@ export async function confirmCustomerLogin(db, payload) {
     );
     const temporaryId = session.rows[0]?.data?.customerId;
     const candidateId = session.rows[0]?.data?.candidateId;
+    const pending = pendingIntentFields(session.rows[0]?.data || {});
     if (!temporaryId || !candidateId) {
-      throw Object.assign(new Error('A confirmação expirou. Digite MENU para começar novamente.'), {
+      throw Object.assign(new Error('A confirmação expirou. Diga o que deseja consultar para eu recomeçar.'), {
         statusCode: 409
       });
     }
@@ -362,7 +378,7 @@ export async function confirmCustomerLogin(db, payload) {
         WHERE whatsapp_e164 = $1`,
       [normalized, JSON.stringify({ customerId: candidateId })]
     );
-    return { matched: true, name: candidate.rows[0].name };
+    return { matched: true, name: candidate.rows[0].name, ...pending };
   });
 }
 

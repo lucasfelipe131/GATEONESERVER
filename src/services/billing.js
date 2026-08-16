@@ -6,7 +6,17 @@ import {
 } from '../domain/billing.js';
 import { audit } from '../audit.js';
 
-export async function scanBilling(db, { now = new Date(), timezone = 'America/Sao_Paulo' } = {}) {
+export async function scanBilling(
+  db,
+  {
+    now = new Date(),
+    timezone = 'America/Sao_Paulo',
+    initialStatus = 'awaiting_approval'
+  } = {}
+) {
+  if (!['awaiting_approval', 'approved'].includes(initialStatus)) {
+    throw new Error('Status inicial de cobrança inválido.');
+  }
   const today = dateOnlyInTimezone(now, timezone);
   const subscriptions = await db.query(
     `SELECT s.id, s.expires_on::text, s.status, c.id AS customer_id, c.name,
@@ -21,7 +31,7 @@ export async function scanBilling(db, { now = new Date(), timezone = 'America/Sa
         AND p.active = true`
   );
 
-  const stats = { checked: subscriptions.rowCount, created: 0, skipped: 0 };
+  const stats = { checked: subscriptions.rowCount, created: 0, skipped: 0, chargeIds: [] };
   for (const subscription of subscriptions.rows) {
     const stage = classifyStage(subscription.expires_on, today);
     if (!stage || !subscription.consent_contact || subscription.opt_out_at) {
@@ -44,12 +54,13 @@ export async function scanBilling(db, { now = new Date(), timezone = 'America/Sa
     const inserted = await db.query(
       `INSERT INTO charges
         (subscription_id, stage, status, amount_cents, due_on, idempotency_key, message_text)
-       VALUES ($1, $2, 'awaiting_approval', $3, $4, $5, $6)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (idempotency_key) DO NOTHING
        RETURNING id`,
       [
         subscription.id,
         stage,
+        initialStatus,
         subscription.price_cents,
         subscription.expires_on,
         idempotencyKey,
@@ -58,6 +69,7 @@ export async function scanBilling(db, { now = new Date(), timezone = 'America/Sa
     );
     if (inserted.rowCount) {
       stats.created += 1;
+      stats.chargeIds.push(inserted.rows[0].id);
       await audit(db, {
         action: 'billing.charge_prepared',
         entityType: 'charge',

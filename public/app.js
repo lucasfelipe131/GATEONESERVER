@@ -5,6 +5,7 @@ const state = {
   analytics: null,
   chargeStatus: '',
   customers: [],
+  conversations: [],
   plans: [],
   paymentCustomer: null,
   selectedCustomers: new Set()
@@ -60,6 +61,7 @@ function showApp() {
 const titles = {
   dashboard: ['CENTRAL DE CONTROLE', 'Visão geral'],
   customers: ['BASE DE ASSINANTES', 'Clientes'],
+  conversations: ['ATENDIMENTO HUMANIZADO', 'Atendimentos'],
   charges: ['APROVAÇÃO E PIX', 'Cobranças'],
   renewals: ['AUTOMAÇÃO BITPANEL', 'Renovações'],
   leads: ['VENDAS AUTOMÁTICAS', 'Captação'],
@@ -75,6 +77,7 @@ async function navigate(page) {
   $('#sidebar').classList.remove('open');
   if (page === 'dashboard') await loadDashboard();
   if (page === 'customers') await loadCustomers();
+  if (page === 'conversations') await loadConversations();
   if (page === 'charges') await loadCharges();
   if (page === 'renewals') await loadRenewals();
   if (page === 'leads') await loadLeads();
@@ -145,6 +148,8 @@ async function loadDashboard() {
       </article>`
     )
     .join('');
+  renderOperationPriorities(summary, analytics);
+  renderAutomationReadiness('#automationReadinessDashboard', settings);
   renderRevenueChart(analytics.revenueTrend);
   renderChargeChart(analytics.chargeStatus);
   renderExpirationChart(analytics.expirations);
@@ -302,6 +307,112 @@ function updateSafety(paused) {
   badge.innerHTML = `<span></span>${paused ? 'Automações pausadas' : 'Automações liberadas'}`;
 }
 
+function automationReadiness(settingsResult) {
+  const settings = settingsResult?.settings || {};
+  const integrations = settingsResult?.integrations || {};
+  return [
+    {
+      ready: !settings.global_pause,
+      label: 'Automações liberadas',
+      note: settings.global_pause ? 'A pausa global está ligada.' : 'O fluxo pode processar novas tarefas.'
+    },
+    {
+      ready: settings.payment_mode === 'live' && Boolean(settingsResult?.mercadoPago?.ready),
+      label: 'Mercado Pago em produção',
+      note: settings.payment_mode === 'live' && settingsResult?.mercadoPago?.ready
+        ? 'Webhook e credenciais prontos para confirmar pagamentos.'
+        : 'Falta ativar ou concluir a configuração de produção.'
+    },
+    {
+      ready: settings.bitpanel_mode === 'live' && Boolean(integrations.bitpanel),
+      label: 'BitPanel conectado',
+      note: settings.bitpanel_mode === 'live' && integrations.bitpanel
+        ? 'Cadastro e renovação estão no modo real.'
+        : 'Teste a conexão e ative o modo real.'
+    },
+    {
+      ready: settings.renewal_requires_approval === false,
+      label: 'Renovação após pagamento',
+      note: settings.renewal_requires_approval === false
+        ? 'Pagamento aprovado entra automaticamente na fila do BitPanel.'
+        : 'Cada renovação ainda precisa de aprovação manual.'
+    },
+    {
+      ready: Boolean(integrations.whatsapp),
+      label: 'WhatsApp operacional',
+      note: integrations.whatsappQr
+        ? 'Atendimento conectado por QR, com áudio, imagens e PDF.'
+        : integrations.whatsappCloud
+          ? 'Canal oficial da Meta configurado.'
+          : 'Conecte o serviço do WhatsApp para mensagens e confirmações.'
+    }
+  ];
+}
+
+function renderAutomationReadiness(target, settingsResult) {
+  const element = $(target);
+  if (!element) return;
+  element.innerHTML = automationReadiness(settingsResult)
+    .map(
+      (item) => `
+        <div class="readiness-step ${item.ready ? 'ready' : 'blocked'}">
+          <span class="readiness-check">${item.ready ? '✓' : '!'}</span>
+          <div><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.note)}</small></div>
+        </div>`
+    )
+    .join('');
+}
+
+function renderOperationPriorities(summary, analytics) {
+  const readiness = analytics.customerReadiness || {};
+  const items = [
+    {
+      count: Number(summary.charges.awaiting || 0),
+      icon: '◇',
+      tone: 'warning',
+      title: 'Cobranças aguardando aprovação',
+      note: 'Revise antes de enviar o link ao cliente.',
+      page: 'charges'
+    },
+    {
+      count: Number(summary.renewals || 0),
+      icon: '↻',
+      tone: 'danger',
+      title: 'Renovações exigindo atenção',
+      note: 'Inclui falhas ou itens parados para revisão.',
+      page: 'renewals'
+    },
+    {
+      count: Number(analytics.expirations?.overdue || 0),
+      icon: '!',
+      tone: 'danger',
+      title: 'Assinaturas vencidas',
+      note: 'Priorize contato e regularização.',
+      page: 'customers'
+    },
+    {
+      count: Number(readiness.review_required || 0),
+      icon: '◎',
+      tone: 'warning',
+      title: 'Cadastros para revisar',
+      note: 'Complete vínculo, telefone ou classificação.',
+      page: 'customers'
+    }
+  ].filter((item) => item.count > 0);
+  const total = items.reduce((sum, item) => sum + item.count, 0);
+  const count = $('#priorityCount');
+  count.textContent = total ? `${total} ${total === 1 ? 'pendência' : 'pendências'}` : 'Tudo em dia';
+  count.classList.toggle('clear', total === 0);
+  $('#operationPriorities').innerHTML = items.length
+    ? items.map((item) => `
+        <div class="priority-item">
+          <span class="priority-icon ${item.tone}">${item.icon}</span>
+          <div><strong>${item.count} ${escapeHtml(item.title)}</strong><small>${escapeHtml(item.note)}</small></div>
+          <button class="priority-link" data-priority-page="${item.page}">Abrir</button>
+        </div>`).join('')
+    : '<div class="empty">Nenhuma pendência crítica agora. A operação está organizada.</div>';
+}
+
 function updateCustomerSelection() {
   const count = state.selectedCustomers.size;
   $('#selectedCustomerCount').textContent = `${count} ${count === 1 ? 'selecionado' : 'selecionados'}`;
@@ -338,6 +449,57 @@ async function loadCustomers(search = $('#customerSearch')?.value || '') {
         .join('')
     : '<tr><td colspan="9"><div class="empty">Nenhum cliente encontrado.</div></td></tr>';
   updateCustomerSelection();
+}
+
+function renderConversations(search = '') {
+  const query = String(search || '').trim().toLocaleLowerCase('pt-BR');
+  const conversations = state.conversations.filter((item) => {
+    if (!query) return true;
+    return [item.name, item.whatsapp_e164, item.last_message, item.latest_issue]
+      .filter(Boolean)
+      .some((value) => String(value).toLocaleLowerCase('pt-BR').includes(query));
+  });
+  const needingHuman = state.conversations.filter(
+    (item) => item.conversation_state === 'support'
+  ).length;
+  const withIssues = state.conversations.filter((item) => Number(item.open_issues) > 0).length;
+  $('#conversationSummary').innerHTML = [
+    ['Conversas recentes', state.conversations.length],
+    ['Com a equipe', needingHuman],
+    ['Problemas abertos', withIssues]
+  ].map(([label, value]) => `
+      <article class="conversation-summary-card"><span>${escapeHtml(label)}</span><strong>${value}</strong></article>`)
+    .join('');
+  $('#conversationsList').innerHTML = conversations.length
+    ? conversations.map((item) => {
+        const phone = String(item.whatsapp_e164 || '').replace(/\D/g, '');
+        const issue = Number(item.open_issues) > 0
+          ? `<span class="issue-badge">${item.open_issues} ${Number(item.open_issues) === 1 ? 'problema aberto' : 'problemas abertos'}${item.latest_issue ? ` · ${escapeHtml(item.latest_issue)}` : ''}</span>`
+          : '';
+        return `
+          <article class="conversation-card">
+            <div class="conversation-person">
+              <strong>${escapeHtml(item.name || 'Cliente sem nome confirmado')}</strong>
+              <small>${escapeHtml(item.whatsapp_masked || 'Telefone não informado')} · ${stageTag(item.operational_stage)}</small>
+              ${issue}
+            </div>
+            <div class="conversation-preview">
+              <strong>${item.last_direction === 'inbound' ? 'Cliente escreveu' : 'Gate One respondeu'}</strong>
+              <p title="${escapeHtml(item.last_message || '')}">${escapeHtml(item.last_message || 'Sem texto disponível')}</p>
+              <small>${dateTime(item.last_message_at)}${item.conversation_state === 'support' ? ' · aguardando equipe' : ''}</small>
+            </div>
+            <div class="conversation-actions">
+              ${phone ? `<a class="btn btn-secondary btn-small" href="https://wa.me/${phone}" target="_blank" rel="noreferrer">Abrir WhatsApp ↗</a>` : ''}
+            </div>
+          </article>`;
+      }).join('')
+    : '<div class="empty">Nenhum atendimento corresponde à busca.</div>';
+}
+
+async function loadConversations() {
+  const { conversations } = await api('/api/admin/conversations');
+  state.conversations = conversations;
+  renderConversations($('#conversationSearch')?.value || '');
 }
 
 async function loadCharges(status = state.chargeStatus) {
@@ -472,6 +634,7 @@ async function loadSettings() {
   $('#aiAdminEnabled').checked = settings.ai_admin_enabled === true;
   $('#aiWhatsappEnabled').checked = settings.ai_whatsapp_enabled === true;
   renderIntegrations('#settingsIntegrations', result.integrations);
+  renderAutomationReadiness('#automationReadinessSettings', result);
   updateSafety(settings.global_pause);
 }
 
@@ -501,6 +664,11 @@ $('#logoutButton').addEventListener('click', async () => {
 $$('.nav-item').forEach((button) => button.addEventListener('click', () => navigate(button.dataset.page)));
 $$('[data-go]').forEach((button) => button.addEventListener('click', () => navigate(button.dataset.go)));
 $('#menuButton').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
+$('#operationPriorities').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-priority-page]');
+  if (button) navigate(button.dataset.priorityPage);
+});
+$('#conversationSearch').addEventListener('input', (event) => renderConversations(event.target.value));
 
 $('#scanButton').addEventListener('click', async (event) => {
   event.currentTarget.disabled = true;
