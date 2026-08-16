@@ -207,17 +207,26 @@ async function maybeQueueBitPanelJob(renewalId, approvedBy = null) {
   );
   if (!result.rows[0]) return { queued: false, reason: 'already_queued' };
 
-  await queues.renewals.add(
-    'execute-renewal',
-    { renewalId: result.rows[0].id },
-    {
-      jobId: `renewal-auto-${result.rows[0].id}`,
-      attempts: 5,
-      backoff: { type: 'exponential', delay: 60_000 },
-      removeOnComplete: 1000,
-      removeOnFail: 2000
-    }
-  );
+  try {
+    await queues.renewals.add(
+      'execute-renewal',
+      { renewalId: result.rows[0].id },
+      {
+        jobId: `renewal-auto-${result.rows[0].id}`,
+        attempts: 5,
+        backoff: { type: 'exponential', delay: 60_000 },
+        removeOnComplete: 1000,
+        removeOnFail: 2000
+      }
+    );
+  } catch (error) {
+    await db.query(
+      `UPDATE renewal_jobs SET status = 'awaiting_approval', updated_at = now()
+        WHERE id = $1 AND status = 'queued'`,
+      [result.rows[0].id]
+    );
+    throw error;
+  }
   await audit(db, {
     actorType: 'system',
     action: 'bitpanel.job_queued_automatically',
@@ -677,7 +686,8 @@ app.post('/api/integrations/whatsapp/customer', async (request, reply) => {
   const phone = normalizePhone(body.whatsapp);
   const result = await db.query(
     `SELECT c.name, c.bitpanel_reference, c.access_password_encrypted,
-            p.name AS plan_name, s.expires_on::text AS expires_on, ch.status AS charge_status,
+            p.name AS plan_name, s.expires_on::text AS expires_on,
+            s.status AS subscription_status, ch.status AS charge_status,
             ch.checkout_url, issue.summary AS recent_issue, issue.status AS recent_issue_status
        FROM customers c
        LEFT JOIN LATERAL (
@@ -715,7 +725,19 @@ app.post('/api/integrations/whatsapp/customer', async (request, reply) => {
     ? new Date(`${customer.expires_on}T12:00:00`).toLocaleDateString('pt-BR')
     : 'em atualização';
   const firstName = String(customer.name || 'cliente').split(/\s+/)[0];
+  const greeting = customer.plan_name && customer.expires_on
+    ? `Oi, ${firstName}! 👋 Seu plano ${customer.plan_name} está válido até ${expires}. Como posso ajudar hoje?`
+    : `Oi, ${firstName}! 👋 Como posso ajudar hoje?`;
   return {
+    greeting,
+    customer: {
+      name: customer.name,
+      planName: customer.plan_name,
+      expiresOn: customer.expires_on,
+      expiresOnBr: expires,
+      status: customer.subscription_status,
+      hasAccess: Boolean(customer.bitpanel_reference || accessPassword)
+    },
     message: [
       `Olá, ${firstName}!`,
       `Plano: ${customer.plan_name || 'em definição'}.`,
@@ -1058,6 +1080,7 @@ app.get('/api/admin/analytics', { preHandler: requireAuth }, async () => {
     renewalStatus,
     expirations,
     automation,
+    customerReadiness,
     settings
   ] = await Promise.all([
     db.query(
@@ -1114,6 +1137,32 @@ app.get('/api/admin/analytics', { preHandler: requireAuth }, async () => {
          max(updated_at) FILTER (WHERE status IN ('failed', 'manual_review')) AS last_failed_at
        FROM renewal_jobs`
     ),
+    db.query(
+      `SELECT
+         count(*) FILTER (
+           WHERE c.status <> 'cancelled' AND c.automation_eligible = true
+             AND s.bitpanel_list_id IS NOT NULL
+         )::int AS eligible,
+         count(*) FILTER (
+           WHERE c.status <> 'cancelled' AND c.automation_eligible = false
+         )::int AS blocked,
+         count(*) FILTER (
+           WHERE c.status <> 'cancelled' AND c.whatsapp_e164 IS NULL
+         )::int AS missing_whatsapp,
+         count(*) FILTER (
+           WHERE c.status <> 'cancelled'
+             AND (c.bitpanel_reference IS NULL OR s.bitpanel_list_id IS NULL)
+         )::int AS missing_bitpanel_link,
+         count(*) FILTER (
+           WHERE c.status <> 'cancelled' AND c.operational_stage = 'review'
+         )::int AS review_required
+       FROM customers c
+       LEFT JOIN LATERAL (
+         SELECT bitpanel_list_id FROM subscriptions
+          WHERE customer_id = c.id
+          ORDER BY created_at DESC LIMIT 1
+       ) s ON true`
+    ),
     Promise.all([
       getSetting(db, 'global_pause', config.GLOBAL_PAUSE),
       getSetting(db, 'payment_mode', config.PAYMENT_MODE),
@@ -1129,6 +1178,7 @@ app.get('/api/admin/analytics', { preHandler: requireAuth }, async () => {
     customerStatus: customerStatus.rows,
     renewalStatus: renewalStatus.rows,
     expirations: expirations.rows[0],
+    customerReadiness: customerReadiness.rows[0],
     automation: {
       ...automation.rows[0],
       successRate30d: completed + failed ? Math.round((completed / (completed + failed)) * 100) : null,
@@ -1337,11 +1387,16 @@ app.post('/api/admin/customers/sync-bitpanel', { preHandler: requireAuth }, asyn
   try {
     const runtimeConfig = await getRuntimeConfig(db, config);
     const customers = await fetchBitPanelCustomers(runtimeConfig);
+    const eligibleCustomers = customers.filter((item) => isGateOneOwner(item.owner));
+    const blocked = customers.length - eligibleCustomers.length;
+    if (eligibleCustomers.length === 0) {
+      return { imported: 0, updated: 0, errors: [], found: customers.length, blocked };
+    }
     const result = await app.inject({
       method: 'POST',
       url: '/api/admin/customers/import-bitpanel',
       headers: { cookie: request.headers.cookie || '' },
-      payload: { customers }
+      payload: { customers: eligibleCustomers }
     });
     if (result.statusCode >= 400) {
       request.log.error(
@@ -1351,7 +1406,6 @@ app.post('/api/admin/customers/sync-bitpanel', { preHandler: requireAuth }, asyn
       throw new Error('Não foi possível gravar os clientes sincronizados.');
     }
     const stats = result.json();
-    const blocked = customers.filter((item) => !isGateOneOwner(item.owner)).length;
     return { ...stats, found: customers.length, blocked };
   } catch (error) {
     request.log.error(
@@ -1943,6 +1997,41 @@ app.get('/api/admin/leads', { preHandler: requireAuth }, async () => {
   };
 });
 
+app.get('/api/admin/conversations', { preHandler: requireAuth }, async () => {
+  const result = await db.query(
+    `SELECT c.id, c.name, c.whatsapp_e164, c.status, c.operational_stage,
+            last_message.direction AS last_direction,
+            last_message.content AS last_message,
+            last_message.created_at AS last_message_at,
+            COALESCE(open_issues.total, 0)::int AS open_issues,
+            open_issues.summary AS latest_issue,
+            session.state AS conversation_state
+       FROM customers c
+       JOIN LATERAL (
+         SELECT direction, content, created_at
+           FROM message_logs
+          WHERE customer_id = c.id AND content IS NOT NULL
+          ORDER BY created_at DESC LIMIT 1
+       ) last_message ON true
+       LEFT JOIN LATERAL (
+         SELECT count(*)::int AS total,
+                (array_agg(summary ORDER BY last_mentioned_at DESC))[1] AS summary
+           FROM customer_issues
+          WHERE customer_id = c.id AND status <> 'resolved'
+       ) open_issues ON true
+       LEFT JOIN conversation_sessions session
+         ON session.whatsapp_e164 = c.whatsapp_e164 AND session.expires_at > now()
+      ORDER BY last_message.created_at DESC
+      LIMIT 300`
+  );
+  return {
+    conversations: result.rows.map((row) => ({
+      ...row,
+      whatsapp_masked: maskPhone(row.whatsapp_e164)
+    }))
+  };
+});
+
 app.get('/api/admin/settings', { preHandler: requireAuth }, async () => {
   const keys = [
     'global_pause',
@@ -1959,18 +2048,19 @@ app.get('/api/admin/settings', { preHandler: requireAuth }, async () => {
   );
   const status = await credentialStatus(db, config);
   const mercadoPago = getMercadoPagoReadiness(status.runtime);
+  const whatsappQr = Boolean(
+    status.runtime.GATE_ONE_BOT_SECRET &&
+      status.runtime.GATE_ONE_WHATSAPP_QR_URL &&
+      status.runtime.GATE_ONE_WHATSAPP_NOTIFY_SECRET
+  );
   return {
     settings: values,
     integrations: {
       redis: Boolean(config.REDIS_URL),
       mercadoPago: mercadoPago.ready,
-      whatsapp:
-        status.configured.whatsapp ||
-        Boolean(
-          config.GATE_ONE_WHATSAPP_QR_URL &&
-          config.GATE_ONE_WHATSAPP_NOTIFY_SECRET &&
-          config.GATE_ONE_OWNER_WHATSAPP
-        ),
+      whatsapp: status.configured.whatsapp || whatsappQr,
+      whatsappQr,
+      whatsappCloud: status.configured.whatsapp,
       bitpanel: status.configured.bitpanel,
       openai: status.configured.openai
     },
@@ -2039,10 +2129,11 @@ app.put('/api/admin/settings', { preHandler: requireAuth }, async (request) => {
   }
   if (
     body.ai_whatsapp_enabled &&
-    (!runtimeConfig.WHATSAPP_ACCESS_TOKEN || !runtimeConfig.WHATSAPP_PHONE_NUMBER_ID)
+    (!runtimeConfig.WHATSAPP_ACCESS_TOKEN || !runtimeConfig.WHATSAPP_PHONE_NUMBER_ID) &&
+    !runtimeConfig.GATE_ONE_BOT_SECRET
   ) {
     throw Object.assign(
-      new Error('Configure o WhatsApp Cloud API antes de ativar a IA para clientes.'),
+      new Error('Conecte o WhatsApp por QR ou configure a Cloud API antes de ativar a IA para clientes.'),
       { statusCode: 409 }
     );
   }
