@@ -47,6 +47,7 @@
         <nav>
           <button class="nav-item active" data-page="dashboard"><span>◫</span> Visão geral</button>
           <button class="nav-item" data-page="customers"><span>◎</span> Clientes</button>
+          <button class="nav-item" data-page="conversations"><span>◌</span> Atendimentos</button>
           <button class="nav-item" data-page="charges"><span>◇</span> Cobranças</button>
           <button class="nav-item" data-page="renewals"><span>↻</span> Renovações</button>
           <button class="nav-item" data-page="leads"><span>⌁</span> Captação</button>
@@ -82,6 +83,22 @@
             <button class="btn btn-light" id="scanButton">↻ Verificar vencimentos</button>
           </div>
           <div class="metrics" id="metrics"></div>
+          <div class="operation-center">
+            <article class="panel priority-panel">
+              <div class="panel-head">
+                <div><span class="eyebrow">AGORA</span><h3>O que precisa de atenção</h3></div>
+                <span class="priority-count" id="priorityCount">0 pendências</span>
+              </div>
+              <div id="operationPriorities" class="priority-list"></div>
+            </article>
+            <article class="panel readiness-panel">
+              <div class="panel-head">
+                <div><span class="eyebrow">AUTOMAÇÃO</span><h3>Pagamento → BitPanel</h3></div>
+                <button class="text-button" data-go="settings">Revisar ajustes →</button>
+              </div>
+              <div id="automationReadinessDashboard" class="readiness-list"></div>
+            </article>
+          </div>
           <article class="panel plan-catalog-panel">
             <div class="panel-head">
               <div><span class="eyebrow">CATÁLOGO OFICIAL</span><h3>Planos sincronizados com captação, portal e WhatsApp</h3></div>
@@ -176,6 +193,18 @@
           </article>
         </section>
 
+        <section class="page" data-page-panel="conversations">
+          <div class="section-actions">
+            <div>
+              <h2>Atendimentos recentes</h2>
+              <p class="muted">Histórico do chatbot, pedidos de ajuda e conversas que merecem acompanhamento.</p>
+            </div>
+            <div class="search"><span>⌕</span><input id="conversationSearch" placeholder="Buscar cliente, mensagem ou problema" /></div>
+          </div>
+          <div class="conversation-summary" id="conversationSummary"></div>
+          <div id="conversationsList" class="conversation-list"></div>
+        </section>
+
         <section class="page" data-page-panel="charges">
           <div class="section-actions">
             <div class="filter-pills" id="chargeFilters">
@@ -259,6 +288,7 @@
             <article class="panel">
               <div class="panel-head"><div><span class="eyebrow">MODOS DE OPERAÇÃO</span><h3>Liberação por etapas</h3></div></div>
               <div class="settings-form">
+                <div id="automationReadinessSettings" class="readiness-list readiness-list-settings"></div>
                 <div class="automation-flow">
                   <strong>Fluxo automático de venda</strong>
                   <span>Cliente escolhe o plano → Pix é gerado e enviado → Mercado Pago confirma → BitPanel cadastra ou renova</span>
@@ -289,8 +319,9 @@
               </form>
             </article>
             <article class="panel integration-config">
-              <div class="panel-head"><div><span class="eyebrow">MENSAGENS</span><h3>WhatsApp Cloud API</h3></div></div>
+              <div class="panel-head"><div><span class="eyebrow">CANAL OPCIONAL</span><h3>WhatsApp Cloud API</h3></div></div>
               <form class="settings-form integration-form" data-provider="whatsapp">
+                <p class="hint">O atendimento principal continua no WhatsApp conectado por QR. Configure a Cloud API apenas se quiser usar também o canal oficial da Meta.</p>
                 <label>Access Token<input name="WHATSAPP_ACCESS_TOKEN" type="password" autocomplete="off" placeholder="Deixe vazio para manter o atual" /></label>
                 <label>ID do número de telefone<input name="WHATSAPP_PHONE_NUMBER_ID" /></label>
                 <label>Token de verificação<input name="WHATSAPP_VERIFY_TOKEN" type="password" autocomplete="off" /></label>
