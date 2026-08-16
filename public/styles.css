@@ -259,6 +259,11 @@ td { padding: 15px 18px; border-top: 1px solid var(--line); font-size: 13px; }
 .ai-safety strong { font-size: 12px; }
 .ai-safety span { color: var(--muted); font-size: 11px; line-height: 1.5; }
 .assistant-chat { min-height: 630px; display: grid; grid-template-rows: auto 1fr auto; }
+.identity-review-panel { margin-bottom: 18px; }
+.identity-review-list { display: grid; gap: 9px; margin-top: 14px; }
+.identity-review-item { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(220px, 1fr) auto; gap: 14px; align-items: center; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: #fafbfd; }
+.identity-review-item strong, .identity-review-item small { display: block; }
+.identity-review-item small { margin-top: 3px; color: var(--muted); font-size: 10px; }
 .chat-messages { min-height: 420px; max-height: 62vh; display: flex; flex-direction: column; gap: 12px; overflow: auto; padding: 8px 4px 18px; }
 .chat-message { max-width: 82%; padding: 14px 16px; border-radius: 16px 16px 16px 5px; background: #f2f5f9; }
 .chat-message.user { align-self: flex-end; border-radius: 16px 16px 5px 16px; color: white; background: var(--blue); }
@@ -326,6 +331,7 @@ dialog::backdrop { background: rgba(6,19,39,.6); backdrop-filter: blur(4px); }
   .analytics-grid > :last-child { grid-column: 1 / -1; }
   .cards-grid { grid-template-columns: 1fr; }
   .conversation-card { grid-template-columns: 1fr auto; }
+  .identity-review-item { grid-template-columns: 1fr; }
   .conversation-preview { grid-column: 1 / -1; grid-row: 2; }
   .plan-section { grid-template-columns: 1fr 1fr; }
 }
