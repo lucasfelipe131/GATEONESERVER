@@ -6,6 +6,7 @@ const state = {
   chargeStatus: '',
   customers: [],
   conversations: [],
+  identityLinks: [],
   plans: [],
   paymentCustomer: null,
   selectedCustomers: new Set()
@@ -496,10 +497,28 @@ function renderConversations(search = '') {
     : '<div class="empty">Nenhum atendimento corresponde à busca.</div>';
 }
 
+function renderIdentityLinks() {
+  const links = state.identityLinks || [];
+  $('#identityReviewCount').textContent = `${links.length} ${links.length === 1 ? 'pendente' : 'pendentes'}`;
+  $('#identityReviewList').innerHTML = links.length
+    ? links.map((item) => `
+        <div class="identity-review-item">
+          <div><strong>${escapeHtml(item.claimed_login)}</strong><small>${escapeHtml(item.whatsapp_masked)} solicitou o vínculo</small></div>
+          <div><strong>${escapeHtml(item.candidate_name || 'Cliente sem nome')}</strong><small>O login já possui outro telefone; nenhum dado foi sobrescrito.</small></div>
+          <button class="btn btn-secondary btn-small" data-reject-identity="${escapeHtml(item.id)}">Arquivar</button>
+        </div>`).join('')
+    : '<div class="empty">Nenhum conflito de associação. Vínculos exatos e seguros são concluídos automaticamente.</div>';
+}
+
 async function loadConversations() {
-  const { conversations } = await api('/api/admin/conversations');
+  const [{ conversations }, { links }] = await Promise.all([
+    api('/api/admin/conversations'),
+    api('/api/admin/identity-links')
+  ]);
   state.conversations = conversations;
+  state.identityLinks = links;
   renderConversations($('#conversationSearch')?.value || '');
+  renderIdentityLinks();
 }
 
 async function loadCharges(status = state.chargeStatus) {
@@ -634,6 +653,9 @@ async function loadSettings() {
   $('#aiAdminEnabled').checked = settings.ai_admin_enabled === true;
   $('#aiWhatsappEnabled').checked = settings.ai_whatsapp_enabled === true;
   renderIntegrations('#settingsIntegrations', result.integrations);
+  $('#bitpanelSessionStatus').textContent = result.integrations.bitpanelSession
+    ? 'Sessão autenticada protegida e pronta para teste.'
+    : 'Nenhuma sessão autenticada importada. Gere o arquivo no computador onde você acessa o BitPanel.';
   renderAutomationReadiness('#automationReadinessSettings', result);
   updateSafety(settings.global_pause);
 }
@@ -963,6 +985,20 @@ $('#chargeFilters').addEventListener('click', async (event) => {
   await loadCharges(button.dataset.status);
 });
 
+$('#identityReviewList').addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-reject-identity]');
+  if (!button) return;
+  button.disabled = true;
+  try {
+    await api(`/api/admin/identity-links/${button.dataset.rejectIdentity}/reject`, { method: 'POST' });
+    toast('Conflito arquivado sem alterar os telefones.');
+    await loadConversations();
+  } catch (error) {
+    toast(error.message, 'error');
+    button.disabled = false;
+  }
+});
+
 $('#chargesList').addEventListener('click', async (event) => {
   const approve = event.target.closest('[data-approve]');
   const reject = event.target.closest('[data-reject]');
@@ -1040,7 +1076,9 @@ $$('.integration-form').forEach((form) => {
     const button = $('button[type="submit"]', form);
     button.disabled = true;
     try {
-      const values = Object.fromEntries(new FormData(form));
+      const values = Object.fromEntries(
+        [...new FormData(form)].filter(([, value]) => typeof value === 'string')
+      );
       await api(`/api/admin/integrations/${form.dataset.provider}`, {
         method: 'PUT',
         body: JSON.stringify(values)
@@ -1084,6 +1122,26 @@ $$('.integration-form').forEach((form) => {
         activateMercadoPago.disabled = false;
       }
     });
+  }
+});
+
+$('#bitpanelSessionFile').addEventListener('change', async (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  event.target.disabled = true;
+  try {
+    if (file.size > 2_000_000) throw new Error('O arquivo de sessão é maior que 2 MB.');
+    const storageState = JSON.parse(await file.text());
+    const result = await api('/api/admin/integrations/bitpanel/session', {
+      method: 'POST', body: JSON.stringify({ storageState })
+    });
+    toast(result.message);
+    event.target.value = '';
+    await loadSettings();
+  } catch (error) {
+    toast(error.message || 'Arquivo de sessão inválido.', 'error');
+  } finally {
+    event.target.disabled = false;
   }
 });
 
