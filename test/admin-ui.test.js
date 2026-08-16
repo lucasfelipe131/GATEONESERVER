@@ -24,3 +24,15 @@ test('dashboard contém gráficos e o assistente possui aviso de segurança', as
   assert.match(html, /id="expirationChart"/);
   assert.match(html, /A IA não aprova pagamentos nem executa renovações/);
 });
+
+test('painel mostra prioridades, prontidão e central de atendimentos', async () => {
+  const [html, script] = await Promise.all([
+    readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
+    readFile(new URL('../public/app.js', import.meta.url), 'utf8')
+  ]);
+  assert.match(html, /id="operationPriorities"/);
+  assert.match(html, /id="automationReadinessDashboard"/);
+  assert.match(html, /data-page-panel="conversations"/);
+  assert.match(script, /async function loadConversations/);
+  assert.match(script, /Pagamento aprovado entra automaticamente na fila do BitPanel/);
+});
