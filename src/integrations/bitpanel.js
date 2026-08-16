@@ -106,7 +106,9 @@ async function openSession(page, config) {
 
   if (!username && !password && !loginPage) return;
   if (!username || !password || !submit) {
-    throw new Error('Tela de login do BitPanel mudou. Revisão manual necessária.');
+    throw new Error(
+      'O BitPanel exige autenticação humana. Gere e importe uma nova sessão; o CAPTCHA não será contornado.'
+    );
   }
 
   await username.fill(config.BITPANEL_USERNAME);
@@ -120,7 +122,9 @@ async function openSession(page, config) {
     new URL(page.url()).pathname.includes('/login') ||
     (await username.isVisible().catch(() => false));
   if (loginStillVisible) {
-    throw new Error('O BitPanel recusou o acesso. Confira o usuário e a senha em Configurações.');
+    throw new Error(
+      'O BitPanel recusou o acesso ou pediu CAPTCHA. Gere e importe uma nova sessão autenticada.'
+    );
   }
 }
 
@@ -234,8 +238,11 @@ async function setConnections(scope, connections) {
 }
 
 async function runWithBrowser(config, task) {
-  if (!config.BITPANEL_USERNAME || !config.BITPANEL_PASSWORD) {
-    throw new Error('Credenciais do BitPanel não configuradas na Railway.');
+  if (
+    !config.BITPANEL_STORAGE_STATE &&
+    (!config.BITPANEL_USERNAME || !config.BITPANEL_PASSWORD)
+  ) {
+    throw new Error('Credenciais ou sessão autenticada do BitPanel não configuradas.');
   }
   await mkdir(config.ARTIFACTS_DIR, { recursive: true });
   const browser = await chromium.launch({
@@ -243,14 +250,27 @@ async function runWithBrowser(config, task) {
     args: ['--no-sandbox', '--disable-dev-shm-usage']
   });
   try {
+    let storageState;
+    if (config.BITPANEL_STORAGE_STATE) {
+      try {
+        storageState = JSON.parse(config.BITPANEL_STORAGE_STATE);
+      } catch {
+        throw new Error('A sessão salva do BitPanel está corrompida. Importe uma nova sessão.');
+      }
+    }
     const context = await browser.newContext({
       locale: 'pt-BR',
-      timezoneId: 'America/Sao_Paulo'
+      timezoneId: 'America/Sao_Paulo',
+      ...(storageState ? { storageState } : {})
     });
     const page = await context.newPage();
     page.setDefaultTimeout(20_000);
     await openSession(page, config);
-    return await task(page);
+    const result = await task(page);
+    if (typeof config.saveBitPanelStorageState === 'function') {
+      await config.saveBitPanelStorageState(await context.storageState());
+    }
+    return result;
   } finally {
     await browser.close();
   }
