@@ -43,10 +43,10 @@ export function renderChargeMessage({ name, planName, expiresOn, amountCents, st
   const date = formatDate(expiresOn);
   const firstName = name.trim().split(/\s+/)[0];
   const templates = {
-    'd-3': `Olá, ${firstName}! Seu plano ${planName} vence em ${date}. O valor da renovação é ${value}. Posso enviar o Pix?`,
-    d0: `Olá, ${firstName}! Seu Gate One Pro vence hoje. Valor da renovação: ${value}. Posso enviar o Pix?`,
-    'd+2': `Olá, ${firstName}! Sua renovação está pendente desde ${date}. Valor: ${value}. Se já pagou, desconsidere esta mensagem.`,
-    'd+5': `Olá, ${firstName}! Este é o último lembrete antes da suspensão. Vencimento: ${date}; renovação: ${value}.`,
+    'd-3': `Oi, ${firstName}! Seu plano ${planName} vence em ${date}. A renovação fica em ${value}; deixei o link seguro abaixo caso queira adiantar.`,
+    d0: `Oi, ${firstName}! Passando para avisar que seu Gate One Pro vence hoje. A renovação fica em ${value}.`,
+    'd+2': `Oi, ${firstName}! Seu plano venceu em ${date}. Se já pagou, pode desconsiderar; se ainda não, o link seguro continua abaixo. Valor: ${value}.`,
+    'd+5': `Oi, ${firstName}! Seu acesso continua pendente desde ${date}. Quando quiser regularizar, a renovação fica em ${value}.`,
     new_sale: `Olá, ${firstName}! Você escolheu o plano ${planName}, no valor de ${value}. A cobrança Pix está pronta. Após a confirmação do pagamento, seu acesso será ativado automaticamente.`,
     manual: `Olá, ${firstName}! Preparamos sua renovação do plano ${planName}, no valor de ${value}.`
   };
