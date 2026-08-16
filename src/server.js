@@ -40,6 +40,7 @@ import { handleInboundMessage } from './services/sales.js';
 import {
   credentialStatus,
   getRuntimeConfig,
+  saveBitPanelStorageState,
   saveIntegrationCredentials
 } from './integrations/runtime-config.js';
 import {
@@ -125,8 +126,10 @@ function parse(schema, value) {
 function safeBitPanelSyncError(error) {
   const message = String(error?.message || '');
   const knownMessages = [
-    'Credenciais do BitPanel não configuradas na Railway.',
-    'Tela de login do BitPanel mudou. Revisão manual necessária.',
+    'Credenciais ou sessão autenticada do BitPanel não configuradas.',
+    'A sessão salva do BitPanel está corrompida. Importe uma nova sessão.',
+    'O BitPanel exige autenticação humana. Gere e importe uma nova sessão; o CAPTCHA não será contornado.',
+    'O BitPanel recusou o acesso ou pediu CAPTCHA. Gere e importe uma nova sessão autenticada.',
     'Busca de listas do BitPanel não encontrada.',
     'O BitPanel recusou o acesso. Confira o usuário e a senha em Configurações.',
     'Não foi possível gravar os clientes sincronizados.'
@@ -1385,7 +1388,11 @@ app.post('/api/admin/customers/import-bitpanel', { preHandler: requireAuth }, as
 
 app.post('/api/admin/customers/sync-bitpanel', { preHandler: requireAuth }, async (request) => {
   try {
-    const runtimeConfig = await getRuntimeConfig(db, config);
+    const runtimeConfig = {
+      ...(await getRuntimeConfig(db, config)),
+      saveBitPanelStorageState: (state) =>
+        saveBitPanelStorageState(db, config, state, request.user.id)
+    };
     const customers = await fetchBitPanelCustomers(runtimeConfig);
     const eligibleCustomers = customers.filter((item) => isGateOneOwner(item.owner));
     const blocked = customers.length - eligibleCustomers.length;
@@ -2032,6 +2039,44 @@ app.get('/api/admin/conversations', { preHandler: requireAuth }, async () => {
   };
 });
 
+app.get('/api/admin/identity-links', { preHandler: requireAuth }, async () => {
+  const result = await db.query(
+    `SELECT link.id, link.whatsapp_e164, link.claimed_login, link.reason,
+            link.confidence, link.created_at,
+            source.name AS source_name, candidate.name AS candidate_name,
+            candidate.bitpanel_reference
+       FROM customer_identity_links link
+       LEFT JOIN customers source ON source.id = link.source_customer_id
+       LEFT JOIN customers candidate ON candidate.id = link.candidate_customer_id
+      WHERE link.status = 'pending'
+      ORDER BY link.created_at DESC
+      LIMIT 200`
+  );
+  return {
+    links: result.rows.map((row) => ({ ...row, whatsapp_masked: maskPhone(row.whatsapp_e164) }))
+  };
+});
+
+app.post('/api/admin/identity-links/:id/reject', { preHandler: requireAuth }, async (request) => {
+  const id = parse(z.string().uuid(), request.params.id);
+  const result = await db.query(
+    `UPDATE customer_identity_links
+        SET status = 'rejected', resolved_by = $2, resolved_at = now(), updated_at = now()
+      WHERE id = $1 AND status = 'pending'
+      RETURNING id, claimed_login`,
+    [id, request.user.id]
+  );
+  if (!result.rows[0]) {
+    throw Object.assign(new Error('Associação pendente não encontrada.'), { statusCode: 404 });
+  }
+  await audit(db, {
+    actorType: 'user', actorId: request.user.id,
+    action: 'customer.identity_link_rejected', entityType: 'customer_identity_link',
+    entityId: id, after: { claimedLogin: result.rows[0].claimed_login }, ip: request.ip
+  });
+  return { ok: true };
+});
+
 app.get('/api/admin/settings', { preHandler: requireAuth }, async () => {
   const keys = [
     'global_pause',
@@ -2062,6 +2107,7 @@ app.get('/api/admin/settings', { preHandler: requireAuth }, async () => {
       whatsappQr,
       whatsappCloud: status.configured.whatsapp,
       bitpanel: status.configured.bitpanel,
+      bitpanelSession: status.configured.bitpanelSession,
       openai: status.configured.openai
     },
     mercadoPago
@@ -2114,6 +2160,7 @@ app.put('/api/admin/settings', { preHandler: requireAuth }, async (request) => {
   }
   if (
     body.renewal_requires_approval === false &&
+    !runtimeConfig.BITPANEL_STORAGE_STATE &&
     (!runtimeConfig.BITPANEL_USERNAME || !runtimeConfig.BITPANEL_PASSWORD)
   ) {
     throw Object.assign(
@@ -2150,9 +2197,10 @@ app.put('/api/admin/settings', { preHandler: requireAuth }, async (request) => {
   }
   if (
     body.bitpanel_mode === 'live' &&
+    !runtimeConfig.BITPANEL_STORAGE_STATE &&
     (!runtimeConfig.BITPANEL_USERNAME || !runtimeConfig.BITPANEL_PASSWORD)
   ) {
-    const error = new Error('Configure o usuário e a senha do BitPanel antes do modo real.');
+    const error = new Error('Configure as credenciais ou importe uma sessão do BitPanel antes do modo real.');
     error.statusCode = 409;
     throw error;
   }
@@ -2189,12 +2237,34 @@ app.put('/api/admin/integrations/:provider', { preHandler: requireAuth }, async 
   return { ok: true };
 });
 
+app.post('/api/admin/integrations/bitpanel/session', { preHandler: requireAuth }, async (request) => {
+  const body = parse(
+    z.object({ storageState: z.union([z.string().min(10), z.record(z.string(), z.unknown())]) }),
+    request.body
+  );
+  await saveBitPanelStorageState(db, config, body.storageState, request.user.id);
+  await audit(db, {
+    actorType: 'user', actorId: request.user.id,
+    action: 'integration.bitpanel_session_imported', entityType: 'integration',
+    entityId: 'bitpanel', after: { imported: true }, ip: request.ip
+  });
+  return { ok: true, message: 'Sessão autenticada importada e protegida.' };
+});
+
 app.post('/api/admin/integrations/:provider/test', { preHandler: requireAuth }, async (request) => {
   const provider = parse(
     z.enum(['mercadopago', 'whatsapp', 'bitpanel', 'openai']),
     request.params.provider
   );
-  const runtimeConfig = await getRuntimeConfig(db, config);
+  const runtimeConfig = {
+    ...(await getRuntimeConfig(db, config)),
+    ...(provider === 'bitpanel'
+      ? {
+          saveBitPanelStorageState: (state) =>
+            saveBitPanelStorageState(db, config, state, request.user.id)
+        }
+      : {})
+  };
   if (provider === 'bitpanel') {
     try {
       return await testBitPanelConnection(runtimeConfig);
