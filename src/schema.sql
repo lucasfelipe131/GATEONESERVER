@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS customers (
 CREATE UNIQUE INDEX IF NOT EXISTS customers_whatsapp_unique ON customers (whatsapp_e164);
 CREATE UNIQUE INDEX IF NOT EXISTS customers_portal_token_unique
   ON customers (portal_token_hash) WHERE portal_token_hash IS NOT NULL;
+CREATE INDEX IF NOT EXISTS customers_bitpanel_reference_lower_idx
+  ON customers (lower(trim(bitpanel_reference))) WHERE bitpanel_reference IS NOT NULL;
 ALTER TABLE customers ALTER COLUMN name DROP NOT NULL;
 ALTER TABLE customers ALTER COLUMN whatsapp_e164 DROP NOT NULL;
 ALTER TABLE customers ADD COLUMN IF NOT EXISTS bitpanel_owner text;
@@ -63,6 +65,26 @@ ALTER TABLE customers ADD COLUMN IF NOT EXISTS access_password_encrypted text;
 ALTER TABLE customers DROP CONSTRAINT IF EXISTS customers_operational_stage_check;
 ALTER TABLE customers ADD CONSTRAINT customers_operational_stage_check
   CHECK (operational_stage IN ('ready', 'create_login', 'awaiting_payment', 'review'));
+
+CREATE TABLE IF NOT EXISTS customer_identity_links (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  whatsapp_e164 text NOT NULL,
+  source_customer_id uuid REFERENCES customers(id) ON DELETE SET NULL,
+  candidate_customer_id uuid REFERENCES customers(id) ON DELETE SET NULL,
+  claimed_login text NOT NULL,
+  status text NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'confirmed', 'rejected')),
+  reason text NOT NULL,
+  confidence integer NOT NULL DEFAULT 100 CHECK (confidence BETWEEN 0 AND 100),
+  resolved_by uuid REFERENCES users(id) ON DELETE SET NULL,
+  resolved_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS customer_identity_links_status_idx
+  ON customer_identity_links (status, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS customer_identity_links_pending_unique
+  ON customer_identity_links (whatsapp_e164, lower(claimed_login)) WHERE status = 'pending';
 
 CREATE TABLE IF NOT EXISTS subscriptions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
