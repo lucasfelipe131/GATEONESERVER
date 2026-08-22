@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gateone.example/contracts/gate-core-v1.schema.json",
+  "title": "GATE Core v1",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/response" },
+    { "$ref": "#/$defs/event" }
+  ],
+  "$defs": {
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {
+        "type": {
+          "enum": ["CUSTOMER", "ADMIN", "AGENT", "SYSTEM", "WORKER", "SERVICE"]
+        },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "capability": { "type": "string", "minLength": 1, "maxLength": 200 }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "request_id",
+        "correlation_id",
+        "actor",
+        "action",
+        "subject",
+        "input"
+      ],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "request_id": { "type": "string", "format": "uuid" },
+        "correlation_id": { "type": "string", "format": "uuid" },
+        "actor": {
+          "allOf": [
+            { "$ref": "#/$defs/actor" },
+            { "required": ["capability"] }
+          ]
+        },
+        "action": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "subject": { "$ref": "#/$defs/subject" },
+        "input": { "type": "object" }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "request_id",
+        "correlation_id",
+        "status",
+        "data",
+        "error"
+      ],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "request_id": { "type": "string", "format": "uuid" },
+        "correlation_id": { "type": "string", "format": "uuid" },
+        "status": {
+          "enum": ["SUCCESS", "PENDING", "REQUIRES_ACTION", "DENIED", "FAILED"]
+        },
+        "data": {},
+        "error": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["code", "message"],
+              "properties": {
+                "code": {
+                  "enum": [
+                    "CUSTOMER_NOT_FOUND",
+                    "CUSTOMER_IDENTITY_AMBIGUOUS",
+                    "INVALID_TRANSITION",
+                    "PAYMENT_NOT_CONFIRMED",
+                    "RENEWAL_ALREADY_COMPLETED",
+                    "PROVIDER_UNAVAILABLE",
+                    "HUMAN_ACTION_REQUIRED",
+                    "INSUFFICIENT_CAPABILITY",
+                    "STEP_UP_REQUIRED",
+                    "UNSUPPORTED_ACTION",
+                    "CONTRACT_VERSION_UNSUPPORTED",
+                    "CORRELATION_MISMATCH"
+                  ]
+                },
+                "message": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "details": { "type": "object" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "event_type",
+        "event_version",
+        "occurred_at",
+        "correlation_id",
+        "causation_id",
+        "actor",
+        "subject",
+        "payload"
+      ],
+      "properties": {
+        "event_id": { "type": "string", "format": "uuid" },
+        "event_type": {
+          "enum": [
+            "customer.created",
+            "customer.identified",
+            "customer.status_changed",
+            "lead.created",
+            "lead.qualified",
+            "payment.created",
+            "payment.pending",
+            "payment.confirmed",
+            "payment.failed",
+            "subscription.created",
+            "subscription.activated",
+            "subscription.expiring",
+            "subscription.expired",
+            "renewal.requested",
+            "renewal.ready",
+            "renewal.processing",
+            "renewal.completed",
+            "renewal.failed",
+            "provisioning.requested",
+            "provisioning.completed",
+            "provisioning.failed",
+            "provisioning.human_action_required",
+            "conversation.started",
+            "message.received",
+            "message.sent",
+            "conversation.handoff_requested",
+            "support.case_opened",
+            "support.case_resolved"
+          ]
+        },
+        "event_version": { "const": 1 },
+        "occurred_at": { "type": "string", "format": "date-time" },
+        "correlation_id": { "type": "string", "format": "uuid" },
+        "causation_id": {
+          "type": ["string", "null"],
+          "format": "uuid"
+        },
+        "actor": { "$ref": "#/$defs/actor" },
+        "subject": { "$ref": "#/$defs/subject" },
+        "payload": { "type": "object" }
+      }
+    }
+  }
+}
