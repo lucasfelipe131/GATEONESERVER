@@ -2,7 +2,7 @@ import { Worker } from 'bullmq';
 import { CronJob } from 'cron';
 import { loadConfig } from './config.js';
 import { createDb, getSetting } from './db.js';
-import { initializeDatabase } from './init.js';
+import { verifyDatabaseReady } from './init.js';
 import { createQueues, createRedis } from './queue.js';
 import { scanBilling } from './services/billing.js';
 import { createCheckoutPreference, createPixPayment } from './integrations/mercadopago.js';
@@ -641,7 +641,7 @@ async function recoverAutomaticCharges() {
 }
 
 async function start() {
-  await initializeDatabase(db, config);
+  await verifyDatabaseReady(db);
   const messageWorker = new Worker('gate-one-messages', processMessage, {
     connection: redis,
     concurrency: 5

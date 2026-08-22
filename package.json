@@ -10,10 +10,13 @@
   "scripts": {
     "start": "node src/server.js",
     "worker": "node src/worker.js",
-    "migrate": "node src/migrate.js",
+    "migrate": "node src/migrate.js --apply",
+    "migrate:baseline": "node src/migrate.js --baseline",
+    "migrate:status": "node src/migrate.js --status",
+    "migrate:verify": "node src/migrate.js --verify",
     "seed": "node src/seed.js",
     "test": "node --test",
-    "check": "node --check src/server.js && node --check src/worker.js && node --check public/app.js && node --check public/portal.js",
+    "check": "node --check src/server.js && node --check src/worker.js && node --check src/authorization.js && node --check src/migrations.js && node --check public/app.js && node --check public/portal.js",
     "bitpanel:auth": "node scripts/bitpanel-auth.js"
   },
   "dependencies": {

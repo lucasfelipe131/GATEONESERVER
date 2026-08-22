@@ -24,17 +24,33 @@ const escapeHtml = (value) =>
   String(value ?? '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[character]);
 
 async function api(path, options = {}) {
-  const headers = { ...(options.headers || {}) };
-  if (options.body !== undefined && options.body !== null && !(options.body instanceof FormData) && !('Content-Type' in headers)) {
+  const { stepUpRetry = true, ...fetchOptions } = options;
+  const headers = { ...(fetchOptions.headers || {}) };
+  if (fetchOptions.body !== undefined && fetchOptions.body !== null && !(fetchOptions.body instanceof FormData) && !('Content-Type' in headers)) {
     headers['Content-Type'] = 'application/json';
   }
   const response = await fetch(path, {
     credentials: 'same-origin',
-    ...options,
+    ...fetchOptions,
     headers
   });
   const body = await response.json().catch(() => ({}));
-  if (response.status === 401 && path !== '/api/auth/login') showLogin();
+  if (response.status === 401 && !['/api/auth/login', '/api/auth/step-up'].includes(path)) showLogin();
+  if (
+    response.status === 403 &&
+    body.code === 'STEP_UP_REQUIRED' &&
+    stepUpRetry &&
+    path !== '/api/auth/step-up'
+  ) {
+    const password = window.prompt('Confirme sua senha para concluir esta operação crítica:');
+    if (!password) throw new Error('Operação cancelada: confirmação de segurança necessária.');
+    await api('/api/auth/step-up', {
+      method: 'POST',
+      body: JSON.stringify({ password, capability: body.capability }),
+      stepUpRetry: false
+    });
+    return api(path, { ...options, stepUpRetry: false });
+  }
   if (!response.ok) throw new Error(body.error || body.message || 'Não foi possível concluir.');
   return body;
 }

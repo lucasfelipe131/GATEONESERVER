@@ -6,14 +6,14 @@ const server = await readFile(new URL('../src/server.js', import.meta.url), 'utf
 const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
 const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
 
-test('expõe classificação em lote e exclusão protegidas por autenticação', () => {
+test('expõe classificação em lote e exclusão protegidas por autorização explícita', () => {
   assert.match(
     server,
-    /app\.patch\('\/api\/admin\/customers\/operational-stage', \{ preHandler: requireAuth \}/
+    /app\.patch\('\/api\/admin\/customers\/operational-stage', \{\s*preHandler: protect\(CAPABILITIES\.CUSTOMER_STAGE_WRITE, \{ mutation: true \}\)\s*\}/
   );
   assert.match(
     server,
-    /app\.delete\('\/api\/admin\/customers\/:id', \{ preHandler: requireAuth \}/
+    /app\.delete\('\/api\/admin\/customers\/:id', \{\s*preHandler: protect\(CAPABILITIES\.CUSTOMER_DELETE, \{ mutation: true, stepUp: true \}\)\s*\}/
   );
 });
 

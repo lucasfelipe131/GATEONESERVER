@@ -5,7 +5,8 @@ import { readFile } from 'node:fs/promises';
 test('admin API client does not declare JSON for an empty request', async () => {
   const source = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
 
-  assert.match(source, /if \(options\.body !== undefined && options\.body !== null/);
+  assert.match(source, /if \(fetchOptions\.body !== undefined && fetchOptions\.body !== null/);
+  assert.match(source, /\.\.\.fetchOptions/);
   assert.doesNotMatch(
     source,
     /headers:\s*\{\s*['"]Content-Type['"]:\s*['"]application\/json['"]/
