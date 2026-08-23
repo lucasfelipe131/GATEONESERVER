@@ -18,6 +18,7 @@ test('admin recebe todas as capacidades e operator permanece limitado', () => {
   assert.equal(operator.has(CAPABILITIES.BILLING_READ), true);
   assert.equal(operator.has(CAPABILITIES.CUSTOMER_DELETE), false);
   assert.equal(operator.has(CAPABILITIES.BILLING_MARK_PAID), false);
+  assert.equal(operator.has(CAPABILITIES.PROVISIONING_READ), false);
   assert.equal(operator.has(CAPABILITIES.SETTINGS_WRITE), false);
   assert.equal(operator.has(CAPABILITIES.INTEGRATION_MANAGE), false);
 });

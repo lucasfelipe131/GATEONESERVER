@@ -4,6 +4,7 @@ export const CORE_ACTION_CAPABILITIES = Object.freeze({
   'subscription.get': 'subscription.read',
   'payment.request': 'payment.request',
   'renewal.request': 'renewal.request',
+  'renewal.status.get': 'renewal.read',
   'support.case.open': 'support.case.open'
 });
 

@@ -48,7 +48,7 @@ import { scanBilling, markPaymentApproved } from './services/billing.js';
 import {
   getCustomerContext,
   openSupportCase,
-  renewalReadiness,
+  renewalOperationStatus,
   resolveIdentity
 } from './services/gate-core.js';
 import { createCustomerContextSnapshot } from './services/customer-context.js';
@@ -753,8 +753,8 @@ app.post('/api/v1/core/operations', async (request, reply) => {
         checkout_url: created.checkout_url,
         existing: created.existing
       };
-    } else if (envelope.action === 'renewal.request') {
-      data = await renewalReadiness(db, {
+    } else if (envelope.action === 'renewal.request' || envelope.action === 'renewal.status.get') {
+      data = await renewalOperationStatus(db, {
         customerId: parse(z.uuid(), envelope.subject.id),
         subscriptionId: envelope.input.subscription_id
           ? parse(z.uuid(), envelope.input.subscription_id)
@@ -2296,6 +2296,57 @@ app.get('/api/admin/renewals', { preHandler: protect(CAPABILITIES.RENEWAL_READ) 
       LIMIT 300`
   );
   return { renewals: result.rows };
+});
+
+app.get('/api/admin/billing/payments', {
+  preHandler: protect(CAPABILITIES.BILLING_READ)
+}, async (request) => {
+  const customerId = request.query?.customerId || null;
+  const result = await db.query(
+    `SELECT id, customer_id, subscription_id, provider, amount_cents, currency,
+            status, reconciliation_status, review_reason, correlation_id,
+            provider_observed_at, confirmed_at, created_at, updated_at
+       FROM payments
+      WHERE ($1::uuid IS NULL OR customer_id = $1::uuid)
+      ORDER BY created_at DESC LIMIT 200`,
+    [customerId]
+  );
+  return { payments: result.rows };
+});
+
+app.get('/api/admin/renewal-sagas', {
+  preHandler: protect(CAPABILITIES.RENEWAL_READ)
+}, async (request) => {
+  const customerId = request.query?.customerId || null;
+  const result = await db.query(
+    `SELECT renewal_id, customer_id, subscription_id, payment_id,
+            provisioning_provider, state, attempts, failure_class, last_error,
+            previous_expiration, target_expiration, next_retry_at,
+            correlation_id, requested_at, processing_at, verified_at, completed_at, updated_at
+       FROM renewal_sagas
+      WHERE ($1::uuid IS NULL OR customer_id = $1::uuid)
+      ORDER BY updated_at DESC LIMIT 200`,
+    [customerId]
+  );
+  return { renewals: result.rows };
+});
+
+app.get('/api/admin/provisioning-operations', {
+  preHandler: protect(CAPABILITIES.PROVISIONING_READ)
+}, async (request) => {
+  const customerId = request.query?.customerId || null;
+  const result = await db.query(
+    `SELECT id, customer_id, subscription_id, renewal_id, provider, operation,
+            COALESCE(orchestration_state, status) AS status,
+            attempts, failure_class, failure_reason, expected_expiration,
+            provider_expiration, next_retry_at, verified_at, correlation_id,
+            created_at, updated_at
+       FROM provisioning_operations
+      WHERE ($1::uuid IS NULL OR customer_id = $1::uuid)
+      ORDER BY updated_at DESC LIMIT 200`,
+    [customerId]
+  );
+  return { provisioning: result.rows };
 });
 
 app.post('/api/admin/renewals/:id/approve', {

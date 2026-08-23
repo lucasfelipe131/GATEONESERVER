@@ -16,6 +16,7 @@ export const CAPABILITIES = Object.freeze({
   BILLING_MARK_PAID: 'billing.mark_paid',
   RENEWAL_READ: 'renewal.read',
   RENEWAL_APPROVE: 'renewal.approve',
+  PROVISIONING_READ: 'provisioning.read',
   CRM_READ: 'crm.read',
   IDENTITY_READ: 'identity.read',
   IDENTITY_RESOLVE: 'identity.resolve',
