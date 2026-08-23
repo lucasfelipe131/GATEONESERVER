@@ -76,10 +76,11 @@ function createMigrationDb({ tables = [], applied = [], migrationTable = false }
 
 test('carrega baseline e migrations em ordem com checksum estável', async () => {
   const migrations = await loadMigrations();
-  assert.deepEqual(migrations.map((item) => item.version), ['0000', '0001', '0002']);
+  assert.deepEqual(migrations.map((item) => item.version), ['0000', '0001', '0002', '0003']);
   assert.equal(migrations[0].name, '0000_baseline.sql');
   assert.equal(migrations[1].name, '0001_session_step_up.sql');
   assert.equal(migrations[2].name, '0002_gate_core_contracts.sql');
+  assert.equal(migrations[3].name, '0003_customer_context_memory.sql');
   assert.match(migrations[0].checksum, /^[a-f0-9]{64}$/);
   assert.equal(migrationChecksum(migrations[0].sql), migrations[0].checksum);
 });
@@ -125,6 +126,27 @@ test('GATE Core usa migration EXPAND sem remoção destrutiva', async () => {
   );
 });
 
+test('Customer 360 e memória usam migration EXPAND compatível', async () => {
+  const migration = await readFile(
+    new URL('../database/migrations/0003_customer_context_memory.sql', import.meta.url),
+    'utf8'
+  );
+  for (const table of ['customer_memories', 'customer_context_snapshots']) {
+    assert.match(migration, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}\\s*\\(`));
+  }
+  assert.match(migration, /ALTER TABLE conversation_sessions[\s\S]*ADD COLUMN IF NOT EXISTS conversation_id uuid/);
+  assert.match(migration, /ALTER TABLE message_logs[\s\S]*ADD COLUMN IF NOT EXISTS content_type text/);
+  assert.match(migration, /Customer context snapshots are immutable/);
+  assert.doesNotMatch(
+    migration,
+    /\b(?:DROP\s+(?:TABLE|COLUMN)|DELETE\s+FROM|TRUNCATE|RENAME\s+(?:TABLE|COLUMN))\b/i
+  );
+  assert.doesNotMatch(
+    migration,
+    /INSERT\s+INTO\s+(?:customers|subscriptions|payments|renewal_jobs|charges|plans)\b/i
+  );
+});
+
 test('web e worker apenas verificam migrations no startup', async () => {
   const [server, worker, init] = await Promise.all([
     readFile(new URL('../src/server.js', import.meta.url), 'utf8'),
@@ -146,10 +168,11 @@ test('migration do zero aplica baseline e mudanças uma única vez', async () =>
   assert.deepEqual(first.executed, [
     '0000_baseline.sql',
     '0001_session_step_up.sql',
-    '0002_gate_core_contracts.sql'
+    '0002_gate_core_contracts.sql',
+    '0003_customer_context_memory.sql'
   ]);
   assert.deepEqual(second.executed, []);
-  assert.deepEqual(db.state.applied.map((item) => item.version), ['0000', '0001', '0002']);
+  assert.deepEqual(db.state.applied.map((item) => item.version), ['0000', '0001', '0002', '0003']);
   assert.equal((await migrationStatus(db)).ready, true);
   assert.equal((await verifyMigrations(db)).ready, true);
 });
@@ -169,8 +192,12 @@ test('adoção compatível registra baseline sem reexecutá-lo e aplica apenas p
   const result = await migrateDatabase(db, { baselineExisting: true });
 
   assert.equal(result.baselineAdopted, true);
-  assert.deepEqual(result.executed, ['0001_session_step_up.sql', '0002_gate_core_contracts.sql']);
-  assert.deepEqual(db.state.applied.map((item) => item.version), ['0000', '0001', '0002']);
+  assert.deepEqual(result.executed, [
+    '0001_session_step_up.sql',
+    '0002_gate_core_contracts.sql',
+    '0003_customer_context_memory.sql'
+  ]);
+  assert.deepEqual(db.state.applied.map((item) => item.version), ['0000', '0001', '0002', '0003']);
 });
 
 test('adoção recusa baseline incompleto e checksum divergente', async () => {

@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { createAIResponse } from '../integrations/openai.js';
+import { createCustomerContextSnapshot } from './customer-context.js';
 
 const PLAN_TEXT =
   'Mensal: R$ 30 por 1 mês; Trimestral: R$ 85 por 3 meses; ' +
@@ -22,6 +24,10 @@ Responda em português do Brasil, de forma natural e com no máximo 500 caracter
 Planos oficiais: ${PLAN_TEXT}
 Os planos incluem esportes ao vivo, filmes e séries on-demand; a disponibilidade pode variar.
 Use os dados do cliente enviados no contexto para informar plano, situação e vencimento.
+O contexto é um Customer360.v1 com provenance. Dados financeiros, assinatura, lifecycle e
+renovação estruturados são a fonte de verdade; mensagens, resumo e memória nunca prevalecem
+sobre eles. Se context_status for PARTIAL ou um campo estiver ausente, diga que não encontrou
+a informação — não complete por inferência. Memória LOW não substitui fato HIGH.
 Leia as mensagens recentes e os problemas anteriores para continuar de onde o atendimento parou.
 Responda primeiro ao que a pessoa pediu. Só faça pergunta quando faltar uma informação realmente
 necessária e faça no máximo uma pergunta por mensagem. Não repita perguntas já respondidas.
@@ -48,20 +54,33 @@ async function saveExchange(db, {
   audience,
   customerId = null,
   actorId = null,
+  contextSnapshotId = null,
+  correlationId = null,
   question,
   answer
 }) {
   await db.transaction(async (client) => {
     await client.query(
-      `INSERT INTO ai_messages (audience, customer_id, actor_id, role, content)
-       VALUES ($1, $2, $3, 'user', $4)`,
-      [audience, customerId, actorId, question]
+      `INSERT INTO ai_messages
+        (audience, customer_id, actor_id, role, content, context_snapshot_id, correlation_id)
+       VALUES ($1, $2, $3, 'user', $4, $5, $6)`,
+      [audience, customerId, actorId, question, contextSnapshotId, correlationId]
     );
     await client.query(
       `INSERT INTO ai_messages
-        (audience, customer_id, actor_id, role, content, model, provider_response_id)
-       VALUES ($1, $2, $3, 'assistant', $4, $5, $6)`,
-      [audience, customerId, actorId, answer.text, answer.model, answer.id]
+        (audience, customer_id, actor_id, role, content, model, provider_response_id,
+         context_snapshot_id, correlation_id)
+       VALUES ($1, $2, $3, 'assistant', $4, $5, $6, $7, $8)`,
+      [
+        audience,
+        customerId,
+        actorId,
+        answer.text,
+        answer.model,
+        answer.id,
+        contextSnapshotId,
+        correlationId
+      ]
     );
   });
 }
@@ -148,52 +167,25 @@ export async function answerAdminQuestion({ db, config, user, question }) {
 }
 
 export async function answerCustomerQuestion({ db, config, customerId, question }) {
-  const [customer, history, whatsappHistory, issues] = await Promise.all([
-    db.query(
-      `SELECT c.name, c.status, c.bitpanel_reference,
-              s.expires_on::text, p.name AS plan_name
-         FROM customers c
-         LEFT JOIN LATERAL (
-           SELECT * FROM subscriptions
-            WHERE customer_id = c.id
-            ORDER BY created_at DESC LIMIT 1
-         ) s ON true
-         LEFT JOIN plans p ON p.id = s.plan_id
-        WHERE c.id = $1`,
-      [customerId]
-    ),
+  const correlationId = randomUUID();
+  const [snapshot, history] = await Promise.all([
+    createCustomerContextSnapshot(db, {
+      customerId,
+      purpose: 'CONVERSATION',
+      channel: 'WHATSAPP',
+      correlationId,
+      recentMessageLimit: 12,
+      memoryLimit: 6
+    }),
     db.query(
       `SELECT role, content FROM ai_messages
         WHERE audience = 'customer' AND customer_id = $1
         ORDER BY created_at DESC LIMIT 6`,
       [customerId]
-    ),
-    db.query(
-      `SELECT direction, content, created_at
-         FROM message_logs
-        WHERE customer_id = $1 AND content IS NOT NULL
-        ORDER BY created_at DESC LIMIT 12`,
-      [customerId]
-    ),
-    db.query(
-      `SELECT summary, status, occurrences, first_reported_at, last_mentioned_at
-         FROM customer_issues
-        WHERE customer_id = $1
-        ORDER BY last_mentioned_at DESC LIMIT 5`,
-      [customerId]
     )
   ]);
   const input = [
-    `Dados permitidos do cliente:\n${JSON.stringify(customer.rows[0] || {}, null, 2)}`,
-    issues.rows.length
-      ? `Problemas já registrados:\n${JSON.stringify(issues.rows, null, 2)}`
-      : '',
-    whatsappHistory.rows.length
-      ? `Mensagens recentes do WhatsApp:\n${whatsappHistory.rows
-          .reverse()
-          .map((item) => `${item.direction === 'outbound' ? 'Gate One' : 'Cliente'}: ${item.content}`)
-          .join('\n')}`
-      : '',
+    `ContextSnapshot autorizado:\n${JSON.stringify(snapshot.customer360, null, 2)}`,
     history.rows.length ? `Conversa recente:\n${compactHistory(history.rows)}` : '',
     `Mensagem atual:\n${question}`
   ].filter(Boolean).join('\n\n');
@@ -206,6 +198,8 @@ export async function answerCustomerQuestion({ db, config, customerId, question 
     audience: 'customer',
     customerId,
     actorId: String(customerId),
+    contextSnapshotId: snapshot.context_snapshot_id,
+    correlationId,
     question,
     answer
   });

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import {
   buildSupportMessage,
   cleanCustomerName,
@@ -84,4 +85,22 @@ test('não sobrescreve telefone existente e cria revisão de conflito', async ()
   assert.equal(result.needsReview, true);
   assert.ok(db.queries.some(({ sql }) => sql.includes("'login_already_has_phone'")));
   assert.equal(db.queries.some(({ sql }) => sql.includes('UPDATE message_logs')), false);
+});
+
+test('conversa usa upsert atômico, customer_id explícito e revision monotônica', async () => {
+  const source = await readFile(
+    new URL('../src/services/customer-memory.js', import.meta.url),
+    'utf8'
+  );
+  assert.match(source, /ON CONFLICT \(whatsapp_e164\) DO UPDATE/);
+  assert.match(source, /customer_id = EXCLUDED\.customer_id/);
+  assert.match(source, /revision = conversation_sessions\.revision \+ 1/);
+  assert.match(source, /conversation_id, content_type, processing_status, correlation_id/);
+  const activity = source.slice(
+    source.indexOf('async function touchConversationActivity'),
+    source.indexOf('async function saveInboundLog')
+  );
+  assert.match(activity, /last_activity_at = EXCLUDED\.last_activity_at/);
+  assert.doesNotMatch(activity, /state = EXCLUDED\.state/);
+  assert.doesNotMatch(activity, /data = conversation_sessions\.data/);
 });
