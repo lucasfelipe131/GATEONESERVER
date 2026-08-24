@@ -259,3 +259,48 @@ export async function renewalOperationStatus(db, { customerId, subscriptionId = 
   }
   return { ...current, decision: 'PAYMENT_REQUIRED' };
 }
+
+export async function paymentOperationStatus(db, { customerId, subscriptionId = null }) {
+  const result = await db.query(
+    `SELECT p.id AS payment_id, p.customer_id, p.subscription_id, p.status,
+            p.amount_cents, p.currency, p.reconciliation_status, p.review_reason,
+            p.confirmed_at, p.updated_at
+       FROM payments p
+       JOIN subscriptions s ON s.id = p.subscription_id
+      WHERE p.customer_id = $1
+        AND s.customer_id = $1
+        AND ($2::uuid IS NULL OR p.subscription_id = $2::uuid)
+      ORDER BY p.created_at DESC LIMIT 1`,
+    [customerId, subscriptionId]
+  );
+  if (!result.rows[0]) {
+    return {
+      customer_id: customerId,
+      subscription_id: subscriptionId,
+      payment_id: null,
+      status: 'NOT_FOUND',
+      reconciliation_status: null
+    };
+  }
+  return result.rows[0];
+}
+
+export async function listActivePlans(db) {
+  const result = await db.query(
+    `SELECT id AS plan_id, code, name, duration_months, price_cents, 'BRL' AS currency
+       FROM plans WHERE active = true ORDER BY sort_order`
+  );
+  return result.rows;
+}
+
+export async function getOpenSupportCases(db, customerId) {
+  const result = await db.query(
+    `SELECT id AS support_case_id, category, summary, status, correlation_id,
+            first_reported_at AS opened_at, last_mentioned_at
+       FROM customer_issues
+      WHERE customer_id = $1 AND status <> 'resolved'
+      ORDER BY last_mentioned_at DESC LIMIT 20`,
+    [customerId]
+  );
+  return result.rows.map((row) => ({ ...row, status: String(row.status).toUpperCase() }));
+}

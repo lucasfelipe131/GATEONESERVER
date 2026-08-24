@@ -47,11 +47,17 @@ import {
 import { scanBilling, markPaymentApproved } from './services/billing.js';
 import {
   getCustomerContext,
+  getOpenSupportCases,
+  listActivePlans,
   openSupportCase,
+  paymentOperationStatus,
   renewalOperationStatus,
   resolveIdentity
 } from './services/gate-core.js';
 import { createCustomerContextSnapshot } from './services/customer-context.js';
+import { ConversationToolRegistry } from './services/conversation-tools.js';
+import { GateConversationAgent } from './services/conversation-agent.js';
+import { PgConversationAgentRepository } from './services/conversation-operations.js';
 import { buildIdempotencyKey, renderChargeMessage } from './domain/billing.js';
 import {
   createCheckoutPreference,
@@ -711,6 +717,105 @@ app.post('/api/v1/core/operations', async (request, reply) => {
         memoryLimit: input.memory_limit,
         logger: request.log
       });
+    } else if (envelope.action === 'conversation.process') {
+      const input = parse(z.object({
+        conversation_id: z.string().min(1).max(200),
+        message: z.object({
+          id: z.string().min(1).max(300),
+          text: z.string().max(8000),
+          content_type: z.enum(['TEXT', 'AUDIO', 'IMAGE', 'DOCUMENT', 'PDF', 'UNKNOWN']).default('TEXT')
+        }),
+        identity: z.object({
+          type: z.enum(['WHATSAPP', 'PHONE', 'EMAIL', 'LOGIN', 'PROVIDER_ACCOUNT', 'PARTNER_ID']),
+          value: z.string().min(1).max(500),
+          provider: z.string().min(1).max(100)
+        }),
+        plan_code: z.enum(['monthly', 'quarterly', 'semiannual', 'annual']).optional()
+      }), envelope.input);
+      const repository = new PgConversationAgentRepository(db);
+      const registry = new ConversationToolRegistry({
+        handlers: {
+          resolveCustomer: (toolInput) => resolveIdentity(db, toolInput),
+          getCustomerContext: (toolInput) => createCustomerContextSnapshot(db, {
+            customerId: toolInput.customer_id,
+            resolution: { status: 'MATCHED', matched_by: input.identity },
+            purpose: toolInput.purpose,
+            channel: toolInput.channel,
+            requestedScopes: toolInput.requested_scopes,
+            correlationId: toolInput.correlation_id,
+            recentMessageLimit: 12,
+            memoryLimit: 6,
+            logger: request.log
+          }),
+          getSubscription: async (toolInput) => {
+            const context = await getCustomerContext(db, toolInput.customer_id);
+            if (!context.subscription_id) {
+              throw Object.assign(new Error('Assinatura não encontrada.'), { code: 'SUBSCRIPTION_NOT_FOUND' });
+            }
+            return {
+              customer_id: context.customer_id,
+              subscription_id: context.subscription_id,
+              plan_id: context.plan_id,
+              plan_code: context.plan_code,
+              plan_name: context.plan_name,
+              status: context.subscription_status,
+              expires_at: context.expires_at
+            };
+          },
+          getExpiration: async (toolInput) => {
+            const context = await getCustomerContext(db, toolInput.customer_id);
+            if (!context.subscription_id) {
+              throw Object.assign(new Error('Assinatura não encontrada.'), { code: 'SUBSCRIPTION_NOT_FOUND' });
+            }
+            return { subscription_id: context.subscription_id, expires_at: context.expires_at };
+          },
+          listPlans: () => listActivePlans(db),
+          getPaymentStatus: (toolInput) => paymentOperationStatus(db, {
+            customerId: toolInput.customer_id,
+            subscriptionId: toolInput.subscription_id || null
+          }),
+          getRenewalStatus: (toolInput) => renewalOperationStatus(db, {
+            customerId: toolInput.customer_id,
+            subscriptionId: toolInput.subscription_id || null
+          }),
+          requestRenewal: (toolInput) => renewalOperationStatus(db, {
+            customerId: toolInput.customer_id,
+            subscriptionId: toolInput.subscription_id || null
+          }),
+          // PASSO 05 permanece local/fake. A rota não reutiliza silenciosamente
+          // o adapter financeiro real legado; testes E2E injetam um provider fake.
+          createPaymentRequest: async () => {
+            throw Object.assign(
+              new Error('Provider autônomo permanece desabilitado fora do ambiente fake.'),
+              { code: 'HUMAN_ACTION_REQUIRED' }
+            );
+          },
+          getOpenSupportCases: (toolInput) => getOpenSupportCases(db, toolInput.customer_id),
+          openSupportCase: (toolInput) => openSupportCase(db, {
+            customerId: toolInput.customer_id,
+            category: toolInput.category || 'GENERAL',
+            summary: toolInput.summary,
+            message: toolInput.message || null,
+            requestId: toolInput.idempotency_key,
+            correlationId: toolInput.correlation_id,
+            actor: { type: 'AGENT', id: 'gate-conversation-agent' }
+          }),
+          requestHumanHandoff: (toolInput) => repository.requestHandoff({
+            ...toolInput,
+            requested_by: { type: 'AGENT', id: 'gate-conversation-agent' }
+          })
+        }
+      });
+      const agent = new GateConversationAgent({ repository, registry, logger: request.log });
+      data = await agent.process({
+        conversationId: input.conversation_id,
+        messageId: input.message.id,
+        text: input.message.text,
+        contentType: input.message.content_type,
+        identity: input.identity,
+        correlationId: envelope.correlation_id,
+        planCode: input.plan_code || null
+      });
     } else if (envelope.action === 'subscription.get') {
       const context = await getCustomerContext(db, parse(z.uuid(), envelope.subject.id));
       if (!context.subscription_id) {
@@ -753,6 +858,15 @@ app.post('/api/v1/core/operations', async (request, reply) => {
         checkout_url: created.checkout_url,
         existing: created.existing
       };
+    } else if (envelope.action === 'payment.status.get') {
+      data = await paymentOperationStatus(db, {
+        customerId: parse(z.uuid(), envelope.subject.id),
+        subscriptionId: envelope.input.subscription_id
+          ? parse(z.uuid(), envelope.input.subscription_id)
+          : null
+      });
+    } else if (envelope.action === 'plan.list') {
+      data = await listActivePlans(db);
     } else if (envelope.action === 'renewal.request' || envelope.action === 'renewal.status.get') {
       data = await renewalOperationStatus(db, {
         customerId: parse(z.uuid(), envelope.subject.id),
@@ -760,6 +874,8 @@ app.post('/api/v1/core/operations', async (request, reply) => {
           ? parse(z.uuid(), envelope.input.subscription_id)
           : null
       });
+    } else if (envelope.action === 'support.case.list') {
+      data = await getOpenSupportCases(db, parse(z.uuid(), envelope.subject.id));
     } else if (envelope.action === 'support.case.open') {
       const input = parse(z.object({
         category: z.string().min(1).max(100),
@@ -774,6 +890,20 @@ app.post('/api/v1/core/operations', async (request, reply) => {
         requestId: envelope.request_id,
         correlationId: envelope.correlation_id,
         actor: envelope.actor
+      });
+    } else if (envelope.action === 'conversation.handoff.request') {
+      const input = parse(z.object({
+        conversation_id: z.string().min(1).max(200),
+        reason: z.string().min(1).max(200),
+        summary: z.string().max(1000).optional(),
+        context_snapshot_id: z.uuid().optional(),
+        idempotency_key: z.string().min(1).max(500)
+      }), envelope.input);
+      data = await new PgConversationAgentRepository(db).requestHandoff({
+        ...input,
+        customer_id: envelope.subject.id ? parse(z.uuid(), envelope.subject.id) : null,
+        correlation_id: envelope.correlation_id,
+        requested_by: envelope.actor
       });
     } else {
       throw Object.assign(new Error('Ação não suportada pelo contrato v1.'), {

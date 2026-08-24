@@ -96,6 +96,13 @@ test('WhatsApp só executa ações permitidas e com a capability exata', () => {
     ).allowed,
     false
   );
+  assert.deepEqual(
+    authorizeCoreOperation(
+      { type: 'SERVICE', id: 'whatsapp', capability: 'conversation.agent.execute' },
+      'conversation.process'
+    ),
+    { allowed: true, capability: 'conversation.agent.execute' }
+  );
   assert.equal(
     authorizeCoreOperation(
       { type: 'SERVICE', id: 'whatsapp', capability: 'customer.context.read' },
