@@ -31,6 +31,7 @@ import { encryptSecret } from './security.js';
 import { createBusinessEvent } from './core/events.js';
 import { appendOutboxEvent } from './core/outbox.js';
 import { renewalExecutionDecision } from './core/renewal.js';
+import { startStagingOutbox } from './services/staging-outbox.js';
 
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL, { ssl: config.DATABASE_SSL });
@@ -715,6 +716,7 @@ async function recoverAutomaticCharges() {
 
 async function start() {
   await verifyDatabaseReady(db);
+  const outboxRuntime = startStagingOutbox({ db, workerId: `gate-worker:${randomUUID()}` });
   const messageWorker = new Worker('gate-one-messages', processMessage, {
     connection: redis,
     concurrency: 5
@@ -776,6 +778,7 @@ async function start() {
   console.log('Worker Gate One Pro iniciado.');
 
   const shutdown = async () => {
+    await outboxRuntime?.stop();
     cron.stop();
     contentCron.stop();
     recoveryCron.stop();
