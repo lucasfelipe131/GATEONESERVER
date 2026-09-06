@@ -33,7 +33,7 @@ export function startStagingOutbox({ db, env = process.env, workerId, logger = c
   // Observational lifecycle events have no additional business effect.
   for (const type of ['payment.created', 'renewal.requested', 'renewal.processing', 'renewal.verifying',
     'renewal.completed', 'renewal.failed', 'renewal.human_action_required', 'provisioning.requested',
-    'provisioning.processing', 'provisioning.verifying', 'provisioning.completed']) {
+    'provisioning.processing', 'provisioning.verifying', 'provisioning.completed', 'provisioning.human_action_required']) {
     handlers[type] = async () => ({ observed: true });
   }
   // Fake delivery only: no transport import, network request or customer message.
