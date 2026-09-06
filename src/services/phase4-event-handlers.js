@@ -1,3 +1,6 @@
+import { createBusinessEvent } from '../core/events.js';
+import { appendOutboxEvent } from '../core/outbox.js';
+
 function eventInvariant(condition, code) {
   if (!condition) throw Object.assign(new Error(code), { code });
 }
@@ -61,6 +64,18 @@ export function createPhase4EventHandlers({ db, renewalOrchestrator }) {
   return Object.freeze({
     'payment.confirmed': async (event) => {
       const saga = await ensureSaga(event);
+      // PaymentWatcher emits payment.confirmed only. Persist the continuation
+      // with the consumer transaction; legacy Billing may already have emitted it.
+      const ready = await db.query(`SELECT event_id FROM gate_event_outbox
+        WHERE event_type = 'renewal.ready' AND subject->>'id' = $1 LIMIT 1`, [saga.renewal_id]);
+      if (!ready.rows[0]?.event_id) {
+        await appendOutboxEvent(db, createBusinessEvent({
+          eventType: 'renewal.ready', correlationId: event.correlation_id,
+          causationId: event.event_id, actor: { type: 'SYSTEM', id: 'payment-confirmed-consumer' },
+          subject: { type: 'renewal', id: saga.renewal_id },
+          payload: { customer_id: saga.customer_id, subscription_id: saga.subscription_id, payment_id: saga.payment_id }
+        }));
+      }
       return { renewal_id: saga.renewal_id, state: 'READY' };
     },
     'renewal.ready': async (event) => {

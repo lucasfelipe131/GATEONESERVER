@@ -44,5 +44,5 @@ export function startStagingOutbox({ db, env = process.env, workerId, logger = c
     return { simulated: true, delivered: result.rowCount === 1 };
   };
   logger.info('OUTBOX_DISPATCHER_STARTED_FAKE_ONLY');
-  return startOutboxRuntime({ dispatcher: new OutboxDispatcher({ db, workerId, handlers, logger }), logger });
+  return startOutboxRuntime({ dispatcher: new OutboxDispatcher({ db, workerId, handlers, logger, env }), logger });
 }
