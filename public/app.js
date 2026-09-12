@@ -1,4 +1,5 @@
 import { createCommandCenter } from './command-center.js';
+import { createNavigation } from './navigation.js';
 
 const state = {
   user: null,
@@ -90,13 +91,14 @@ const titles = {
 };
 
 const commandCenter=createCommandCenter({api,navigate,canManage:()=>state.user?.role==='admin'});
+const navigation = createNavigation();
 
 async function navigate(page) {
   $$('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.page === page));
   $$('.page').forEach((panel) => panel.classList.toggle('active', panel.dataset.pagePanel === page));
   $('#pageEyebrow').textContent = titles[page][0];
   $('#pageTitle').textContent = titles[page][1];
-  $('#sidebar').classList.remove('open');
+  navigation.close();
   if (page === 'dashboard') await loadDashboard();
   if (page === 'exceptions') await commandCenter.inbox(true);
   if (page === 'customers') await commandCenter.cases();
@@ -710,7 +712,6 @@ $('#logoutButton').addEventListener('click', async () => {
 
 $$('.nav-item').forEach((button) => button.addEventListener('click', () => navigate(button.dataset.page)));
 $$('[data-go]').forEach((button) => button.addEventListener('click', () => navigate(button.dataset.go)));
-$('#menuButton').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
 $('#operationPriorities').addEventListener('click', (event) => {
   const button = event.target.closest('[data-priority-page]');
   if (button) navigate(button.dataset.priorityPage);

@@ -162,6 +162,8 @@ test('phase6 DOM customer and conversations display support/exceptions from same
   const t = await domFixture();
   try {
     await t.cc.customer(t.f.a);
+    assert.match(t.document.getElementById('ccCustomerDetail').textContent, /01\/01\/2030/);
+    assert.doesNotMatch(t.document.getElementById('ccCustomerDetail').textContent, /GMT|2030-01-01/);
     assert.match(
       t.document.getElementById('ccCustomerDetail').textContent,
       /Customer360.v1/,

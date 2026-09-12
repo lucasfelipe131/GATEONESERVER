@@ -12,6 +12,11 @@ const escape = (value) =>
   );
 const value = (x) => x?.value ?? x ?? 'Não disponível';
 const time = (x) => (x ? new Date(x).toLocaleString('pt-BR') : '—');
+const calendarDate = (x) => {
+  const raw = value(x);
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
+};
 const age = (x) =>
   x
     ? `${Math.max(0, Math.floor((Date.now() - Date.parse(x)) / 60000))} min`
@@ -215,7 +220,7 @@ export function createCommandCenter({
         const sub = ctx.subscription || {};
         return `<div class="cc-row-head"><h2>Atendimento com contexto</h2>${badge(e.status)}</div><dl class="cc-detail-grid">
         ${field('CLIENTE', ctx.identity?.name || e.customer_id)}${field('PROBLEMA', e.summary)}${field('CATEGORIA', e.category)}${field('SEVERIDADE', e.severity)}
-        ${field('CONTEXTO · ASSINATURA', sub.status)}${field('VENCIMENTO', sub.expires_at)}${field('PAYMENT', ctx.operational?.payment?.status || ctx.financial?.last_payment?.status)}${field('RENEWAL', ctx.operational?.renewal?.renewal_status || ctx.renewal?.status)}
+        ${field('CONTEXTO · ASSINATURA', sub.status)}${field('VENCIMENTO', calendarDate(sub.expires_at))}${field('PAYMENT', ctx.operational?.payment?.status || ctx.financial?.last_payment?.status)}${field('RENEWAL', ctx.operational?.renewal?.renewal_status || ctx.renewal?.status)}
         ${field('DIAGNÓSTICO', e.diagnosis)}${field('MOTIVO DA FALHA', e.reason_code)}${field('RISCO', e.risk)}${field('RECOMENDAÇÃO', e.recommended_action)}${field('AÇÃO POSSÍVEL', e.possible_action)}${field('CORRELAÇÃO', e.correlation_id)}</dl>
         <h3>TENTATIVAS · TOOLS · RESULTADOS</h3>${e.attempts?.length ? `<ol class="cc-attempts">${e.attempts.map((a) => `<li>${escape(a.tool)} · ${escape(a.action)} · ${escape(a.result)} · ${escape(time(a.timestamp))}</li>`).join('')}</ol>` : empty('Nenhuma ação executada. A política encaminhou o caso antes da execução.')}
         <h3>TRILHA DE TOOLS E POLICY</h3>${e.tools_used?.length ? `<ol class="cc-attempts">${e.tools_used.map((t) => `<li>${escape(t.tool || t)} · ${escape(t.policy || '—')} · ${escape(t.status || '—')} ${escape(t.error_code || '')}</li>`).join('')}</ol>` : empty('Nenhuma tool registrada antes do encaminhamento.')}
@@ -249,7 +254,7 @@ export function createCommandCenter({
       (result) => {
         const c = result.customer360;
         const s = c.subscription || {};
-        return `<h2>Customer 360</h2><p class="muted">Customer360.v1 · fontes oficiais · ${escape(c.customer_id)}</p><dl class="cc-detail-grid">${field('IDENTIDADE', c.identity?.name)}${field('LIFECYCLE', c.lifecycle?.state)}${field('PLANO', s.plan_name)}${field('VENCIMENTO', s.expires_at)}${field('PAYMENT', c.financial?.last_payment?.status)}${field('RENEWAL', c.renewal?.status)}${field('CONVERSA', c.conversation?.state)}</dl>
+        return `<h2>Customer 360</h2><p class="muted">Customer360.v1 · fontes oficiais · ${escape(c.customer_id)}</p><dl class="cc-detail-grid">${field('IDENTIDADE', c.identity?.name)}${field('LIFECYCLE', c.lifecycle?.state)}${field('PLANO', s.plan_name)}${field('VENCIMENTO', calendarDate(s.expires_at))}${field('PAYMENT', c.financial?.last_payment?.status)}${field('RENEWAL', c.renewal?.status)}${field('CONVERSA', c.conversation?.state)}</dl>
         <h3>SUPPORT CASES</h3>${(c.support?.recent_cases || []).map((x) => `<article class="cc-row">${badge(x.status)}<p>${escape(x.summary)}</p><p>${escape(x.resolution || x.diagnosis || 'Em análise')}</p></article>`).join('') || empty('Nenhum caso registrado.')}
         <h3>EXCEPTIONS</h3>${(c.support?.exceptions || []).map((x) => `<p>${badge(x.status)} ${escape(x.reason_code)}</p>`).join('') || empty('Nenhuma exceção registrada.')}
         <h3>MEMÓRIA VALIDADA</h3>${(c.memories || []).map((x) => `<p>${escape(x.key)}: ${escape(typeof x.value === 'object' ? JSON.stringify(x.value) : x.value)}</p>`).join('') || empty('Nenhuma memória selecionada para este contexto.')}

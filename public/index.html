@@ -41,6 +41,7 @@
 
     <div class="app-shell hidden" id="appShell">
       <aside class="sidebar" id="sidebar">
+        <button class="menu-close" id="menuClose" aria-label="Fechar menu" type="button">Fechar ×</button>
         <div class="brand">
           <img class="brand-logo" src="/assets/gate-one-mark.png" alt="" aria-hidden="true" />
           <span><strong>Gate One Pro</strong><small>Server Ecosystem</small></span>
@@ -61,10 +62,11 @@
           <button class="side-link" id="logoutButton">Sair</button>
         </div>
       </aside>
+      <div class="menu-backdrop" id="menuBackdrop" hidden></div>
 
       <main class="main">
         <header class="topbar">
-          <button class="menu-button" id="menuButton" aria-label="Abrir menu">☰</button>
+          <button class="menu-button" id="menuButton" aria-label="Abrir menu" aria-controls="sidebar" aria-expanded="false">☰</button>
           <div>
             <span class="eyebrow" id="pageEyebrow">CENTRAL DE CONTROLE</span>
             <h1 id="pageTitle">Visão geral</h1>
