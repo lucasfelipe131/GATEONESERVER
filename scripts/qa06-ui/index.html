@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>QA 06 — Viewports</title><link rel="stylesheet" href="/qa06/viewport.css"></head>
 <body><header><strong>GATE QA 06 · dados sintéticos</strong><label>Viewport <select id="viewport"><option value="desktop">Desktop · 1440 × 900</option><option value="tablet">Tablet · 1024 × 768</option><option value="portrait">Tablet vertical · 768 × 1024</option><option value="mobile">Mobile · 390 × 844</option><option value="large">Mobile grande · 430 × 932</option></select></label><label>Cenário <select id="scenario"><option value="normal">Normal · APIs QA</option><option value="empty">Listas vazias · fixture visual</option><option value="metrics-error">Erro isolado de métricas · 503</option></select></label><span id="qaStatus" role="status">Preparando QA</span></header>
-<iframe id="qaFrame" class="desktop" title="Aplicação GATE no viewport selecionado" src="/"></iframe>
+<div id="qaStage"><iframe id="qaFrame" class="desktop" title="Aplicação GATE no viewport selecionado" src="/"></iframe></div>
 <footer>O iframe usa a aplicação e a autenticação existentes. As dimensões são do viewport CSS interno. Este laboratório não simula Safari, hardware ou teclado virtual.</footer>
 <script type="module" src="/qa06/viewport.js"></script></body></html>
