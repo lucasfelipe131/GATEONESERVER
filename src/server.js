@@ -26,7 +26,12 @@ import {
   isTrustedMutationOrigin
 } from './authorization.js';
 import { audit } from './audit.js';
-import { coreRequestSchema, coreResponse } from './core/contracts.js';
+import {
+  CUSTOMER_CONTEXT_PURPOSES,
+  CUSTOMER_CONTEXT_SCOPES,
+  coreRequestSchema,
+  coreResponse
+} from './core/contracts.js';
 import { authorizeCoreOperation } from './core/policy.js';
 import { createQueues, createRedis } from './queue.js';
 import {
@@ -46,6 +51,7 @@ import {
   renewalReadiness,
   resolveIdentity
 } from './services/gate-core.js';
+import { createCustomerContextSnapshot } from './services/customer-context.js';
 import { buildIdempotencyKey, renderChargeMessage } from './domain/billing.js';
 import {
   createCheckoutPreference,
@@ -655,9 +661,63 @@ app.post('/api/v1/core/operations', async (request, reply) => {
       }), envelope.input);
       data = await resolveIdentity(db, input);
     } else if (envelope.action === 'customer.context.get') {
-      data = await getCustomerContext(db, parse(z.uuid(), envelope.subject.id));
+      const input = parse(z.object({
+        identity: z.object({
+          type: z.enum(['WHATSAPP', 'PHONE', 'EMAIL', 'LOGIN', 'PROVIDER_ACCOUNT', 'PARTNER_ID']),
+          value: z.string().min(1).max(500),
+          provider: z.string().min(1).max(100).optional()
+        }).optional(),
+        purpose: z.enum(CUSTOMER_CONTEXT_PURPOSES).default('CONVERSATION'),
+        channel: z.string().min(1).max(100).default('INTERNAL'),
+        requested_scopes: z.array(z.enum(CUSTOMER_CONTEXT_SCOPES)).max(9).optional(),
+        recent_message_limit: z.int().min(0).max(30).optional(),
+        memory_limit: z.int().min(0).max(20).optional()
+      }), envelope.input);
+      let customerId = envelope.subject.id ? parse(z.uuid(), envelope.subject.id) : null;
+      let resolution = { status: 'MATCHED', matched_by: null };
+      if (!customerId) {
+        if (!input.identity) {
+          throw Object.assign(new Error('Informe customer_id ou identidade externa.'), {
+            code: 'CUSTOMER_NOT_FOUND'
+          });
+        }
+        const identity = await resolveIdentity(db, input.identity);
+        if (identity.status === 'NOT_FOUND') {
+          throw Object.assign(new Error('Cliente não encontrado para a identidade informada.'), {
+            code: 'CUSTOMER_NOT_FOUND',
+            details: { resolution_status: identity.status }
+          });
+        }
+        if (identity.status === 'AMBIGUOUS') {
+          throw Object.assign(new Error('A identidade corresponde a mais de um cliente.'), {
+            code: 'CUSTOMER_AMBIGUOUS',
+            details: { candidate_count: identity.candidate_count }
+          });
+        }
+        customerId = identity.customer_id;
+        resolution = {
+          status: identity.status,
+          matched_by: identity.identity
+        };
+      }
+      data = await createCustomerContextSnapshot(db, {
+        customerId,
+        resolution,
+        purpose: input.purpose,
+        channel: input.channel,
+        requestedScopes: input.requested_scopes,
+        correlationId: envelope.correlation_id,
+        recentMessageLimit: input.recent_message_limit,
+        memoryLimit: input.memory_limit,
+        logger: request.log
+      });
     } else if (envelope.action === 'subscription.get') {
       const context = await getCustomerContext(db, parse(z.uuid(), envelope.subject.id));
+      if (!context.subscription_id) {
+        throw Object.assign(new Error('Assinatura não encontrada para o cliente.'), {
+          code: 'SUBSCRIPTION_NOT_FOUND'
+        });
+      }
       data = {
         customer_id: context.customer_id,
         subscription_id: context.subscription_id,
@@ -722,11 +782,13 @@ app.post('/api/v1/core/operations', async (request, reply) => {
     }
     return coreResponse(envelope, { data });
   } catch (error) {
-    const statusCode = error.code === 'CUSTOMER_NOT_FOUND'
+    const statusCode = ['CUSTOMER_NOT_FOUND', 'SUBSCRIPTION_NOT_FOUND'].includes(error.code)
       ? 404
-      : ['PAYMENT_NOT_CONFIRMED', 'RENEWAL_ALREADY_COMPLETED'].includes(error.code)
+      : ['PAYMENT_NOT_CONFIRMED', 'RENEWAL_ALREADY_COMPLETED', 'CUSTOMER_AMBIGUOUS'].includes(error.code)
         ? 409
-        : error.code === 'INSUFFICIENT_CAPABILITY'
+        : error.code === 'INVALID_PURPOSE'
+          ? 400
+          : error.code === 'INSUFFICIENT_CAPABILITY'
           ? 403
           : 502;
     return reply.code(statusCode).send(coreFailureResponse(envelope, error));

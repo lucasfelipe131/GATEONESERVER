@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { normalizePhone } from '../security.js';
 
 const PLACEHOLDER_NAMES = new Set(['', 'cliente', 'customer', 'sem nome', 'não informado']);
@@ -124,7 +125,108 @@ async function findOrCreateCustomer(db, { phone, displayName = null }) {
   return inserted.rows[0];
 }
 
-async function saveInboundLog(db, customerId, { text, providerId }) {
+function contextStateFromLegacy(state) {
+  const normalized = String(state || '').toLowerCase();
+  if (normalized.includes('support')) return 'SUPPORT';
+  if (normalized.includes('handoff')) return 'HUMAN_HANDOFF';
+  if (normalized.includes('payment') || normalized.includes('plan')) return 'WAITING_PAYMENT';
+  if (normalized.includes('renew')) return 'RENEWAL';
+  if (normalized.includes('sale')) return 'SALES';
+  if (normalized.includes('recovery')) return 'RECOVERY';
+  if (normalized.includes('name') || normalized.includes('login')) return 'NEW_CONTACT';
+  return 'GENERAL';
+}
+
+function contentTypeFromText(text) {
+  const value = String(text || '');
+  if (/^\[Áudio/i.test(value)) return 'AUDIO';
+  if (/^\[Imagem/i.test(value)) return 'IMAGE';
+  if (/^\[(?:PDF|Documento)/i.test(value)) return /PDF/i.test(value) ? 'PDF' : 'DOCUMENT';
+  if (/^\[Mensagem do WhatsApp recebida:/i.test(value)) return 'UNKNOWN';
+  return 'TEXT';
+}
+
+async function touchConversation(db, {
+  phone,
+  customerId,
+  state = 'conversation',
+  data = {},
+  correlationId = randomUUID(),
+  pendingActions = []
+}) {
+  const conversationId = randomUUID();
+  const result = await db.query(
+    `INSERT INTO conversation_sessions
+      (whatsapp_e164, state, data, expires_at, conversation_id, customer_id,
+       channel, context_state, started_at, last_activity_at, handoff_status,
+       correlation_id, pending_actions, revision)
+     VALUES ($1, $2, $3::jsonb, now() + interval '24 hours', $4, $5,
+             'whatsapp_qr', $6, now(), now(), $7, $8, $9::jsonb, 1)
+     ON CONFLICT (whatsapp_e164) DO UPDATE
+       SET state = EXCLUDED.state,
+           data = conversation_sessions.data || EXCLUDED.data,
+           expires_at = EXCLUDED.expires_at,
+           conversation_id = COALESCE(conversation_sessions.conversation_id, EXCLUDED.conversation_id),
+           customer_id = EXCLUDED.customer_id,
+           channel = COALESCE(conversation_sessions.channel, EXCLUDED.channel),
+           context_state = EXCLUDED.context_state,
+           started_at = COALESCE(conversation_sessions.started_at, EXCLUDED.started_at),
+           last_activity_at = EXCLUDED.last_activity_at,
+           handoff_status = EXCLUDED.handoff_status,
+           correlation_id = EXCLUDED.correlation_id,
+           pending_actions = EXCLUDED.pending_actions,
+           revision = conversation_sessions.revision + 1,
+           updated_at = now()
+     RETURNING conversation_id, correlation_id, revision`,
+    [
+      phone,
+      state,
+      JSON.stringify(data),
+      conversationId,
+      customerId,
+      contextStateFromLegacy(state),
+      state === 'support' ? 'REQUESTED' : 'NONE',
+      correlationId,
+      JSON.stringify(pendingActions)
+    ]
+  );
+  return result.rows[0];
+}
+
+async function touchConversationActivity(db, {
+  phone,
+  customerId,
+  correlationId = randomUUID()
+}) {
+  const conversationId = randomUUID();
+  const result = await db.query(
+    `INSERT INTO conversation_sessions
+      (whatsapp_e164, state, data, expires_at, conversation_id, customer_id,
+       channel, context_state, started_at, last_activity_at, handoff_status,
+       correlation_id, pending_actions, revision)
+     VALUES ($1, 'conversation', '{}'::jsonb, now() + interval '24 hours', $2, $3,
+             'whatsapp_qr', 'GENERAL', now(), now(), 'NONE', $4, '[]'::jsonb, 1)
+     ON CONFLICT (whatsapp_e164) DO UPDATE
+       SET conversation_id = COALESCE(conversation_sessions.conversation_id, EXCLUDED.conversation_id),
+           customer_id = EXCLUDED.customer_id,
+           channel = COALESCE(conversation_sessions.channel, EXCLUDED.channel),
+           started_at = COALESCE(conversation_sessions.started_at, EXCLUDED.started_at),
+           last_activity_at = EXCLUDED.last_activity_at,
+           correlation_id = EXCLUDED.correlation_id,
+           revision = conversation_sessions.revision + 1,
+           updated_at = now()
+     RETURNING conversation_id, correlation_id, revision`,
+    [phone, conversationId, customerId, correlationId]
+  );
+  return result.rows[0];
+}
+
+async function saveInboundLog(db, customerId, {
+  text,
+  providerId,
+  conversationId,
+  correlationId
+}) {
   if (providerId) {
     const duplicate = await db.query(
       `SELECT 1 FROM message_logs
@@ -135,14 +237,23 @@ async function saveInboundLog(db, customerId, { text, providerId }) {
   }
   await db.query(
     `INSERT INTO message_logs
-      (customer_id, direction, channel, content, provider_id, status)
-     VALUES ($1, 'inbound', 'whatsapp_qr', $2, $3, 'received')`,
-    [customerId, String(text || '').slice(0, 4000), providerId || null]
+      (customer_id, direction, channel, content, provider_id, status,
+       conversation_id, content_type, processing_status, correlation_id)
+     VALUES ($1, 'inbound', 'whatsapp_qr', $2, $3, 'received',
+             $4, $5, 'RECEIVED', $6)`,
+    [
+      customerId,
+      String(text || '').slice(0, 4000),
+      providerId || null,
+      conversationId,
+      contentTypeFromText(text),
+      correlationId
+    ]
   );
   return true;
 }
 
-async function recordIssue(db, customerId, text, issue) {
+async function recordIssue(db, customerId, text, issue, correlationId) {
   if (!issue) return { current: null, previous: null };
   const previous = await db.query(
     `SELECT * FROM customer_issues
@@ -155,19 +266,20 @@ async function recordIssue(db, customerId, text, issue) {
     const updated = await db.query(
       `UPDATE customer_issues
           SET last_message = $2, occurrences = occurrences + 1,
-              last_mentioned_at = now(), status = 'open', updated_at = now()
+              last_mentioned_at = now(), status = 'open',
+              correlation_id = $3, updated_at = now()
         WHERE id = $1
         RETURNING *`,
-      [previousIssue.id, String(text).slice(0, 1000)]
+      [previousIssue.id, String(text).slice(0, 1000), correlationId]
     );
     return { current: updated.rows[0], previous: previousIssue };
   }
   const inserted = await db.query(
     `INSERT INTO customer_issues
-      (customer_id, category, summary, last_message, status)
-     VALUES ($1, $2, $3, $4, 'open')
+      (customer_id, category, summary, last_message, status, correlation_id)
+     VALUES ($1, $2, $3, $4, 'open', $5)
      RETURNING *`,
-    [customerId, issue.category, issue.label, String(text).slice(0, 1000)]
+    [customerId, issue.category, issue.label, String(text).slice(0, 1000), correlationId]
   );
   return { current: inserted.rows[0], previous: previousIssue };
 }
@@ -183,14 +295,22 @@ async function loadSession(db, phone) {
 
 export async function setConversationState(db, phone, state, data = {}) {
   const normalized = normalizePhone(phone);
-  await db.query(
-    `INSERT INTO conversation_sessions (whatsapp_e164, state, data, expires_at)
-     VALUES ($1, $2, $3::jsonb, now() + interval '24 hours')
-     ON CONFLICT (whatsapp_e164) DO UPDATE
-       SET state = EXCLUDED.state, data = EXCLUDED.data,
-           expires_at = EXCLUDED.expires_at, updated_at = now()`,
-    [normalized, state, JSON.stringify(data)]
+  const customer = await db.query(
+    'SELECT id FROM customers WHERE whatsapp_e164 = $1 LIMIT 1',
+    [normalized]
   );
+  if (!customer.rows[0]) return null;
+  return touchConversation(db, {
+    phone: normalized,
+    customerId: customer.rows[0].id,
+    state,
+    data,
+    pendingActions: data?.intent ? [{ type: upperIntent(data.intent), status: 'PENDING' }] : []
+  });
+}
+
+function upperIntent(value) {
+  return String(value || '').trim().toUpperCase();
 }
 
 export async function registerQrInbound(db, {
@@ -201,10 +321,19 @@ export async function registerQrInbound(db, {
 }) {
   const normalized = normalizePhone(phone);
   const customer = await findOrCreateCustomer(db, { phone: normalized, displayName });
-  const saved = await saveInboundLog(db, customer.id, { text, providerId });
+  const conversation = await touchConversationActivity(db, {
+    phone: normalized,
+    customerId: customer.id
+  });
+  const saved = await saveInboundLog(db, customer.id, {
+    text,
+    providerId,
+    conversationId: conversation.conversation_id,
+    correlationId: conversation.correlation_id
+  });
   const issue = detectCustomerIssue(text);
   const issueRecord = saved
-    ? await recordIssue(db, customer.id, text, issue)
+    ? await recordIssue(db, customer.id, text, issue, conversation.correlation_id)
     : { current: null, previous: null };
   const session = await loadSession(db, normalized);
   const needsName = !cleanCustomerName(customer.name);
@@ -223,6 +352,8 @@ export async function registerQrInbound(db, {
     },
     needsName,
     duplicate: !saved,
+    conversationId: conversation.conversation_id,
+    correlationId: conversation.correlation_id,
     sessionState: session?.state || 'idle',
     recentIssues: recentIssues.rows,
     supportMessage: buildSupportMessage(issue, issueRecord.previous)
@@ -369,9 +500,11 @@ export async function confirmCustomerLogin(db, payload) {
       await client.query(
         `UPDATE conversation_sessions
             SET state = 'menu', data = $2::jsonb,
+                customer_id = $3, context_state = 'GENERAL',
+                last_activity_at = now(), revision = revision + 1,
                 expires_at = now() + interval '24 hours', updated_at = now()
           WHERE whatsapp_e164 = $1`,
-        [normalized, JSON.stringify({ customerId: target.id })]
+        [normalized, JSON.stringify({ customerId: target.id }), target.id]
       );
       return { matched: true, alreadyLinked: true, name: target.name, ...pending };
     }
@@ -403,9 +536,11 @@ export async function confirmCustomerLogin(db, payload) {
     await client.query(
       `UPDATE conversation_sessions
           SET state = 'menu', data = $2::jsonb,
+              customer_id = $3, context_state = 'GENERAL',
+              last_activity_at = now(), revision = revision + 1,
               expires_at = now() + interval '24 hours', updated_at = now()
         WHERE whatsapp_e164 = $1`,
-      [normalized, JSON.stringify({ customerId: target.id })]
+      [normalized, JSON.stringify({ customerId: target.id }), target.id]
     );
     return { matched: true, name: target.name, ...pending };
   });
@@ -421,11 +556,23 @@ export async function logQrOutbound(db, { phone, text, providerId = null }) {
     );
     if (duplicate.rows[0]) return { logged: false, duplicate: true };
   }
+  const conversation = await touchConversationActivity(db, {
+    phone: normalizePhone(phone),
+    customerId: customer.id
+  });
   await db.query(
     `INSERT INTO message_logs
-      (customer_id, direction, channel, content, provider_id, status)
-     VALUES ($1, 'outbound', 'whatsapp_qr', $2, $3, 'sent')`,
-    [customer.id, String(text || '').slice(0, 4000), providerId]
+      (customer_id, direction, channel, content, provider_id, status,
+       conversation_id, content_type, processing_status, correlation_id)
+     VALUES ($1, 'outbound', 'whatsapp_qr', $2, $3, 'sent',
+             $4, 'TEXT', 'SENT', $5)`,
+    [
+      customer.id,
+      String(text || '').slice(0, 4000),
+      providerId,
+      conversation.conversation_id,
+      conversation.correlation_id
+    ]
   );
   return { logged: true };
 }

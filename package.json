@@ -16,7 +16,7 @@
     "migrate:verify": "node src/migrate.js --verify",
     "seed": "node src/seed.js",
     "test": "node --test",
-    "check": "node --check src/server.js && node --check src/worker.js && node --check src/authorization.js && node --check src/migrations.js && node --check src/core/contracts.js && node --check src/core/lifecycle.js && node --check src/core/renewal.js && node --check src/core/outbox.js && node --check src/services/gate-core.js && node --check public/app.js && node --check public/portal.js",
+    "check": "node --check src/server.js && node --check src/worker.js && node --check src/authorization.js && node --check src/migrations.js && node --check src/core/contracts.js && node --check src/core/customer-context.js && node --check src/core/memory.js && node --check src/core/lifecycle.js && node --check src/core/renewal.js && node --check src/core/outbox.js && node --check src/services/gate-core.js && node --check src/services/customer-context.js && node --check public/app.js && node --check public/portal.js",
     "bitpanel:auth": "node scripts/bitpanel-auth.js"
   },
   "dependencies": {
