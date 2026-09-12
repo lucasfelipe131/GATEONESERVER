@@ -10,8 +10,21 @@ import rawBody from 'fastify-raw-body';
 import { z } from 'zod';
 import { loadConfig } from './config.js';
 import { createDb, getSetting, setSetting } from './db.js';
-import { initializeDatabase } from './init.js';
-import { authenticate, clearSessionCookie, login, logout, setSessionCookie } from './auth.js';
+import { verifyDatabaseReady } from './init.js';
+import {
+  authenticate,
+  clearSessionCookie,
+  grantStepUp,
+  login,
+  logout,
+  publicUser,
+  setSessionCookie
+} from './auth.js';
+import {
+  authorizationFailure,
+  CAPABILITIES,
+  isTrustedMutationOrigin
+} from './authorization.js';
 import { audit } from './audit.js';
 import { createQueues, createRedis } from './queue.js';
 import {
@@ -110,6 +123,7 @@ await app.register(fastifyStatic, {
 });
 
 app.decorateRequest('user', null);
+app.decorateRequest('session', null);
 
 function parse(schema, value) {
   const parsed = schema.safeParse(value);
@@ -159,8 +173,68 @@ function normalizeDesiredLogin(value) {
 }
 
 async function requireAuth(request, reply) {
-  request.user = await authenticate(db, request);
-  if (!request.user) return reply.code(401).send({ error: 'Sessão expirada. Entre novamente.' });
+  const authenticated = await authenticate(db, request);
+  if (!authenticated) return reply.code(401).send({ error: 'Sessão expirada. Entre novamente.' });
+  request.user = publicUser(authenticated);
+  request.session = {
+    id: authenticated.session_id,
+    stepUpUntil: authenticated.step_up_until || null,
+    stepUpCapability: authenticated.step_up_capability || null
+  };
+}
+
+async function auditAuthorizationDenied(request, code, capability = null) {
+  try {
+    await audit(db, {
+      actorType: 'user',
+      actorId: request.user?.id || null,
+      action: 'auth.authorization_denied',
+      entityType: 'route',
+      entityId: request.routeOptions?.url || request.url,
+      after: { code, capability },
+      ip: request.ip
+    });
+  } catch (error) {
+    request.log.warn({ error: error.message, code, capability }, 'Falha ao auditar acesso negado');
+  }
+}
+
+async function requireTrustedMutationOrigin(request, reply) {
+  if (isTrustedMutationOrigin(request, config.PUBLIC_BASE_URL)) return;
+  await auditAuthorizationDenied(request, 'ORIGIN_DENIED');
+  return reply.code(403).send({
+    error: 'Origem da operação administrativa não autorizada.',
+    code: 'ORIGIN_DENIED'
+  });
+}
+
+function requireCapability(capability, { stepUp = false } = {}) {
+  return async function capabilityGuard(request, reply) {
+    const failure = authorizationFailure(request.user, request.session, capability, { stepUp });
+    if (failure?.code === 'CAPABILITY_DENIED') {
+      await auditAuthorizationDenied(request, failure.code, capability);
+      return reply.code(403).send({
+        error: 'Seu perfil não possui permissão para esta operação.',
+        code: failure.code
+      });
+    }
+    if (failure?.code === 'STEP_UP_REQUIRED') {
+      await auditAuthorizationDenied(request, failure.code, capability);
+      return reply.code(403).send({
+        error: 'Confirme sua senha para concluir esta operação crítica.',
+        code: failure.code,
+        capability
+      });
+    }
+  };
+}
+
+function protect(capability, { mutation = false, stepUp = false } = {}) {
+  return [
+    requireAuth,
+    ...(mutation ? [requireTrustedMutationOrigin] : []),
+    requireCapability(capability, { stepUp })
+  ];
 }
 
 function requireQueues(reply) {
@@ -271,13 +345,61 @@ app.post(
   }
 );
 
-app.post('/api/auth/logout', { preHandler: requireAuth }, async (request, reply) => {
+app.post('/api/auth/logout', { preHandler: [requireAuth, requireTrustedMutationOrigin] }, async (request, reply) => {
   await logout(db, request);
   clearSessionCookie(reply);
   return { ok: true };
 });
 
 app.get('/api/auth/me', { preHandler: requireAuth }, async (request) => ({ user: request.user }));
+
+app.post(
+  '/api/auth/step-up',
+  {
+    preHandler: [requireAuth, requireTrustedMutationOrigin],
+    config: { rateLimit: { max: 5, timeWindow: '15 minutes' } }
+  },
+  async (request, reply) => {
+    const body = parse(z.object({
+      password: z.string().min(1).max(200),
+      capability: z.enum(Object.values(CAPABILITIES))
+    }), request.body);
+    const capabilityFailure = authorizationFailure(
+      request.user,
+      request.session,
+      body.capability
+    );
+    if (capabilityFailure) {
+      await auditAuthorizationDenied(request, capabilityFailure.code, body.capability);
+      return reply.code(403).send({
+        error: 'Seu perfil não possui permissão para esta operação.',
+        code: capabilityFailure.code
+      });
+    }
+    const stepUp = await grantStepUp(db, {
+      userId: request.user.id,
+      sessionId: request.session.id,
+      password: body.password,
+      capability: body.capability
+    });
+    if (!stepUp) {
+      await auditAuthorizationDenied(request, 'STEP_UP_INVALID');
+      return reply.code(401).send({ error: 'Senha inválida.', code: 'STEP_UP_INVALID' });
+    }
+    request.session.stepUpUntil = stepUp.stepUpUntil;
+    request.session.stepUpCapability = stepUp.capability;
+    await audit(db, {
+      actorType: 'user',
+      actorId: request.user.id,
+      action: 'auth.step_up_granted',
+      entityType: 'session',
+      entityId: request.session.id,
+      after: { capability: stepUp.capability },
+      ip: request.ip
+    });
+    return { ok: true, stepUpUntil: stepUp.stepUpUntil };
+  }
+);
 
 app.get('/api/public/plans', async () => {
   const result = await db.query(
@@ -1034,7 +1156,7 @@ app.post('/webhooks/mercadopago', async (request, reply) => {
   return { received: true };
 });
 
-app.get('/api/admin/summary', { preHandler: requireAuth }, async () => {
+app.get('/api/admin/summary', { preHandler: protect(CAPABILITIES.DASHBOARD_READ) }, async () => {
   const [customers, charges, renewals, leads, revenue, settings] = await Promise.all([
     db.query("SELECT count(*)::int AS total FROM customers WHERE status <> 'cancelled'"),
     db.query(
@@ -1075,7 +1197,7 @@ app.get('/api/admin/summary', { preHandler: requireAuth }, async () => {
   };
 });
 
-app.get('/api/admin/analytics', { preHandler: requireAuth }, async () => {
+app.get('/api/admin/analytics', { preHandler: protect(CAPABILITIES.DASHBOARD_READ) }, async () => {
   const [
     revenueTrend,
     chargeStatus,
@@ -1194,12 +1316,12 @@ app.get('/api/admin/analytics', { preHandler: requireAuth }, async () => {
   };
 });
 
-app.get('/api/admin/plans', { preHandler: requireAuth }, async () => {
+app.get('/api/admin/plans', { preHandler: protect(CAPABILITIES.CATALOG_READ) }, async () => {
   const result = await db.query('SELECT * FROM plans ORDER BY sort_order');
   return { plans: result.rows };
 });
 
-app.get('/api/admin/content-updates', { preHandler: requireAuth }, async () => {
+app.get('/api/admin/content-updates', { preHandler: protect(CAPABILITIES.CATALOG_READ) }, async () => {
   const [posts, status] = await Promise.all([
     latestTelegramContent(db, 20),
     getSetting(db, 'telegram_content_sync', null)
@@ -1207,7 +1329,9 @@ app.get('/api/admin/content-updates', { preHandler: requireAuth }, async () => {
   return { posts, status };
 });
 
-app.post('/api/admin/content-updates/sync', { preHandler: requireAuth }, async (request) => {
+app.post('/api/admin/content-updates/sync', {
+  preHandler: protect(CAPABILITIES.CATALOG_SYNC, { mutation: true })
+}, async (request) => {
   const result = await syncTelegramContent(db, { sourceUrl: config.TELEGRAM_CONTENT_URL });
   await audit(db, {
     actorType: 'user',
@@ -1220,7 +1344,9 @@ app.post('/api/admin/content-updates/sync', { preHandler: requireAuth }, async (
   return { ok: true, ...result };
 });
 
-app.post('/api/admin/customers/:id/payment-link', { preHandler: requireAuth }, async (request, reply) => {
+app.post('/api/admin/customers/:id/payment-link', {
+  preHandler: protect(CAPABILITIES.CUSTOMER_PAYMENT_LINK_CREATE, { mutation: true })
+}, async (request, reply) => {
   const body = parse(
     z.object({
       planCode: z.enum(['monthly', 'quarterly', 'semiannual', 'annual'])
@@ -1260,7 +1386,7 @@ app.post('/api/admin/customers/:id/payment-link', { preHandler: requireAuth }, a
   };
 });
 
-app.get('/api/admin/customers', { preHandler: requireAuth }, async (request) => {
+app.get('/api/admin/customers', { preHandler: protect(CAPABILITIES.CUSTOMER_READ) }, async (request) => {
   const search = String(request.query?.search || '').trim();
   const stage = String(request.query?.stage || '').trim();
   const status = String(request.query?.status || '').trim();
@@ -1292,7 +1418,9 @@ app.get('/api/admin/customers', { preHandler: requireAuth }, async (request) => 
   };
 });
 
-app.post('/api/admin/customers/import-bitpanel', { preHandler: requireAuth }, async (request) => {
+app.post('/api/admin/customers/import-bitpanel', {
+  preHandler: protect(CAPABILITIES.CUSTOMER_BITPANEL_SYNC, { mutation: true, stepUp: true })
+}, async (request) => {
   const body = parse(
     z.object({
       customers: z.array(z.object({
@@ -1386,7 +1514,9 @@ app.post('/api/admin/customers/import-bitpanel', { preHandler: requireAuth }, as
   return stats;
 });
 
-app.post('/api/admin/customers/sync-bitpanel', { preHandler: requireAuth }, async (request) => {
+app.post('/api/admin/customers/sync-bitpanel', {
+  preHandler: protect(CAPABILITIES.CUSTOMER_BITPANEL_SYNC, { mutation: true, stepUp: true })
+}, async (request) => {
   try {
     const runtimeConfig = {
       ...(await getRuntimeConfig(db, config)),
@@ -1423,7 +1553,9 @@ app.post('/api/admin/customers/sync-bitpanel', { preHandler: requireAuth }, asyn
   }
 });
 
-app.post('/api/admin/customers', { preHandler: requireAuth }, async (request, reply) => {
+app.post('/api/admin/customers', {
+  preHandler: protect(CAPABILITIES.CUSTOMER_WRITE, { mutation: true })
+}, async (request, reply) => {
   const body = parse(
     z.object({
       name: z.string().min(2).max(120),
@@ -1492,7 +1624,9 @@ app.post('/api/admin/customers', { preHandler: requireAuth }, async (request, re
   });
 });
 
-app.patch('/api/admin/customers/operational-stage', { preHandler: requireAuth }, async (request) => {
+app.patch('/api/admin/customers/operational-stage', {
+  preHandler: protect(CAPABILITIES.CUSTOMER_STAGE_WRITE, { mutation: true })
+}, async (request) => {
   const body = parse(
     z.object({
       customerIds: z.array(z.uuid()).min(1).max(300),
@@ -1521,7 +1655,9 @@ app.patch('/api/admin/customers/operational-stage', { preHandler: requireAuth },
   return { ok: true, updated: result.rowCount };
 });
 
-app.patch('/api/admin/customers/:id', { preHandler: requireAuth }, async (request, reply) => {
+app.patch('/api/admin/customers/:id', {
+  preHandler: protect(CAPABILITIES.CUSTOMER_WRITE, { mutation: true })
+}, async (request, reply) => {
   const body = parse(
     z.object({
       name: z.string().max(120).optional(),
@@ -1633,7 +1769,9 @@ app.patch('/api/admin/customers/:id', { preHandler: requireAuth }, async (reques
   return { ok: true };
 });
 
-app.delete('/api/admin/customers/:id', { preHandler: requireAuth }, async (request, reply) => {
+app.delete('/api/admin/customers/:id', {
+  preHandler: protect(CAPABILITIES.CUSTOMER_DELETE, { mutation: true, stepUp: true })
+}, async (request, reply) => {
   const result = await db.query(
     'DELETE FROM customers WHERE id = $1 RETURNING id, name, bitpanel_reference',
     [request.params.id]
@@ -1647,7 +1785,9 @@ app.delete('/api/admin/customers/:id', { preHandler: requireAuth }, async (reque
   return { ok: true };
 });
 
-app.post('/api/admin/customers/:id/portal-link', { preHandler: requireAuth }, async (request, reply) => {
+app.post('/api/admin/customers/:id/portal-link', {
+  preHandler: protect(CAPABILITIES.CUSTOMER_PORTAL_LINK_CREATE, { mutation: true })
+}, async (request, reply) => {
   const portalToken = randomToken(24);
   const result = await db.query(
     `UPDATE customers
@@ -1672,7 +1812,9 @@ app.post('/api/admin/customers/:id/portal-link', { preHandler: requireAuth }, as
   };
 });
 
-app.post('/api/admin/customers/import', { preHandler: requireAuth }, async (request) => {
+app.post('/api/admin/customers/import', {
+  preHandler: protect(CAPABILITIES.CUSTOMER_BULK_IMPORT, { mutation: true, stepUp: true })
+}, async (request) => {
   const body = parse(
     z.object({
       customers: z
@@ -1809,7 +1951,9 @@ app.post('/api/admin/customers/import', { preHandler: requireAuth }, async (requ
   return stats;
 });
 
-app.post('/api/admin/customers/import-spreadsheet', { preHandler: requireAuth }, async (request) => {
+app.post('/api/admin/customers/import-spreadsheet', {
+  preHandler: protect(CAPABILITIES.CUSTOMER_BULK_IMPORT, { mutation: true, stepUp: true })
+}, async (request) => {
   const upload = await request.file();
   if (!upload) throw Object.assign(new Error('Selecione uma planilha.'), { statusCode: 400 });
   if (!/\.(xlsx|xls)$/i.test(upload.filename || '')) {
@@ -1831,7 +1975,7 @@ app.post('/api/admin/customers/import-spreadsheet', { preHandler: requireAuth },
   return { ...response, rows: customers.length };
 });
 
-app.get('/api/admin/charges', { preHandler: requireAuth }, async (request) => {
+app.get('/api/admin/charges', { preHandler: protect(CAPABILITIES.BILLING_READ) }, async (request) => {
   const status = String(request.query?.status || '');
   const result = await db.query(
     `SELECT ch.id, ch.stage, ch.status, ch.amount_cents, ch.due_on::text,
@@ -1854,7 +1998,9 @@ app.get('/api/admin/charges', { preHandler: requireAuth }, async (request) => {
   };
 });
 
-app.post('/api/admin/billing/scan', { preHandler: requireAuth }, async (request) => {
+app.post('/api/admin/billing/scan', {
+  preHandler: protect(CAPABILITIES.BILLING_SCAN, { mutation: true, stepUp: true })
+}, async (request) => {
   const stats = await scanBilling(db, { timezone: config.TIMEZONE });
   await audit(db, {
     actorType: 'user',
@@ -1867,7 +2013,9 @@ app.post('/api/admin/billing/scan', { preHandler: requireAuth }, async (request)
   return stats;
 });
 
-app.post('/api/admin/charges/:id/approve', { preHandler: requireAuth }, async (request, reply) => {
+app.post('/api/admin/charges/:id/approve', {
+  preHandler: protect(CAPABILITIES.BILLING_APPROVE, { mutation: true, stepUp: true })
+}, async (request, reply) => {
   if (!requireQueues(reply)) return;
   const result = await db.query(
     `UPDATE charges
@@ -1899,7 +2047,9 @@ app.post('/api/admin/charges/:id/approve', { preHandler: requireAuth }, async (r
   return { ok: true, queued: true };
 });
 
-app.post('/api/admin/charges/:id/reject', { preHandler: requireAuth }, async (request, reply) => {
+app.post('/api/admin/charges/:id/reject', {
+  preHandler: protect(CAPABILITIES.BILLING_APPROVE, { mutation: true, stepUp: true })
+}, async (request, reply) => {
   const result = await db.query(
     `UPDATE charges SET status = 'rejected', updated_at = now()
       WHERE id = $1 AND status IN ('draft', 'awaiting_approval')
@@ -1918,7 +2068,9 @@ app.post('/api/admin/charges/:id/reject', { preHandler: requireAuth }, async (re
   return { ok: true };
 });
 
-app.post('/api/admin/charges/:id/mark-paid', { preHandler: requireAuth }, async (request, reply) => {
+app.post('/api/admin/charges/:id/mark-paid', {
+  preHandler: protect(CAPABILITIES.BILLING_MARK_PAID, { mutation: true, stepUp: true })
+}, async (request, reply) => {
   const marked = await markPaymentApproved(db, request.params.id, { id: `MANUAL-${Date.now()}` });
   const automation = await maybeQueueBitPanelJob(marked.renewalId, request.user.id);
   await audit(db, {
@@ -1932,7 +2084,7 @@ app.post('/api/admin/charges/:id/mark-paid', { preHandler: requireAuth }, async 
   return reply.send({ ok: true, duplicate: marked.duplicate, automation });
 });
 
-app.get('/api/admin/renewals', { preHandler: requireAuth }, async () => {
+app.get('/api/admin/renewals', { preHandler: protect(CAPABILITIES.RENEWAL_READ) }, async () => {
   const result = await db.query(
     `SELECT r.id, r.status, r.attempts, r.before_expiry, r.after_expiry, r.error,
             r.created_at, ch.id AS charge_id, c.name AS customer_name,
@@ -1954,7 +2106,9 @@ app.get('/api/admin/renewals', { preHandler: requireAuth }, async () => {
   return { renewals: result.rows };
 });
 
-app.post('/api/admin/renewals/:id/approve', { preHandler: requireAuth }, async (request, reply) => {
+app.post('/api/admin/renewals/:id/approve', {
+  preHandler: protect(CAPABILITIES.RENEWAL_APPROVE, { mutation: true, stepUp: true })
+}, async (request, reply) => {
   if (!requireQueues(reply)) return;
   const result = await db.query(
     `UPDATE renewal_jobs r
@@ -1994,7 +2148,7 @@ app.post('/api/admin/renewals/:id/approve', { preHandler: requireAuth }, async (
   return { ok: true, queued: true };
 });
 
-app.get('/api/admin/leads', { preHandler: requireAuth }, async () => {
+app.get('/api/admin/leads', { preHandler: protect(CAPABILITIES.CRM_READ) }, async () => {
   const result = await db.query(
     `SELECT id, name, whatsapp_e164, source, campaign, desired_plan, status, created_at
        FROM leads ORDER BY created_at DESC LIMIT 500`
@@ -2004,7 +2158,7 @@ app.get('/api/admin/leads', { preHandler: requireAuth }, async () => {
   };
 });
 
-app.get('/api/admin/conversations', { preHandler: requireAuth }, async () => {
+app.get('/api/admin/conversations', { preHandler: protect(CAPABILITIES.CRM_READ) }, async () => {
   const result = await db.query(
     `SELECT c.id, c.name, c.whatsapp_e164, c.status, c.operational_stage,
             last_message.direction AS last_direction,
@@ -2039,7 +2193,7 @@ app.get('/api/admin/conversations', { preHandler: requireAuth }, async () => {
   };
 });
 
-app.get('/api/admin/identity-links', { preHandler: requireAuth }, async () => {
+app.get('/api/admin/identity-links', { preHandler: protect(CAPABILITIES.IDENTITY_READ) }, async () => {
   const result = await db.query(
     `SELECT link.id, link.whatsapp_e164, link.claimed_login, link.reason,
             link.confidence, link.created_at,
@@ -2057,7 +2211,9 @@ app.get('/api/admin/identity-links', { preHandler: requireAuth }, async () => {
   };
 });
 
-app.post('/api/admin/identity-links/:id/reject', { preHandler: requireAuth }, async (request) => {
+app.post('/api/admin/identity-links/:id/reject', {
+  preHandler: protect(CAPABILITIES.IDENTITY_RESOLVE, { mutation: true, stepUp: true })
+}, async (request) => {
   const id = parse(z.string().uuid(), request.params.id);
   const result = await db.query(
     `UPDATE customer_identity_links
@@ -2077,7 +2233,7 @@ app.post('/api/admin/identity-links/:id/reject', { preHandler: requireAuth }, as
   return { ok: true };
 });
 
-app.get('/api/admin/settings', { preHandler: requireAuth }, async () => {
+app.get('/api/admin/settings', { preHandler: protect(CAPABILITIES.SETTINGS_READ) }, async () => {
   const keys = [
     'global_pause',
     'sales_mode',
@@ -2114,7 +2270,9 @@ app.get('/api/admin/settings', { preHandler: requireAuth }, async () => {
   };
 });
 
-app.put('/api/admin/settings', { preHandler: requireAuth }, async (request) => {
+app.put('/api/admin/settings', {
+  preHandler: protect(CAPABILITIES.SETTINGS_WRITE, { mutation: true, stepUp: true })
+}, async (request) => {
   const body = parse(
     z.object({
       global_pause: z.boolean().optional(),
@@ -2218,7 +2376,9 @@ app.put('/api/admin/settings', { preHandler: requireAuth }, async (request) => {
   return { ok: true };
 });
 
-app.put('/api/admin/integrations/:provider', { preHandler: requireAuth }, async (request) => {
+app.put('/api/admin/integrations/:provider', {
+  preHandler: protect(CAPABILITIES.INTEGRATION_MANAGE, { mutation: true, stepUp: true })
+}, async (request) => {
   const provider = parse(
     z.enum(['mercadopago', 'whatsapp', 'bitpanel', 'openai']),
     request.params.provider
@@ -2237,7 +2397,9 @@ app.put('/api/admin/integrations/:provider', { preHandler: requireAuth }, async 
   return { ok: true };
 });
 
-app.post('/api/admin/integrations/bitpanel/session', { preHandler: requireAuth }, async (request) => {
+app.post('/api/admin/integrations/bitpanel/session', {
+  preHandler: protect(CAPABILITIES.INTEGRATION_BITPANEL_SESSION, { mutation: true, stepUp: true })
+}, async (request) => {
   const body = parse(
     z.object({ storageState: z.union([z.string().min(10), z.record(z.string(), z.unknown())]) }),
     request.body
@@ -2251,7 +2413,9 @@ app.post('/api/admin/integrations/bitpanel/session', { preHandler: requireAuth }
   return { ok: true, message: 'Sessão autenticada importada e protegida.' };
 });
 
-app.post('/api/admin/integrations/:provider/test', { preHandler: requireAuth }, async (request) => {
+app.post('/api/admin/integrations/:provider/test', {
+  preHandler: protect(CAPABILITIES.INTEGRATION_MANAGE, { mutation: true })
+}, async (request) => {
   const provider = parse(
     z.enum(['mercadopago', 'whatsapp', 'bitpanel', 'openai']),
     request.params.provider
@@ -2306,7 +2470,7 @@ app.post('/api/admin/integrations/:provider/test', { preHandler: requireAuth }, 
   return { ok: true, message: 'WhatsApp Cloud API conectado.' };
 });
 
-app.get('/api/admin/ai/history', { preHandler: requireAuth }, async (request) => {
+app.get('/api/admin/ai/history', { preHandler: protect(CAPABILITIES.AI_ADMIN_USE) }, async (request) => {
   const result = await db.query(
     `SELECT id, role, content, model, created_at
        FROM ai_messages
@@ -2321,7 +2485,7 @@ app.get('/api/admin/ai/history', { preHandler: requireAuth }, async (request) =>
 app.post(
   '/api/admin/ai/chat',
   {
-    preHandler: requireAuth,
+    preHandler: protect(CAPABILITIES.AI_ADMIN_USE, { mutation: true }),
     config: { rateLimit: { max: 20, timeWindow: '1 minute' } }
   },
   async (request) => {
@@ -2356,7 +2520,12 @@ app.post(
 
 app.post(
   '/api/admin/integrations/mercadopago/activate',
-  { preHandler: requireAuth },
+  {
+    preHandler: protect(CAPABILITIES.INTEGRATION_PAYMENT_ACTIVATE, {
+      mutation: true,
+      stepUp: true
+    })
+  },
   async (request) => {
     const runtimeConfig = await getRuntimeConfig(db, config);
     const readiness = getMercadoPagoReadiness(runtimeConfig);
@@ -2606,7 +2775,7 @@ app.setErrorHandler((error, request, reply) => {
 });
 
 async function start() {
-  await initializeDatabase(db, config);
+  await verifyDatabaseReady(db);
   await app.listen({ port: config.PORT, host: '0.0.0.0' });
   app.log.info({ port: config.PORT }, 'Gate One Pro iniciado');
 }
