@@ -1,3 +1,5 @@
+import { createCommandCenter } from './command-center.js';
+
 const state = {
   user: null,
   summary: null,
@@ -76,7 +78,8 @@ function showApp() {
 }
 
 const titles = {
-  dashboard: ['CENTRAL DE CONTROLE', 'Visão geral'],
+  dashboard: ['OPERAÇÕES AUTÔNOMAS', 'GATE Command Center'],
+  exceptions: ['INTERVENÇÃO HUMANA', 'Precisa de Você'],
   customers: ['BASE DE ASSINANTES', 'Clientes'],
   conversations: ['ATENDIMENTO HUMANIZADO', 'Atendimentos'],
   charges: ['APROVAÇÃO E PIX', 'Cobranças'],
@@ -86,6 +89,8 @@ const titles = {
   settings: ['SEGURANÇA E INTEGRAÇÕES', 'Configurações']
 };
 
+const commandCenter=createCommandCenter({api,navigate,canManage:()=>state.user?.role==='admin'});
+
 async function navigate(page) {
   $$('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.page === page));
   $$('.page').forEach((panel) => panel.classList.toggle('active', panel.dataset.pagePanel === page));
@@ -93,6 +98,9 @@ async function navigate(page) {
   $('#pageTitle').textContent = titles[page][1];
   $('#sidebar').classList.remove('open');
   if (page === 'dashboard') await loadDashboard();
+  if (page === 'exceptions') await commandCenter.inbox(true);
+  if (page === 'customers') await commandCenter.cases();
+  if (page === 'conversations') await commandCenter.conversations();
   if (page === 'customers') await loadCustomers();
   if (page === 'conversations') await loadConversations();
   if (page === 'charges') await loadCharges();
@@ -140,6 +148,7 @@ function stageTag(stage) {
 }
 
 async function loadDashboard() {
+  await commandCenter.dashboard();
   const [summary, charges, settings, analytics, planData] = await Promise.all([
     api('/api/admin/summary'),
     api('/api/admin/charges?status=awaiting_approval'),

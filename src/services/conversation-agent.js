@@ -31,7 +31,7 @@ function requestedScopes(intent) {
     return [...common, 'PAYMENT', 'RENEWAL'];
   }
   if (['SUPPORT_REQUEST', 'COMPLAINT', 'HUMAN_REQUEST', 'CANCELLATION_REQUEST'].includes(intent)) {
-    return [...common, 'RENEWAL', 'SUPPORT', 'MEMORY'];
+    return [...common, 'PAYMENT', 'RENEWAL', 'SUPPORT', 'MEMORY'];
   }
   return common;
 }
@@ -60,11 +60,12 @@ function resultFromStored(stored) {
 }
 
 export class GateConversationAgent {
-  constructor({ repository, registry, renewalAgent = new RenewalAgent(), logger = null } = {}) {
+  constructor({ repository, registry, renewalAgent = new RenewalAgent(), supportAgent = null, logger = null } = {}) {
     if (!repository || !registry) throw new Error('GateConversationAgent requer repository e tool registry.');
     this.repository = repository;
     this.registry = registry;
     this.renewalAgent = renewalAgent;
+    this.supportAgent = supportAgent;
     this.logger = logger;
   }
 
@@ -104,6 +105,7 @@ export class GateConversationAgent {
     let responseStatus = 'VALIDATED';
     let autonomous = true;
     let conversationState = null;
+    let supportEligible = null;
 
     try {
       if (intentResult.security_flags.includes('PROMPT_INJECTION')) {
@@ -190,6 +192,11 @@ export class GateConversationAgent {
             responseFacts = renewalResult.facts;
           } else if (intentResult.primary_intent === 'GREETING') {
             proposedAction = 'getCustomerContext';
+          } else if (this.supportAgent && ['SUPPORT_REQUEST','HUMAN_REQUEST','COMPLAINT','CANCELLATION_REQUEST'].includes(intentResult.primary_intent)) {
+            const support = await this.supportAgent.handle({turn:actionTurn,customerId,customer360,intentResult,text,
+              conversationId,contextSnapshotId:contextSnapshot.context_snapshot_id,correlationId,idempotencyKey,facts:responseFacts});
+            responseFacts=support.facts; outcome=support.outcome; autonomous=support.autonomous;
+            conversationState=support.conversationState; supportEligible=support.eligible; proposedAction='SupportAgent';
           } else if (intentResult.primary_intent === 'SUPPORT_REQUEST') {
             const subscription = await actionTurn.execute('getSubscription', { customer_id: customerId });
             const renewal = await actionTurn.execute('getRenewalStatus', {
@@ -323,7 +330,7 @@ export class GateConversationAgent {
         outcome,
         prompt_version: GATE_CONVERSATION_AGENT_PROMPT_VERSION,
         autonomous,
-        eligible_for_automation: AUTOMATION_ELIGIBLE.has(intentResult.primary_intent),
+        eligible_for_automation: supportEligible ?? AUTOMATION_ELIGIBLE.has(intentResult.primary_intent),
         idempotency_key: idempotencyKey,
         tool_calls: toolCalls
       });

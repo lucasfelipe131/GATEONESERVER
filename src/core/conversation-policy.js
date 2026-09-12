@@ -16,14 +16,14 @@ const INTENT_TOOL_ALLOWLIST = Object.freeze({
   EXPIRATION_QUERY: ['resolveCustomer', 'getCustomerContext', 'getExpiration'],
   RENEWAL_STATUS: ['resolveCustomer', 'getCustomerContext', 'getRenewalStatus', 'getPaymentStatus'],
   SUBSCRIPTION_QUERY: ['resolveCustomer', 'getCustomerContext', 'getSubscription', 'getExpiration'],
-  SUPPORT_REQUEST: ['resolveCustomer', 'getCustomerContext', 'getSubscription', 'getExpiration', 'getRenewalStatus', 'getOpenSupportCases', 'openSupportCase', 'requestHumanHandoff'],
+  SUPPORT_REQUEST: ['resolveCustomer', 'getCustomerContext', 'getSubscription', 'getExpiration', 'getPaymentStatus', 'getRenewalStatus', 'getOpenSupportCases', 'openSupportCase', 'requestHumanHandoff', 'prepareSupportCase', 'getValidatedSolution', 'executeSupportAction', 'verifySupportResult', 'recordResolutionResult', 'escalateSupportCase'],
   PLAN_QUERY: ['resolveCustomer', 'getCustomerContext', 'listPlans'],
   NEW_CUSTOMER: ['resolveCustomer', 'listPlans', 'requestHumanHandoff'],
   TRIAL_REQUEST: ['resolveCustomer', 'listPlans', 'requestHumanHandoff'],
-  CANCELLATION_REQUEST: ['resolveCustomer', 'getCustomerContext', 'requestHumanHandoff'],
+  CANCELLATION_REQUEST: ['resolveCustomer', 'getCustomerContext', 'requestHumanHandoff', 'prepareSupportCase','escalateSupportCase'],
   REFERRAL: ['resolveCustomer', 'getCustomerContext', 'requestHumanHandoff'],
-  HUMAN_REQUEST: ['resolveCustomer', 'getCustomerContext', 'requestHumanHandoff'],
-  COMPLAINT: ['resolveCustomer', 'getCustomerContext', 'getOpenSupportCases', 'requestHumanHandoff'],
+  HUMAN_REQUEST: ['resolveCustomer', 'getCustomerContext', 'requestHumanHandoff','prepareSupportCase','escalateSupportCase'],
+  COMPLAINT: ['resolveCustomer', 'getCustomerContext', 'getOpenSupportCases', 'requestHumanHandoff','prepareSupportCase','escalateSupportCase'],
   UNKNOWN: ['resolveCustomer', 'getCustomerContext', 'requestHumanHandoff']
 });
 

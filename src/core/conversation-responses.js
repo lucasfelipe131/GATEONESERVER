@@ -46,7 +46,7 @@ export function mergeResponseFacts(base, extra = {}) {
     'customer_id', 'customer_name', 'plan_name', 'subscription_status',
     'expiration', 'payment_status', 'renewal_status', 'checkout_url',
     'amount_cents', 'currency', 'support_case_id', 'handoff_id',
-    'context_status', 'plans', 'operation_state', 'error_code'
+    'context_status', 'plans', 'operation_state', 'error_code', 'exception_id', 'case_status', 'diagnosis', 'action_performed', 'verification_result'
   ]);
   return Object.freeze(Object.fromEntries(
     Object.entries({ ...base, ...extra }).filter(([key]) => allowedKeys.has(key))
@@ -146,6 +146,10 @@ export function renderConversationResponse({ intent, facts = {}, outcome = null 
     case 'RENEWAL_STATUS':
       return safeResponseForFacts(facts);
     case 'SUPPORT_REQUEST':
+      if (['RESOLVED','CLOSED'].includes(facts.case_status) && ['VERIFIED','HUMAN_VERIFIED'].includes(facts.verification_result)) {
+        return 'O caso foi resolvido e o resultado foi verificado. Registrei a solução no histórico do atendimento.';
+      }
+      if (facts.case_status === 'WAITING_CUSTOMER') return 'A ação foi registrada, mas ainda preciso que você confirme se o serviço voltou a funcionar. O caso continua aberto.';
       return facts.support_case_id
         ? 'Registrei o problema com o contexto da sua assinatura. A equipe poderá continuar sem pedir tudo novamente.'
         : 'Entendi o problema. Não vou enviar um menu comercial; preciso encaminhar o caso com o contexto correto.';
@@ -167,6 +171,9 @@ export function renderConversationResponse({ intent, facts = {}, outcome = null 
 export function validateConversationResponse(text, facts = {}) {
   const response = String(text || '').trim();
   const violations = [];
+  if (/caso (foi |est[aá] )?resolvido|problema (foi |est[aá] )?resolvido|servi[cç]o (voltou|normalizado)/i.test(response) &&
+      (!['RESOLVED','CLOSED'].includes(facts.case_status) || !['VERIFIED','HUMAN_VERIFIED'].includes(facts.verification_result))) violations.push('SUPPORT_RESOLUTION_NOT_VERIFIED');
+  if (/a[cç][aã]o foi (executada|registrada)/i.test(response) && !facts.action_performed) violations.push('SUPPORT_ACTION_NOT_CONFIRMED');
   if (facts.payment_status !== 'CONFIRMED' &&
       /pagamento\s+(foi |esta |consta |ja )?(confirmado|aprovado)|pagamento caiu|recebemos seu pagamento/i.test(response)) {
     violations.push('PAYMENT_CONFIRMATION_NOT_ALLOWED');

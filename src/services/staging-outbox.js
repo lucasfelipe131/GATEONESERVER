@@ -4,6 +4,7 @@ import { FakeProvisioningProvider } from '../core/provisioning-orchestrator.js';
 import { PgRenewalRepository, RenewalOrchestrator } from './renewal-orchestration.js';
 import { PgProvisioningRepository, ProvisioningOrchestrator } from './provisioning-orchestration.js';
 import { createPhase4EventHandlers } from './phase4-event-handlers.js';
+import { createSupportEventHandlers } from './support-event-handlers.js';
 
 export function startStagingOutbox({ db, env = process.env, workerId, logger = console }) {
   if (env.OUTBOX_DISPATCHER_ENABLED !== 'true') return null;
@@ -12,7 +13,7 @@ export function startStagingOutbox({ db, env = process.env, workerId, logger = c
       env.PAYMENT_MODE !== 'simulation' || env.WHATSAPP_MODE !== 'simulation') {
     throw new Error('OUTBOX_STAGING_GUARD_FAILED');
   }
-  const handlers = {};
+  const handlers = { ...createSupportEventHandlers() };
   for (const type of ['payment.confirmed', 'renewal.ready']) {
     handlers[type] = async (event, client) => {
       // All internal writes share the consumer-marker transaction. This adapter

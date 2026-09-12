@@ -178,6 +178,9 @@ function contextDb({ customerAPayments = null } = {}) {
       if (text.includes('FROM customer_issues')) {
         queryCustomers.push(customerId); return { rows: support[customerId] || [] };
       }
+      if (text.includes('FROM support_exceptions')) {
+        queryCustomers.push(customerId); return { rows: [] };
+      }
       if (text.includes('FROM customer_memories')) {
         queryCustomers.push(customerId); return { rows: memories[customerId] || [] };
       }

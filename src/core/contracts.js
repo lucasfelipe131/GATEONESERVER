@@ -177,6 +177,16 @@ export const CORE_EVENT_TYPES = Object.freeze([
   'conversation.handoff_requested',
   'notification.requested',
   'support.case_opened',
+  'support.triaged',
+  'support.resolution_attempted',
+  'support.verification_recorded',
+  'support.waiting_customer',
+  'support.human_required',
+  'exception.created',
+  'exception.acknowledged',
+  'exception.updated',
+  'exception.resolved',
+  'support.incident_candidate',
   'support.case_resolved'
 ]);
 
@@ -337,7 +347,7 @@ export const supportCaseContractSchema = z.object({
   customer_id: z.uuid(),
   category: z.string().min(1),
   summary: z.string().min(1),
-  status: z.enum(['OPEN', 'MONITORING', 'RESOLVED']),
+  status: z.enum(['OPEN', 'MONITORING', 'TRIAGING', 'AUTOMATED_RESOLUTION', 'WAITING_CUSTOMER', 'WAITING_SYSTEM', 'HUMAN_REQUIRED', 'RESOLVED', 'CLOSED']),
   correlation_id: z.uuid(),
   opened_at: z.string().min(1),
   resolved_at: z.string().nullable()
@@ -416,7 +426,9 @@ export const customer360Schema = z.object({
   conversation: z.record(z.string(), z.unknown()).nullable().optional(),
   support: z.object({
     open_cases: z.array(z.record(z.string(), z.unknown())),
-    last_case: z.record(z.string(), z.unknown()).nullable()
+    last_case: z.record(z.string(), z.unknown()).nullable(),
+    recent_cases: z.array(z.record(z.string(), z.unknown())).optional(),
+    exceptions: z.array(z.record(z.string(), z.unknown())).optional()
   }).optional(),
   memories: z.array(memoryRecordSchema).optional(),
   pending_actions: z.array(z.record(z.string(), z.unknown())).optional(),

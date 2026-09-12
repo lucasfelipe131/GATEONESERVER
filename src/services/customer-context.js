@@ -128,11 +128,12 @@ function sourceQueries(scopes, customerId, phone, { recentMessageLimit, memoryLi
                       ORDER BY created_at DESC LIMIT $2`, [customerId, recentMessageLimit]);
   }
   if (scopes.includes('SUPPORT') || scopes.includes('PENDING_ACTIONS')) {
-    add('support', `SELECT id, category, summary, status, occurrences, correlation_id,
+    add('support', `SELECT id, category, summary, status, occurrences, correlation_id, support_data,
                            first_reported_at, last_mentioned_at, resolved_at, updated_at
                       FROM customer_issues
                      WHERE customer_id = $1
                      ORDER BY last_mentioned_at DESC LIMIT 5`, [customerId]);
+    add('support_exceptions', `SELECT id, data FROM support_exceptions WHERE customer_id = $1 ORDER BY updated_at DESC LIMIT 5`, [customerId]);
   }
   if (scopes.includes('MEMORY')) {
     add('memories', `SELECT memory_id, customer_id, memory_type, memory_key, value, source,
@@ -533,7 +534,12 @@ export async function createCustomerContextSnapshot(db, {
       support_case_id: item.id,
       category: item.category,
       summary: item.summary,
-      status: upper(item.status),
+      status: item.support_data?.status || upper(item.status),
+      diagnosis: item.support_data?.diagnosis || null,
+      resolution: item.support_data?.resolution || null,
+      verification_result: item.support_data?.verification_result || null,
+      severity: item.support_data?.severity || null,
+      exception_id: item.support_data?.exception_id || null,
       occurrences: item.occurrences,
       correlation_id: item.correlation_id || null,
       opened_at: toIso(item.first_reported_at),
@@ -541,13 +547,19 @@ export async function createCustomerContextSnapshot(db, {
       resolved_at: toIso(item.resolved_at)
     }));
     customer360.support = {
-      open_cases: supportView.filter((item) => item.status !== 'RESOLVED'),
-      last_case: supportView[0] || null
+      open_cases: supportView.filter((item) => !['RESOLVED','CLOSED'].includes(item.status)),
+      last_case: supportView[0] || null,
+      recent_cases: supportView,
+      exceptions: (loaded.support_exceptions || []).map(item => ({exception_id:item.id,status:item.data.status,reason_code:item.data.reason_code,support_case_id:item.data.support_case_id,severity:item.data.severity,resolved_at:item.data.resolved_at}))
     };
     freshness.support = freshnessFor('support', support[0]?.last_mentioned_at, { now });
     for (const item of support) {
       sources.push(rowRef('customer_issues', item, item.last_mentioned_at));
       selectedRefs.push({ source: 'customer_issues', source_id: item.id });
+    }
+    for (const item of loaded.support_exceptions || []) {
+      sources.push(rowRef('support_exceptions', item, item.data.updated_at));
+      selectedRefs.push({source:'support_exceptions',source_id:item.id});
     }
   }
 

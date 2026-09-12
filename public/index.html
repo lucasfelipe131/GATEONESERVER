@@ -7,6 +7,7 @@
     <title>Gate One Pro — Central de Controle</title>
     <link rel="icon" type="image/png" href="/assets/gate-one-mark.png" />
     <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/command-center.css" />
   </head>
   <body>
     <section class="login-shell" id="loginShell">
@@ -46,6 +47,7 @@
         </div>
         <nav>
           <button class="nav-item active" data-page="dashboard"><span>◫</span> Visão geral</button>
+          <button class="nav-item" data-page="exceptions"><span>!</span> Precisa de Você</button>
           <button class="nav-item" data-page="customers"><span>◎</span> Clientes</button>
           <button class="nav-item" data-page="conversations"><span>◌</span> Atendimentos</button>
           <button class="nav-item" data-page="charges"><span>◇</span> Cobranças</button>
@@ -74,6 +76,14 @@
         </header>
 
         <section class="page active" data-page-panel="dashboard">
+          <div class="cc-overview">
+            <div class="cc-intro"><div><span class="eyebrow">OPERAÇÕES · SUPORTE · AUTONOMIA</span><h2>GATE COMMAND CENTER</h2><p>Resultados verificados, exceções com contexto e controle humano sobre o que importa.</p></div><span class="cc-environment">PASSO 06 · LOCAL / FAKE ONLY</span></div>
+            <div id="ccSummary" class="cc-metrics" aria-live="polite"></div>
+            <div class="cc-columns"><article class="cc-panel"><div class="panel-head"><h3>PRECISA DE VOCÊ</h3><button class="text-button" data-go="exceptions">Ver inbox →</button></div><div id="ccNeedsYou"></div></article>
+              <article class="cc-panel"><h3>O QUE O GATE FEZ SOZINHO</h3><p class="muted">Ações operacionais auditáveis · nenhum raciocínio interno</p><div id="ccActivity"></div><div class="cc-pagination"><button class="btn btn-secondary btn-small" id="ccActivityPrevious">Anterior</button><button class="btn btn-secondary btn-small" id="ccActivityNext">Próxima</button></div></article></div>
+            <h3>Autonomia com denominadores explícitos</h3><p class="muted">Elegíveis: solicitações identificadas sem exclusão de política. Falhas e casos sem solução conhecida permanecem no denominador.</p><div id="ccMetrics" class="cc-metrics"></div>
+          </div>
+          <details class="cc-legacy"><summary>Financeiro, catálogo e controles existentes</summary>
           <div class="hero">
             <div>
               <span class="eyebrow">GATE ONE PRO SERVER</span>
@@ -141,9 +151,22 @@
               <div id="integrationStatus" class="integration-list"></div>
             </article>
           </div>
+          </details>
+        </section>
+
+        <section class="page" data-page-panel="exceptions">
+          <div class="cc-intro"><div><span class="eyebrow">INTERVENÇÃO HUMANA</span><h2>PRECISA DE VOCÊ</h2><p>O contexto está preservado. Continue de onde o GATE parou.</p></div></div>
+          <form id="ccFilters" class="cc-filters"><label>Pendência<select name="human_required"><option value="true">Pendentes de humano</option><option value="false">Todos os registros</option></select></label>
+            <label>Status<select name="status"><option value="">Todos</option><option>OPEN</option><option>IN_PROGRESS</option><option>WAITING_CUSTOMER</option><option>RESOLVED</option><option>DISMISSED</option></select></label>
+            <label>Severidade<select name="severity"><option value="">Todas</option><option>LOW</option><option>MEDIUM</option><option>HIGH</option><option>CRITICAL</option></select></label>
+            <label>Categoria<select name="category"><option value="">Todas</option><option>SERVICE_UNAVAILABLE</option><option>PAYMENT</option><option>SUBSCRIPTION_STATUS</option><option>COMPLAINT</option><option>CANCELLATION</option><option>UNKNOWN</option></select></label>
+            <label>Aberto há<select name="age"><option value="">Qualquer tempo</option><option value="60">Mais de 1 hora</option><option value="1440">Mais de 24 horas</option></select></label>
+            <label>Customer ID<input name="customer_id" placeholder="UUID do cliente" /></label><button class="btn btn-primary" type="submit">Filtrar</button></form>
+          <article class="cc-panel"><div id="ccInbox" aria-live="polite"></div><div class="cc-pagination"><button class="btn btn-secondary" id="ccPrevious">Anterior</button><span id="ccPage">Página 1</span><button class="btn btn-secondary" id="ccNext">Próxima</button></div></article>
         </section>
 
         <section class="page" data-page-panel="customers">
+          <article class="cc-panel"><h3>Histórico de suporte e Customer 360</h3><div id="ccCases"></div><div class="cc-pagination"><button class="btn btn-secondary" id="ccCasesPrevious">Anterior</button><button class="btn btn-secondary" id="ccCasesNext">Próxima</button></div></article>
           <div class="section-actions">
             <div class="search"><span>⌕</span><input id="customerSearch" placeholder="Buscar nome ou WhatsApp" /></div>
             <button class="btn btn-success" id="syncBitPanelButton">↻ Sincronizar BitPanel</button>
@@ -194,6 +217,7 @@
         </section>
 
         <section class="page" data-page-panel="conversations">
+          <article class="cc-panel"><h3>Operações autônomas por atendimento</h3><div id="ccConversations"></div><div class="cc-pagination"><button class="btn btn-secondary" id="ccConversationsPrevious">Anterior</button><button class="btn btn-secondary" id="ccConversationsNext">Próxima</button></div></article>
           <div class="section-actions">
             <div>
               <h2>Atendimentos recentes</h2>
@@ -463,6 +487,8 @@
     </dialog>
 
     <div class="toast" id="toast"></div>
+    <dialog class="cc-dialog" id="ccDetailDialog" aria-label="Detalhe da exceção"><button class="btn btn-secondary cc-close" data-cc-close="ccDetailDialog">Fechar</button><div id="ccExceptionDetail"></div></dialog>
+    <dialog class="cc-dialog" id="ccCustomerDialog" aria-label="Customer 360"><button class="btn btn-secondary cc-close" data-cc-close="ccCustomerDialog">Fechar</button><div id="ccCustomerDetail"></div></dialog>
     <script src="/app.js" type="module"></script>
   </body>
 </html>

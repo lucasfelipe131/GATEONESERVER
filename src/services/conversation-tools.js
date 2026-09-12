@@ -6,7 +6,21 @@ function required(...fields) {
 
 const anyObject = (input) => Boolean(input && typeof input === 'object' && !Array.isArray(input));
 
+const supportTool = (name, fields, risk = 'LOW', actionClass = 'READ_ONLY') => Object.freeze({
+  name,domain:'SUPPORT',capability:actionClass==='READ_ONLY'?'support.case.read':'support.case.manage',risk,actionClass,
+  purpose:'Scoped support operation; no financial or arbitrary administrative execution.',
+  inputSchema:{required:['customer_id',...fields]},outputSchema:{type:'object'},validateInput:required('customer_id',...fields),
+  requiresCustomer:true,idempotency:actionClass==='READ_ONLY'?'READ_ONLY':'IDEMPOTENCY_KEY',timeoutMs:6000,
+  retryPolicy:{maxAttempts:1,safe:false},audit:'FULL_METADATA'
+});
+
 export const CONVERSATION_TOOL_DEFINITIONS = Object.freeze({
+  prepareSupportCase:supportTool('prepareSupportCase',['context','text','conversation_id','context_snapshot_id','correlation_id','idempotency_key'],'LOW','LOW_RISK_ACTION'),
+  getValidatedSolution:supportTool('getValidatedSolution',['support_case_id']),
+  executeSupportAction:supportTool('executeSupportAction',['support_case_id','knowledge_id','idempotency_key'],'MEDIUM','LOW_RISK_ACTION'),
+  verifySupportResult:supportTool('verifySupportResult',['support_case_id','receipt_id']),
+  recordResolutionResult:supportTool('recordResolutionResult',['support_case_id','receipt_id'],'LOW','LOW_RISK_ACTION'),
+  escalateSupportCase:supportTool('escalateSupportCase',['support_case_id','reason'],'LOW','LOW_RISK_ACTION'),
   resolveCustomer: Object.freeze({
     name: 'resolveCustomer', domain: 'CUSTOMER', capability: 'customer.identity.resolve', risk: 'LOW',
     purpose: 'Resolver uma identidade externa sem expor candidatos indevidos.',
@@ -111,7 +125,7 @@ function summarize(value) {
   const allowed = new Set([
     'status', 'decision', 'customer_id', 'subscription_id', 'payment_id',
     'renewal_id', 'charge_id', 'existing', 'duplicate', 'handoff_id',
-    'context_snapshot_id', 'error_code'
+    'context_snapshot_id', 'error_code', 'support_case_id', 'exception_id', 'case_status', 'verification_result', 'action_performed', 'knowledge_id'
   ]);
   return Object.fromEntries(Object.entries(value).filter(([key]) => allowed.has(key)));
 }
@@ -158,6 +172,10 @@ export class ConversationToolRegistry {
           calls.push({ tool: name, status: 'FAILED', policy: 'DENY', error_code: error.code });
           throw error;
         }
+        if (customerId && input.customer_id && input.customer_id !== customerId) {
+          calls.push({tool:name,status:'DENIED',policy:'DENY',error_code:'CROSS_CUSTOMER_TOOL'});
+          throw Object.assign(new Error('Customer scope mismatch'),{code:'CROSS_CUSTOMER_TOOL'});
+        }
         const decision = this.policy.evaluate({
           tool,
           intentResult,
@@ -186,6 +204,8 @@ export class ConversationToolRegistry {
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           try {
             const data = await timeout(Promise.resolve(handler(input)), tool.timeoutMs, name);
+            const scope=customerId || input.customer_id;
+            if (scope && ((data?.customer_id && data.customer_id!==scope) || (data?.customer360?.customer_id && data.customer360.customer_id!==scope) || (Array.isArray(data)&&data.some(row=>row.customer_id&&row.customer_id!==scope)))) throw Object.assign(new Error('Output customer mismatch'),{code:'CROSS_CUSTOMER_OUTPUT'});
             if (!validOutput(tool, data)) {
               throw Object.assign(new Error(`Output inválido para ${name}.`), {
                 code: 'TOOL_OUTPUT_INVALID'

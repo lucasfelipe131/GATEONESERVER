@@ -1,4 +1,9 @@
 export const CAPABILITIES = Object.freeze({
+  COMMAND_CENTER_READ: 'command-center.read',
+  SUPPORT_READ: 'support.read',
+  SUPPORT_MANAGE: 'support.manage',
+  EXCEPTIONS_READ: 'exceptions.read',
+  EXCEPTIONS_MANAGE: 'exceptions.manage',
   DASHBOARD_READ: 'dashboard.read',
   CATALOG_READ: 'catalog.read',
   CATALOG_SYNC: 'catalog.sync',
@@ -29,6 +34,9 @@ export const CAPABILITIES = Object.freeze({
 });
 
 const OPERATOR_CAPABILITIES = new Set([
+  CAPABILITIES.COMMAND_CENTER_READ,
+  CAPABILITIES.SUPPORT_READ,
+  CAPABILITIES.EXCEPTIONS_READ,
   CAPABILITIES.DASHBOARD_READ,
   CAPABILITIES.CATALOG_READ,
   CAPABILITIES.CUSTOMER_READ,

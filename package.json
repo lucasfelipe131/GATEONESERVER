@@ -17,6 +17,9 @@
     "seed": "node src/seed.js",
     "test": "node --test",
     "check": "node --check src/server.js && node --check src/worker.js && node --check src/authorization.js && node --check src/migrations.js && node --check src/core/contracts.js && node --check src/core/customer-context.js && node --check src/core/memory.js && node --check src/core/lifecycle.js && node --check src/core/renewal.js && node --check src/core/outbox.js && node --check src/core/billing-operations.js && node --check src/core/renewal-orchestrator.js && node --check src/core/provisioning-orchestrator.js && node --check src/core/notifications.js && node --check src/core/operational-metrics.js && node --check src/core/conversation-intents.js && node --check src/core/conversation-policy.js && node --check src/core/conversation-prompt.js && node --check src/core/conversation-responses.js && node --check src/core/conversation-metrics.js && node --check src/services/gate-core.js && node --check src/services/customer-context.js && node --check src/services/payment-watcher.js && node --check src/services/provisioning-orchestration.js && node --check src/services/renewal-orchestration.js && node --check src/services/phase4-event-handlers.js && node --check src/services/conversation-tools.js && node --check src/services/conversation-operations.js && node --check src/services/renewal-agent.js && node --check src/services/conversation-agent.js && node --check public/app.js && node --check public/portal.js",
+    "check:phase6": "node scripts/check-phase6.js",
+    "test:ui": "NODE_ENV=test node scripts/support-ui-check.js",
+    "test:phase6": "node --test test/support-phase6.test.js test/support-postgres.test.js test/command-center.test.js test/command-center-dom.test.js",
     "bitpanel:auth": "node scripts/bitpanel-auth.js"
   },
   "dependencies": {
@@ -36,5 +39,9 @@
     "qrcode": "1.5.4",
     "xlsx": "^0.18.5",
     "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "jsdom": "30.0.1"
   }
 }

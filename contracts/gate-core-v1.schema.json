@@ -280,6 +280,16 @@
             "conversation.handoff_requested",
             "notification.requested",
             "support.case_opened",
+            "support.triaged",
+            "support.resolution_attempted",
+            "support.verification_recorded",
+            "support.waiting_customer",
+            "support.human_required",
+            "exception.created",
+            "exception.acknowledged",
+            "exception.updated",
+            "exception.resolved",
+            "support.incident_candidate",
             "support.case_resolved"
           ]
         },

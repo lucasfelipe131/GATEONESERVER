@@ -1,4 +1,5 @@
 import { dirname, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
@@ -57,6 +58,10 @@ import {
 import { createCustomerContextSnapshot } from './services/customer-context.js';
 import { ConversationToolRegistry } from './services/conversation-tools.js';
 import { GateConversationAgent } from './services/conversation-agent.js';
+import { SupportAgent } from './services/support-agent.js';
+import { SupportOperations } from './services/support-operations.js';
+import { PgSupportRepository, localSupportEnabled } from './services/support-repository.js';
+import { PgCommandCenter, registerCommandCenter } from './services/command-center.js';
 import { PgConversationAgentRepository } from './services/conversation-operations.js';
 import { buildIdempotencyKey, renderChargeMessage } from './domain/billing.js';
 import {
@@ -255,6 +260,16 @@ function protect(capability, { mutation = false, stepUp = false } = {}) {
     ...(mutation ? [requireTrustedMutationOrigin] : []),
     requireCapability(capability, { stepUp })
   ];
+}
+
+// Phase 06 has no activation path in production or mutable staging.
+if (localSupportEnabled()) {
+  const supportRepository=new PgSupportRepository(db);
+  const operations=new SupportOperations({repository:supportRepository,logger:app.log});
+  registerCommandCenter(app,{protect,operations,readModel:new PgCommandCenter({db,repository:supportRepository,loadCustomer:async customerId=>{
+    const [conversation,payment]=await Promise.all(['CONVERSATION','PAYMENT'].map(purpose=>createCustomerContextSnapshot(db,{customerId,purpose,channel:'ADMIN',correlationId:randomUUID()})));
+    return {...conversation.customer360,financial:payment.customer360.financial,renewal:payment.customer360.renewal};
+  }})});
 }
 
 function requireQueues(reply) {
@@ -733,7 +748,9 @@ app.post('/api/v1/core/operations', async (request, reply) => {
         plan_code: z.enum(['monthly', 'quarterly', 'semiannual', 'annual']).optional()
       }), envelope.input);
       const repository = new PgConversationAgentRepository(db);
+      const supportOperations = localSupportEnabled() ? new SupportOperations({repository:new PgSupportRepository(db),logger:request.log}) : null;
       const registry = new ConversationToolRegistry({
+        maxToolCalls: supportOperations ? 12 : 8,
         handlers: {
           resolveCustomer: (toolInput) => resolveIdentity(db, toolInput),
           getCustomerContext: (toolInput) => createCustomerContextSnapshot(db, {
@@ -803,10 +820,11 @@ app.post('/api/v1/core/operations', async (request, reply) => {
           requestHumanHandoff: (toolInput) => repository.requestHandoff({
             ...toolInput,
             requested_by: { type: 'AGENT', id: 'gate-conversation-agent' }
-          })
+          }),
+          ...(supportOperations?.handlers() || {})
         }
       });
-      const agent = new GateConversationAgent({ repository, registry, logger: request.log });
+      const agent = new GateConversationAgent({ repository, registry, supportAgent:supportOperations ? new SupportAgent() : null, logger: request.log });
       data = await agent.process({
         conversationId: input.conversation_id,
         messageId: input.message.id,
