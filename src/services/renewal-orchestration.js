@@ -46,7 +46,7 @@ export class PgRenewalRepository {
             AND p.status = 'CONFIRMED'
             AND p.amount_cents = $10
          ON CONFLICT (payment_id) DO UPDATE SET updated_at = renewal_sagas.updated_at
-         RETURNING *, (xmax = 0) AS inserted`,
+         RETURNING *, previous_expiration::text, target_expiration::text, (xmax = 0) AS inserted`,
         [input.renewal_id, input.customer_id, input.subscription_id, input.payment_id,
           input.correlation_id, input.causation_id, input.previous_expiration,
           input.target_expiration, input.requested_extension_months,
@@ -60,7 +60,8 @@ export class PgRenewalRepository {
 
   async get(renewalId) {
     const result = await this.db.query(
-      `SELECT rs.*, p.status AS payment_status, p.amount_cents, p.customer_id AS payment_customer_id,
+      `SELECT rs.*, rs.previous_expiration::text, rs.target_expiration::text,
+              p.status AS payment_status, p.amount_cents, p.customer_id AS payment_customer_id,
               p.subscription_id AS payment_subscription_id,
               s.customer_id AS subscription_customer_id
          FROM renewal_sagas rs
@@ -95,7 +96,7 @@ export class PgRenewalRepository {
                 completed_at = CASE WHEN $3 = 'COMPLETED' THEN COALESCE(completed_at, now()) ELSE completed_at END,
                 last_error = $4, failure_class = $5, next_retry_at = $6, updated_at = now()
           WHERE renewal_id = $1 AND state = $2
-          RETURNING *`,
+          RETURNING *, previous_expiration::text, target_expiration::text`,
         [renewalId, from, to, reason, failure?.class || null, nextRetryAt]
       );
       if (!updated.rowCount) throw Object.assign(new Error('RENEWAL_CONCURRENT_TRANSITION'), {

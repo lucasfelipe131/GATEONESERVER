@@ -1,4 +1,5 @@
 import { eventEnvelopeSchema } from './contracts.js';
+import { createOutboxFailpoint } from './outbox-failpoint.js';
 
 export async function appendOutboxEvent(client, rawEvent) {
   const event = eventEnvelopeSchema.parse(rawEvent);
@@ -114,7 +115,10 @@ export async function markOutboxFailed(client, {
 }
 
 export class OutboxDispatcher {
-  constructor({ db, workerId, handlers = {}, maxAttempts = 8, logger = null }) {
+  constructor({ db, workerId, handlers = {}, consumerName = 'gate-core.v1', maxAttempts = 8, logger = null, env = process.env }) {
+    this.failpoint = createOutboxFailpoint(env);
+    if (!consumerName || !workerId) throw new Error('OUTBOX_IDENTITY_REQUIRED');
+    this.consumerName = consumerName;
     this.db = db;
     this.workerId = workerId;
     this.handlers = handlers;
@@ -135,8 +139,8 @@ export class OutboxDispatcher {
         if (!handler) throw Object.assign(new Error(`Consumer ausente: ${event.event_type}`), {
           code: 'CONSUMER_NOT_CONFIGURED'
         });
-        await consumeEventIdempotently(this.db, {
-          consumer: `${this.workerId}:${event.event_type}`,
+        const consumed = await consumeEventIdempotently(this.db, {
+          consumer: `${this.consumerName}:${event.event_type}`,
           event: {
             event_id: event.event_id,
             event_type: event.event_type,
@@ -148,13 +152,18 @@ export class OutboxDispatcher {
             subject: event.subject,
             payload: event.payload
           }
-        }, (_client, envelope) => handler(envelope));
-        await this.db.transaction((client) => markOutboxPublished(client, {
+        }, (client, envelope) => handler(envelope, client));
+        this.failpoint?.({ event, consumer: `${this.consumerName}:${event.event_type}`, workerId: this.workerId, consumed });
+        if (consumed.duplicate) this.logger?.info?.({ event_id: event.event_id, worker_id: this.workerId, consumer: `${this.consumerName}:${event.event_type}` }, 'IDEMPOTENT_NOOP');
+        const acknowledged = await this.db.transaction((client) => markOutboxPublished(client, {
           eventId: event.event_id,
           workerId: this.workerId,
           now
         }));
-        stats.published += 1;
+        if (acknowledged) {
+          stats.published += 1;
+          this.logger?.info?.({ event_id: event.event_id, worker_id: this.workerId, replay: consumed.duplicate }, 'OUTBOX_ACK');
+        }
       } catch (error) {
         const failure = await this.db.transaction((client) => markOutboxFailed(client, {
           eventId: event.event_id,
