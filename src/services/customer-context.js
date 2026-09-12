@@ -92,13 +92,17 @@ function sourceQueries(scopes, customerId, phone, { recentMessageLimit, memoryLi
                      ORDER BY ch.created_at DESC LIMIT 5`, [customerId]);
   }
   if (scopes.includes('RENEWAL') || scopes.includes('PENDING_ACTIONS')) {
-    add('renewals', `SELECT r.id, ch.subscription_id, r.payment_id, r.core_status,
+    add('renewals', `SELECT r.id, ch.subscription_id, r.payment_id,
+                            COALESCE(rs.state, r.core_status) AS core_status,
+                            rs.state AS saga_state, rs.target_expiration,
+                            rs.failure_class,
                             r.status AS legacy_status, r.previous_expiration,
                             r.requested_extension_months, r.completed_at,
                             r.failure_reason, r.correlation_id, r.created_at, r.updated_at
                        FROM renewal_jobs r
                        JOIN charges ch ON ch.id = r.charge_id
                       JOIN subscriptions s ON s.id = ch.subscription_id
+                       LEFT JOIN renewal_sagas rs ON rs.renewal_id = r.id
                       WHERE s.customer_id = $1
                         AND ch.subscription_id = (
                           SELECT id FROM subscriptions
@@ -140,7 +144,8 @@ function sourceQueries(scopes, customerId, phone, { recentMessageLimit, memoryLi
                       ORDER BY observed_at DESC LIMIT $2`, [customerId, Math.max(memoryLimit * 3, memoryLimit)]);
   }
   if (scopes.includes('PENDING_ACTIONS')) {
-    add('provisioning', `SELECT id, subscription_id, renewal_id, provider, operation, status,
+    add('provisioning', `SELECT id, subscription_id, renewal_id, provider, operation,
+                                COALESCE(orchestration_state, status) AS status,
                                 correlation_id, created_at, updated_at
                            FROM provisioning_operations
                           WHERE customer_id = $1
@@ -480,8 +485,9 @@ export async function createCustomerContextSnapshot(db, {
       { now }
     );
     for (const item of renewals) {
-      sources.push(rowRef('renewal_jobs', item, item.updated_at || item.created_at));
-      selectedRefs.push({ source: 'renewal_jobs', source_id: item.id });
+      const renewalSource = item.saga_state ? 'renewal_sagas' : 'renewal_jobs';
+      sources.push(rowRef(renewalSource, item, item.updated_at || item.created_at));
+      selectedRefs.push({ source: renewalSource, source_id: item.id });
     }
   }
 

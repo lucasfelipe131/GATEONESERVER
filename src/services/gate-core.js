@@ -217,3 +217,45 @@ export async function renewalReadiness(db, { customerId, subscriptionId = null }
   }
   return { ...state, status: state.renewal_status || 'READY' };
 }
+
+export async function renewalOperationStatus(db, { customerId, subscriptionId = null }) {
+  const result = await db.query(
+    `SELECT s.id AS subscription_id, p.id AS payment_id, p.status AS payment_status,
+            r.id AS renewal_id, COALESCE(rs.state, r.core_status) AS renewal_status,
+            rs.target_expiration::text, rs.last_error, rs.failure_class
+       FROM subscriptions s
+       LEFT JOIN LATERAL (
+         SELECT * FROM payments
+          WHERE customer_id = $1 AND subscription_id = s.id
+          ORDER BY created_at DESC LIMIT 1
+       ) p ON true
+       LEFT JOIN LATERAL (
+         SELECT r.* FROM renewal_jobs r
+          JOIN charges ch ON ch.id = r.charge_id
+          WHERE ch.subscription_id = s.id
+          ORDER BY r.created_at DESC LIMIT 1
+       ) r ON true
+       LEFT JOIN renewal_sagas rs ON rs.renewal_id = r.id
+      WHERE s.customer_id = $1
+        AND ($2::uuid IS NULL OR s.id = $2::uuid)
+      ORDER BY s.created_at DESC LIMIT 1`,
+    [customerId, subscriptionId]
+  );
+  if (!result.rows[0]) throw coreError('SUBSCRIPTION_NOT_FOUND', 'Assinatura não encontrada.');
+  const current = result.rows[0];
+  if (current.renewal_status === 'COMPLETED') {
+    return { ...current, decision: 'ALREADY_RENEWED' };
+  }
+  if (['REQUESTED', 'READY', 'PROCESSING', 'VERIFYING', 'RETRY_SCHEDULED'].includes(current.renewal_status)) {
+    return { ...current, decision: 'RENEWAL_ALREADY_IN_PROGRESS' };
+  }
+  if (current.renewal_status === 'HUMAN_ACTION_REQUIRED') {
+    return { ...current, decision: 'REQUIRES_ACTION' };
+  }
+  if (current.renewal_status === 'FAILED') return { ...current, decision: 'FAILED' };
+  if (current.payment_status === 'CONFIRMED') return { ...current, decision: 'READY' };
+  if (['CREATED', 'PENDING'].includes(current.payment_status)) {
+    return { ...current, decision: 'PAYMENT_PENDING' };
+  }
+  return { ...current, decision: 'PAYMENT_REQUIRED' };
+}

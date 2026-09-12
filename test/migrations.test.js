@@ -76,11 +76,12 @@ function createMigrationDb({ tables = [], applied = [], migrationTable = false }
 
 test('carrega baseline e migrations em ordem com checksum estável', async () => {
   const migrations = await loadMigrations();
-  assert.deepEqual(migrations.map((item) => item.version), ['0000', '0001', '0002', '0003']);
+  assert.deepEqual(migrations.map((item) => item.version), ['0000', '0001', '0002', '0003', '0004']);
   assert.equal(migrations[0].name, '0000_baseline.sql');
   assert.equal(migrations[1].name, '0001_session_step_up.sql');
   assert.equal(migrations[2].name, '0002_gate_core_contracts.sql');
   assert.equal(migrations[3].name, '0003_customer_context_memory.sql');
+  assert.equal(migrations[4].name, '0004_billing_renewal_orchestration.sql');
   assert.match(migrations[0].checksum, /^[a-f0-9]{64}$/);
   assert.equal(migrationChecksum(migrations[0].sql), migrations[0].checksum);
 });
@@ -147,6 +148,34 @@ test('Customer 360 e memória usam migration EXPAND compatível', async () => {
   );
 });
 
+test('Billing e Renewal usam migration 0004 EXPAND-only sem dados reais', async () => {
+  const migration = await readFile(
+    new URL('../database/migrations/0004_billing_renewal_orchestration.sql', import.meta.url),
+    'utf8'
+  );
+  for (const table of [
+    'payment_provider_events',
+    'payment_evidence',
+    'renewal_sagas',
+    'notification_requests',
+    'operational_transition_audit'
+  ]) {
+    assert.match(migration, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}\\s*\\(`));
+  }
+  assert.match(migration, /claimed_by/);
+  assert.match(migration, /next_attempt_at/);
+  assert.match(migration, /UNIQUE \(provider, external_event_id\)/);
+  assert.match(migration, /UNIQUE \(payment_id\)/);
+  assert.doesNotMatch(
+    migration,
+    /\b(?:DROP\s+(?:TABLE|COLUMN)|DELETE\s+FROM|TRUNCATE|RENAME\s+(?:TABLE|COLUMN))\b/i
+  );
+  assert.doesNotMatch(
+    migration,
+    /INSERT\s+INTO\s+(?:customers|subscriptions|payments|renewal_jobs|charges|plans)\b/i
+  );
+});
+
 test('web e worker apenas verificam migrations no startup', async () => {
   const [server, worker, init] = await Promise.all([
     readFile(new URL('../src/server.js', import.meta.url), 'utf8'),
@@ -169,10 +198,11 @@ test('migration do zero aplica baseline e mudanças uma única vez', async () =>
     '0000_baseline.sql',
     '0001_session_step_up.sql',
     '0002_gate_core_contracts.sql',
-    '0003_customer_context_memory.sql'
+    '0003_customer_context_memory.sql',
+    '0004_billing_renewal_orchestration.sql'
   ]);
   assert.deepEqual(second.executed, []);
-  assert.deepEqual(db.state.applied.map((item) => item.version), ['0000', '0001', '0002', '0003']);
+  assert.deepEqual(db.state.applied.map((item) => item.version), ['0000', '0001', '0002', '0003', '0004']);
   assert.equal((await migrationStatus(db)).ready, true);
   assert.equal((await verifyMigrations(db)).ready, true);
 });
@@ -195,9 +225,10 @@ test('adoção compatível registra baseline sem reexecutá-lo e aplica apenas p
   assert.deepEqual(result.executed, [
     '0001_session_step_up.sql',
     '0002_gate_core_contracts.sql',
-    '0003_customer_context_memory.sql'
+    '0003_customer_context_memory.sql',
+    '0004_billing_renewal_orchestration.sql'
   ]);
-  assert.deepEqual(db.state.applied.map((item) => item.version), ['0000', '0001', '0002', '0003']);
+  assert.deepEqual(db.state.applied.map((item) => item.version), ['0000', '0001', '0002', '0003', '0004']);
 });
 
 test('adoção recusa baseline incompleto e checksum divergente', async () => {

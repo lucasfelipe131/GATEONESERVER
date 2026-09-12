@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createBusinessEvent } from '../src/core/events.js';
-import { appendOutboxEvent, consumeEventIdempotently } from '../src/core/outbox.js';
+import {
+  appendOutboxEvent,
+  claimOutboxBatch,
+  consumeEventIdempotently,
+  markOutboxFailed,
+  markOutboxPublished
+} from '../src/core/outbox.js';
 
 const EVENT_ID = '10000000-0000-4000-8000-000000000001';
 const CORRELATION_ID = '20000000-0000-4000-8000-000000000002';
@@ -89,4 +95,53 @@ test('falha do handler libera o evento para reprocessamento transacional', async
     async () => 'ok'
   );
   assert.equal(retried.processed, true);
+});
+
+test('claim concorrente usa SKIP LOCKED, lease e incremento persistente', async () => {
+  const calls = [];
+  const client = {
+    async query(sql, params) {
+      calls.push({ sql: String(sql), params });
+      return { rows: [{ event_id: EVENT_ID, publish_attempts: 1 }] };
+    }
+  };
+  const claimed = await claimOutboxBatch(client, {
+    workerId: 'worker-a', limit: 10, now: new Date('2026-08-23T12:00:00.000Z')
+  });
+  assert.equal(claimed.length, 1);
+  assert.match(calls[0].sql, /FOR UPDATE SKIP LOCKED/);
+  assert.match(calls[0].sql, /claimed_at < .*interval '5 minutes'/s);
+  assert.match(calls[0].sql, /publish_attempts = publish_attempts \+ 1/);
+  assert.equal(calls[0].params[2], 'worker-a');
+});
+
+test('sucesso só é marcado pelo worker que possui o claim', async () => {
+  let sql;
+  const client = { async query(query) { sql = String(query); return { rowCount: 1 }; } };
+  assert.equal(await markOutboxPublished(client, {
+    eventId: EVENT_ID, workerId: 'worker-a', now: new Date()
+  }), true);
+  assert.match(sql, /claimed_by = \$2/);
+  assert.match(sql, /publish_status = 'PUBLISHED'/);
+});
+
+test('falha agenda backoff e exceder tentativas vira terminal visível', async () => {
+  const rows = [];
+  const client = {
+    async query(_sql, params) { rows.push(params); return { rowCount: 1 }; }
+  };
+  const now = new Date('2026-08-23T12:00:00.000Z');
+  const retry = await markOutboxFailed(client, {
+    eventId: EVENT_ID, workerId: 'worker-a', error: new Error('timeout'),
+    attempt: 2, maxAttempts: 3, now, baseDelayMs: 1000
+  });
+  assert.equal(retry.terminal, false);
+  assert.equal(retry.next_attempt_at.toISOString(), '2026-08-23T12:00:02.000Z');
+  const terminal = await markOutboxFailed(client, {
+    eventId: EVENT_ID, workerId: 'worker-a', error: new Error('permanente'),
+    attempt: 3, maxAttempts: 3, now
+  });
+  assert.equal(terminal.terminal, true);
+  assert.equal(terminal.next_attempt_at, null);
+  assert.equal(rows[1][4].toISOString(), now.toISOString());
 });

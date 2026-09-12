@@ -107,7 +107,9 @@ export const RENEWAL_STATUSES = Object.freeze([
   'VERIFYING',
   'COMPLETED',
   'FAILED',
-  'HUMAN_ACTION_REQUIRED'
+  'RETRY_SCHEDULED',
+  'HUMAN_ACTION_REQUIRED',
+  'CANCELLED'
 ]);
 
 export const PROVISIONING_STATUSES = Object.freeze([
@@ -115,7 +117,26 @@ export const PROVISIONING_STATUSES = Object.freeze([
   'PROCESSING',
   'COMPLETED',
   'FAILED',
+  'VERIFYING',
+  'RETRY_SCHEDULED',
   'HUMAN_ACTION_REQUIRED'
+]);
+
+export const PAYMENT_RECONCILIATION_STATUSES = Object.freeze([
+  'MATCHED',
+  'INTERNAL_STALE',
+  'EXTERNAL_STALE',
+  'DIVERGENT',
+  'REQUIRES_REVIEW'
+]);
+
+export const OPERATIONAL_FAILURE_CLASSES = Object.freeze([
+  'TRANSIENT',
+  'AUTHENTICATION',
+  'HUMAN_REQUIRED',
+  'BUSINESS_RULE',
+  'PERMANENT',
+  'UNKNOWN'
 ]);
 
 export const CORE_EVENT_TYPES = Object.freeze([
@@ -128,6 +149,11 @@ export const CORE_EVENT_TYPES = Object.freeze([
   'payment.pending',
   'payment.confirmed',
   'payment.failed',
+  'payment.expired',
+  'payment.cancelled',
+  'payment.refunded',
+  'payment.evidence_received',
+  'payment.review_required',
   'subscription.created',
   'subscription.activated',
   'subscription.expiring',
@@ -135,9 +161,13 @@ export const CORE_EVENT_TYPES = Object.freeze([
   'renewal.requested',
   'renewal.ready',
   'renewal.processing',
+  'renewal.verifying',
+  'renewal.retry_scheduled',
+  'renewal.human_action_required',
   'renewal.completed',
   'renewal.failed',
   'provisioning.requested',
+  'provisioning.processing',
   'provisioning.completed',
   'provisioning.failed',
   'provisioning.human_action_required',
@@ -145,6 +175,7 @@ export const CORE_EVENT_TYPES = Object.freeze([
   'message.received',
   'message.sent',
   'conversation.handoff_requested',
+  'notification.requested',
   'support.case_opened',
   'support.case_resolved'
 ]);
@@ -167,7 +198,11 @@ export const CORE_ERROR_CODES = Object.freeze([
   'INVALID_PURPOSE',
   'INVALID_TRANSITION',
   'PAYMENT_NOT_CONFIRMED',
+  'PAYMENT_REVIEW_REQUIRED',
+  'PAYMENT_CUSTOMER_MISMATCH',
+  'PAYMENT_SUBSCRIPTION_MISMATCH',
   'RENEWAL_ALREADY_COMPLETED',
+  'RENEWAL_ALREADY_IN_PROGRESS',
   'PROVIDER_UNAVAILABLE',
   'HUMAN_ACTION_REQUIRED',
   'INSUFFICIENT_CAPABILITY',
