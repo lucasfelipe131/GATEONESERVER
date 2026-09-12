@@ -41,6 +41,8 @@
   .safety-badge { display: flex; }
 }
 @media(max-width:600px) {
+  .topbar > div:not(.topbar-actions) { flex: 1 1 calc(100% - 56px); }
+  .topbar-actions { flex-basis: 100%; justify-content: flex-end; }
   .cc-environment { white-space: normal; }
   .cc-metric { padding: 13px; }
   .cc-metric small { letter-spacing: .035em; line-height: 1.5; }
