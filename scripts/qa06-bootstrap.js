@@ -41,7 +41,25 @@ export async function seedQa06(db, config) {
   return db.transaction(async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(600006)');
     const marker = await client.query("SELECT value FROM system_settings WHERE key='qa06_fixture_v1'");
-    if (marker.rows.length) return { seeded: false, marker: marker.rows[0].value };
+    if (marker.rows.length) {
+      const previous = marker.rows[0].value;
+      if (previous.version === 1) {
+        const ids = previous.results.map((r) => r.customer_id);
+        const synthetic = await client.query("SELECT id FROM customers WHERE id=ANY($1::uuid[]) AND source='qa06-synthetic'", [ids]);
+        if (synthetic.rows.length !== 8) throw new Error('QA06_FIXTURE_IDENTITY_GUARD');
+        await client.query("UPDATE customers SET name_confirmed_at=COALESCE(name_confirmed_at,now()) WHERE id=ANY($1::uuid[]) AND source='qa06-synthetic'", [ids]);
+        // Complete synthetic fixture metadata through the existing authoritative projection.
+        const scoped = { query: (sql, params) => client.query(sql, params), transaction: (fn) => fn(scoped) };
+        for (const id of ids) {
+          const { customer360 } = await createCustomerContextSnapshot(scoped, { customerId: id, purpose: 'CONVERSATION', channel: 'ADMIN', correlationId: randomUUID() });
+          await client.query("UPDATE customer_issues SET support_data=jsonb_set(support_data,'{context,identity}',$2::jsonb) WHERE customer_id=$1 AND support_data IS NOT NULL", [id, JSON.stringify(customer360.identity)]);
+          await client.query("UPDATE support_exceptions SET data=jsonb_set(data,'{context,identity}',$2::jsonb) WHERE customer_id=$1", [id, JSON.stringify(customer360.identity)]);
+        }
+        previous.version = 2;
+        await client.query("UPDATE system_settings SET value=$1::jsonb WHERE key='qa06_fixture_v1'", [JSON.stringify(previous)]);
+      }
+      return { seeded: false, marker: previous };
+    }
     const existing = await client.query('SELECT count(*)::int AS n FROM customers');
     if (existing.rows[0].n !== 0) throw new Error('QA06_REQUIRES_EMPTY_CUSTOMER_DATABASE');
     // All fixture writes commit atomically, including support effects and outbox.
@@ -56,7 +74,7 @@ export async function seedQa06(db, config) {
       const customers = [randomUUID(), randomUUID()];
       for (let index = 0; index < 2; index++) {
         const id = customers[index];
-        await client.query("INSERT INTO customers(id,name,whatsapp_e164,source,status,consent_contact) VALUES($1,$2,$3,'qa06-synthetic','active',false)",
+        await client.query("INSERT INTO customers(id,name,whatsapp_e164,source,status,consent_contact,name_confirmed_at) VALUES($1,$2,$3,'qa06-synthetic','active',false,now())",
           [id, `${names[group * 2 + index]} · sintético`, `fake-qa06-${group}-${index}`]);
         const subscription = randomUUID();
         await client.query("INSERT INTO subscriptions(id,customer_id,plan_id,status,starts_on,expires_on,provider) VALUES($1,$2,$3,'active','2026-01-01','2030-01-01','fake')", [subscription, id, plan]);
@@ -83,7 +101,7 @@ export async function seedQa06(db, config) {
         results.push({ customer_id: id, case_status: cases[0]?.status, outcome: result.outcome });
       }
     }
-    const markerValue = { version: 1, synthetic: true, customers: 8, results };
+    const markerValue = { version: 2, synthetic: true, customers: 8, results };
     await client.query("INSERT INTO system_settings(key,value) VALUES('qa06_fixture_v1',$1::jsonb)", [JSON.stringify(markerValue)]);
     return { seeded: true, marker: markerValue };
   });

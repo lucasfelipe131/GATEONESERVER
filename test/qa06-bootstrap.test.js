@@ -63,6 +63,11 @@ test('QA06 migration and synthetic fixtures seed once, with actual persisted sup
     assert.equal(summary.active_conversations, 8);
     assert.equal(summary.automatically_resolved, 2);
     assert.ok(summary.human_required >= 2);
+    assert.ok((await model.list('exceptions')).items.every((r) => r.customer_name.includes('sintético')));
+    await db.query("UPDATE system_settings SET value=jsonb_set(value,'{version}','1') WHERE key='qa06_fixture_v1'");
+    await db.query("UPDATE customers SET name_confirmed_at=NULL WHERE source='qa06-synthetic'");
+    assert.equal((await seedQa06(db, loadConfig(syntheticEnv))).marker.version, 2);
+    assert.ok((await model.list('exceptions')).items.every((r) => r.customer_name.includes('sintético')));
     assert.ok((await model.activity()).items.length > 0);
     assert.equal((await db.query('SELECT count(*)::int AS n FROM users')).rows[0].n, 1);
     assert.equal((await db.query('SELECT count(*)::int AS n FROM message_logs WHERE simulated')).rows[0].n, 16);
