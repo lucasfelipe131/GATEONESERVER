@@ -76,9 +76,10 @@ function createMigrationDb({ tables = [], applied = [], migrationTable = false }
 
 test('carrega baseline e migrations em ordem com checksum estável', async () => {
   const migrations = await loadMigrations();
-  assert.deepEqual(migrations.map((item) => item.version), ['0000', '0001']);
+  assert.deepEqual(migrations.map((item) => item.version), ['0000', '0001', '0002']);
   assert.equal(migrations[0].name, '0000_baseline.sql');
   assert.equal(migrations[1].name, '0001_session_step_up.sql');
+  assert.equal(migrations[2].name, '0002_gate_core_contracts.sql');
   assert.match(migrations[0].checksum, /^[a-f0-9]{64}$/);
   assert.equal(migrationChecksum(migrations[0].sql), migrations[0].checksum);
 });
@@ -103,6 +104,27 @@ test('step-up é uma migration aditiva', async () => {
   assert.doesNotMatch(migration, /\b(?:DROP|DELETE|TRUNCATE)\b/i);
 });
 
+test('GATE Core usa migration EXPAND sem remoção destrutiva', async () => {
+  const migration = await readFile(
+    new URL('../database/migrations/0002_gate_core_contracts.sql', import.meta.url),
+    'utf8'
+  );
+  for (const table of [
+    'customer_identities',
+    'payments',
+    'provisioning_operations',
+    'gate_event_outbox',
+    'gate_event_consumptions'
+  ]) {
+    assert.match(migration, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}\\s*\\(`));
+  }
+  assert.match(migration, /ALTER TABLE renewal_jobs[\s\S]*ADD COLUMN IF NOT EXISTS core_status text/);
+  assert.doesNotMatch(
+    migration,
+    /\b(?:DROP\s+(?:TABLE|COLUMN)|DELETE\s+FROM|TRUNCATE|RENAME\s+(?:TABLE|COLUMN))\b/i
+  );
+});
+
 test('web e worker apenas verificam migrations no startup', async () => {
   const [server, worker, init] = await Promise.all([
     readFile(new URL('../src/server.js', import.meta.url), 'utf8'),
@@ -121,9 +143,13 @@ test('migration do zero aplica baseline e mudanças uma única vez', async () =>
   const first = await migrateDatabase(db);
   const second = await migrateDatabase(db);
 
-  assert.deepEqual(first.executed, ['0000_baseline.sql', '0001_session_step_up.sql']);
+  assert.deepEqual(first.executed, [
+    '0000_baseline.sql',
+    '0001_session_step_up.sql',
+    '0002_gate_core_contracts.sql'
+  ]);
   assert.deepEqual(second.executed, []);
-  assert.deepEqual(db.state.applied.map((item) => item.version), ['0000', '0001']);
+  assert.deepEqual(db.state.applied.map((item) => item.version), ['0000', '0001', '0002']);
   assert.equal((await migrationStatus(db)).ready, true);
   assert.equal((await verifyMigrations(db)).ready, true);
 });
@@ -143,8 +169,8 @@ test('adoção compatível registra baseline sem reexecutá-lo e aplica apenas p
   const result = await migrateDatabase(db, { baselineExisting: true });
 
   assert.equal(result.baselineAdopted, true);
-  assert.deepEqual(result.executed, ['0001_session_step_up.sql']);
-  assert.deepEqual(db.state.applied.map((item) => item.version), ['0000', '0001']);
+  assert.deepEqual(result.executed, ['0001_session_step_up.sql', '0002_gate_core_contracts.sql']);
+  assert.deepEqual(db.state.applied.map((item) => item.version), ['0000', '0001', '0002']);
 });
 
 test('adoção recusa baseline incompleto e checksum divergente', async () => {

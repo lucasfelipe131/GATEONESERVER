@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   buildIdempotencyKey,
   classifyStage,
@@ -5,6 +6,9 @@ import {
   renderChargeMessage
 } from '../domain/billing.js';
 import { audit } from '../audit.js';
+import { createBusinessEvent } from '../core/events.js';
+import { paymentIdempotencyKey, renewalIdempotencyKey } from '../core/idempotency.js';
+import { appendOutboxEvent } from '../core/outbox.js';
 
 export async function scanBilling(
   db,
@@ -97,15 +101,64 @@ export async function markPaymentApproved(db, chargeId, payment) {
     if (!charge.rows[0]) throw new Error('Cobrança não encontrada.');
     if (charge.rows[0].status === 'paid') {
       const existingJob = await client.query(
-        'SELECT id FROM renewal_jobs WHERE charge_id = $1',
+        `SELECT r.id, r.payment_id
+           FROM renewal_jobs r WHERE r.charge_id = $1`,
         [chargeId]
       );
       return {
         duplicate: true,
         charge: charge.rows[0],
-        renewalId: existingJob.rows[0]?.id || null
+        renewalId: existingJob.rows[0]?.id || null,
+        paymentId: existingJob.rows[0]?.payment_id || null
       };
     }
+
+    const provider = String(
+      payment?.provider || (String(payment?.id || '').startsWith('MANUAL-') ? 'manual' : 'mercadopago')
+    ).toLowerCase();
+    const externalPaymentId = String(payment?.id || '').trim();
+    if (!externalPaymentId) throw new Error('Pagamento sem identificador externo.');
+    const correlationId = charge.rows[0].correlation_id || payment?.correlation_id || randomUUID();
+    const paymentKey = paymentIdempotencyKey(provider, externalPaymentId);
+    const persistedPayment = await client.query(
+      `INSERT INTO payments
+        (customer_id, subscription_id, charge_id, provider, external_payment_id,
+         amount_cents, currency, status, idempotency_key, correlation_id,
+         provider_payload, confirmed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'BRL', 'CONFIRMED', $7, $8, $9::jsonb, now())
+       ON CONFLICT (idempotency_key) DO UPDATE
+         SET updated_at = payments.updated_at
+       RETURNING id`,
+      [
+        charge.rows[0].customer_id,
+        charge.rows[0].subscription_id,
+        chargeId,
+        provider,
+        externalPaymentId,
+        charge.rows[0].amount_cents,
+        paymentKey,
+        correlationId,
+        JSON.stringify({
+          status: payment?.status || 'approved',
+          date_approved: payment?.date_approved || null
+        })
+      ]
+    );
+    const paymentId = persistedPayment.rows[0].id;
+    const confirmedEvent = createBusinessEvent({
+      eventType: 'payment.confirmed',
+      correlationId,
+      actor: { type: 'SERVICE', id: provider },
+      subject: { type: 'payment', id: paymentId },
+      payload: {
+        customer_id: charge.rows[0].customer_id,
+        subscription_id: charge.rows[0].subscription_id,
+        charge_id: chargeId,
+        amount_cents: charge.rows[0].amount_cents,
+        currency: 'BRL'
+      }
+    });
+    await appendOutboxEvent(client, confirmedEvent);
 
     const updated = await client.query(
       `UPDATE charges
@@ -117,13 +170,48 @@ export async function markPaymentApproved(db, chargeId, payment) {
         RETURNING *`,
       [chargeId, payment?.id ? String(payment.id) : null]
     );
-    const renewalJob = await client.query(
-      `INSERT INTO renewal_jobs (charge_id, status)
-       VALUES ($1, 'awaiting_approval')
-       ON CONFLICT (charge_id) DO UPDATE SET updated_at = renewal_jobs.updated_at
-       RETURNING id`,
-      [chargeId]
+    const renewalKey = renewalIdempotencyKey(
+      charge.rows[0].customer_id,
+      charge.rows[0].subscription_id,
+      paymentId
     );
+    const renewalJob = await client.query(
+      `INSERT INTO renewal_jobs
+        (charge_id, status, payment_id, core_status, previous_expiration,
+         requested_extension_months, idempotency_key, correlation_id)
+       VALUES ($1, 'awaiting_approval', $2, 'READY',
+         (SELECT expires_on FROM subscriptions WHERE id = $3), $4, $5, $6)
+       ON CONFLICT (charge_id) DO UPDATE
+         SET payment_id = COALESCE(renewal_jobs.payment_id, EXCLUDED.payment_id),
+             core_status = CASE
+               WHEN renewal_jobs.core_status = 'COMPLETED' THEN renewal_jobs.core_status
+               ELSE 'READY'
+             END,
+             idempotency_key = COALESCE(renewal_jobs.idempotency_key, EXCLUDED.idempotency_key),
+             correlation_id = COALESCE(renewal_jobs.correlation_id, EXCLUDED.correlation_id),
+             updated_at = now()
+       RETURNING id`,
+      [
+        chargeId,
+        paymentId,
+        charge.rows[0].subscription_id,
+        charge.rows[0].duration_months,
+        renewalKey,
+        correlationId
+      ]
+    );
+    await appendOutboxEvent(client, createBusinessEvent({
+      eventType: 'renewal.ready',
+      correlationId,
+      causationId: confirmedEvent.event_id,
+      actor: { type: 'SYSTEM', id: 'gate-core' },
+      subject: { type: 'renewal', id: renewalJob.rows[0].id },
+      payload: {
+        customer_id: charge.rows[0].customer_id,
+        subscription_id: charge.rows[0].subscription_id,
+        payment_id: paymentId
+      }
+    }));
     await client.query(
       `UPDATE leads SET status = 'converted', updated_at = now()
         WHERE whatsapp_e164 = (
@@ -150,7 +238,8 @@ export async function markPaymentApproved(db, chargeId, payment) {
     return {
       duplicate: false,
       charge: updated.rows[0],
-      renewalId: renewalJob.rows[0].id
+      renewalId: renewalJob.rows[0].id,
+      paymentId
     };
   });
 }

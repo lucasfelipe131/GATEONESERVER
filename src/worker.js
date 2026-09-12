@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Worker } from 'bullmq';
 import { CronJob } from 'cron';
 import { loadConfig } from './config.js';
@@ -27,6 +28,9 @@ import { getRuntimeConfig, saveBitPanelStorageState } from './integrations/runti
 import { answerCustomerQuestion } from './services/ai-support.js';
 import { syncTelegramContent } from './services/telegram-content.js';
 import { encryptSecret } from './security.js';
+import { createBusinessEvent } from './core/events.js';
+import { appendOutboxEvent } from './core/outbox.js';
+import { renewalExecutionDecision } from './core/renewal.js';
 
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL, { ssl: config.DATABASE_SSL });
@@ -347,13 +351,22 @@ async function processRenewal(job) {
   );
   const renewal = result.rows[0];
   if (!renewal) throw new Error('Renovação não encontrada.');
-  if (renewal.charge_status !== 'paid') {
+  const execution = renewalExecutionDecision({
+    coreStatus: renewal.core_status,
+    legacyStatus: renewal.status,
+    paymentStatus: renewal.charge_status,
+    approvedAt: renewal.approved_at,
+    requiresApproval: runtimeConfig.RENEWAL_REQUIRES_APPROVAL
+  });
+  if (execution.duplicate) return { duplicate: true, status: 'COMPLETED' };
+  if (execution.code === 'PAYMENT_NOT_CONFIRMED') {
     throw new Error('Pagamento não confirmado. Renovação bloqueada.');
   }
-  if (!renewal.approved_at && runtimeConfig.RENEWAL_REQUIRES_APPROVAL) {
+  if (execution.code === 'HUMAN_ACTION_REQUIRED') {
     throw new Error('Renovação não aprovada. Execução bloqueada.');
   }
   const operation = bitPanelOperationFor(renewal);
+  const correlationId = renewal.correlation_id || randomUUID();
   if (
     operation === 'renew' &&
     (!renewal.automation_eligible || !isGateOneOwner(renewal.bitpanel_owner))
@@ -371,11 +384,22 @@ async function processRenewal(job) {
     );
   }
 
-  await db.query(
-    `UPDATE renewal_jobs SET status = 'running', attempts = attempts + 1, updated_at = now()
-      WHERE id = $1`,
-    [renewal.id]
-  );
+  await db.transaction(async (client) => {
+    await client.query(
+      `UPDATE renewal_jobs
+          SET status = 'running', core_status = 'PROCESSING',
+              correlation_id = $2, attempts = attempts + 1, updated_at = now()
+        WHERE id = $1`,
+      [renewal.id, correlationId]
+    );
+    await appendOutboxEvent(client, createBusinessEvent({
+      eventType: 'renewal.processing',
+      correlationId,
+      actor: { type: 'WORKER', id: 'gate-one-renewals' },
+      subject: { type: 'renewal', id: renewal.id },
+      payload: { operation, attempt: Number(renewal.attempts || 0) + 1 }
+    }));
+  });
   try {
     const outcome =
       operation === 'provision'
@@ -388,14 +412,18 @@ async function processRenewal(job) {
       await client.query(
         `UPDATE renewal_jobs
             SET status = $2, before_expiry = $3, after_expiry = $4,
-                evidence_path = $5, error = NULL, updated_at = now()
+                evidence_path = $5,
+                core_status = $6,
+                completed_at = CASE WHEN $6 = 'COMPLETED' THEN now() ELSE completed_at END,
+                failure_reason = NULL, error = NULL, updated_at = now()
           WHERE id = $1`,
         [
           renewal.id,
           outcome.simulated ? 'simulated' : 'completed',
           outcome.beforeExpiry,
           outcome.afterExpiry,
-          outcome.evidencePath
+          outcome.evidencePath,
+          outcome.simulated ? 'VERIFYING' : 'COMPLETED'
         ]
       );
       if (!outcome.simulated) {
@@ -424,7 +452,8 @@ async function processRenewal(job) {
         );
         await client.query(
           `UPDATE customers
-          SET status = 'active',
+              SET status = 'active',
+                  lifecycle_status = 'ACTIVE',
                   operational_stage = 'ready',
                   bitpanel_reference = COALESCE($2, bitpanel_reference),
                   access_password_encrypted = COALESCE($4, access_password_encrypted),
@@ -456,6 +485,31 @@ async function processRenewal(job) {
             renewal.charge_id
           ]
         );
+        const provisioningEvent = createBusinessEvent({
+          eventType: 'provisioning.completed',
+          correlationId,
+          actor: { type: 'WORKER', id: 'gate-one-renewals' },
+          subject: { type: 'renewal', id: renewal.id },
+          payload: {
+            customer_id: renewal.customer_id,
+            operation,
+            provider: 'bitpanel'
+          }
+        });
+        await appendOutboxEvent(client, provisioningEvent);
+        await appendOutboxEvent(client, createBusinessEvent({
+          eventType: 'renewal.completed',
+          correlationId,
+          causationId: provisioningEvent.event_id,
+          actor: { type: 'WORKER', id: 'gate-one-renewals' },
+          subject: { type: 'renewal', id: renewal.id },
+          payload: {
+            customer_id: renewal.customer_id,
+            payment_id: renewal.payment_id || null,
+            previous_expiration: renewal.current_expiry,
+            current_expiration: subscription.rows[0]?.expires_on || outcome.afterExpiry
+          }
+        }));
         return subscription.rows[0]?.expires_on || outcome.afterExpiry;
       }
       return null;
@@ -518,11 +572,30 @@ async function processRenewal(job) {
     }
     return outcome;
   } catch (error) {
-    await db.query(
-      `UPDATE renewal_jobs SET status = 'manual_review', error = $2, updated_at = now()
-        WHERE id = $1`,
-      [renewal.id, error.message]
+    const humanAction = /captcha|autentica(?:ç|c)ão humana|interven(?:ç|c)ão|manual/i.test(
+      String(error.message || '')
     );
+    await db.transaction(async (client) => {
+      await client.query(
+        `UPDATE renewal_jobs
+            SET status = 'manual_review', core_status = $3,
+                failure_reason = $2, error = $2, updated_at = now()
+          WHERE id = $1`,
+        [renewal.id, error.message, humanAction ? 'HUMAN_ACTION_REQUIRED' : 'FAILED']
+      );
+      await appendOutboxEvent(client, createBusinessEvent({
+        eventType: humanAction ? 'provisioning.human_action_required' : 'renewal.failed',
+        correlationId,
+        actor: { type: 'WORKER', id: 'gate-one-renewals' },
+        subject: { type: 'renewal', id: renewal.id },
+        payload: {
+          customer_id: renewal.customer_id,
+          operation,
+          provider: 'bitpanel',
+          failure_code: humanAction ? 'HUMAN_ACTION_REQUIRED' : 'PROVIDER_UNAVAILABLE'
+        }
+      }));
+    });
     await audit(db, {
       action: `bitpanel.${operation}_failed`,
       entityType: 'renewal_job',

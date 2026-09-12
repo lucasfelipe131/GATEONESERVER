@@ -26,6 +26,8 @@ import {
   isTrustedMutationOrigin
 } from './authorization.js';
 import { audit } from './audit.js';
+import { coreRequestSchema, coreResponse } from './core/contracts.js';
+import { authorizeCoreOperation } from './core/policy.js';
 import { createQueues, createRedis } from './queue.js';
 import {
   decryptSecret,
@@ -38,6 +40,12 @@ import {
   sha256
 } from './security.js';
 import { scanBilling, markPaymentApproved } from './services/billing.js';
+import {
+  getCustomerContext,
+  openSupportCase,
+  renewalReadiness,
+  resolveIdentity
+} from './services/gate-core.js';
 import { buildIdempotencyKey, renderChargeMessage } from './domain/billing.js';
 import {
   createCheckoutPreference,
@@ -487,7 +495,8 @@ async function createRenewalCheckout({
   customerId = null,
   phone = null,
   planCode = null,
-  source = 'renewal'
+  source = 'renewal',
+  correlationId = null
 }) {
   const runtimeConfig = {
     ...(await getRuntimeConfig(db, config)),
@@ -495,7 +504,8 @@ async function createRenewalCheckout({
   };
   const created = await db.transaction(async (client) => {
     const existing = await client.query(
-      `SELECT ch.id, ch.checkout_url, p.code AS plan_code, p.name AS plan_name,
+      `SELECT ch.id, ch.checkout_url, ch.correlation_id,
+              p.code AS plan_code, p.name AS plan_name,
               p.duration_months, ch.amount_cents, c.id AS customer_id, c.name,
               c.whatsapp_e164
          FROM charges ch
@@ -546,8 +556,8 @@ async function createRenewalCheckout({
     const inserted = await client.query(
       `INSERT INTO charges
         (subscription_id, plan_id, stage, status, amount_cents, due_on,
-         idempotency_key, message_text, approved_at)
-       VALUES ($1, $2, 'manual', 'approved', $3, CURRENT_DATE, $4, $5, now())
+         idempotency_key, message_text, approved_at, correlation_id)
+       VALUES ($1, $2, 'manual', 'approved', $3, CURRENT_DATE, $4, $5, now(), $6)
        ON CONFLICT (idempotency_key) DO NOTHING
        RETURNING id`,
       [
@@ -561,7 +571,8 @@ async function createRenewalCheckout({
           expiresOn: customer.expires_on,
           amountCents: customer.amount_cents,
           stage: 'manual'
-        })
+        }),
+        correlationId
       ]
     );
     const chargeId =
@@ -602,6 +613,125 @@ async function createRenewalCheckout({
   );
   return { ...created, checkout_url: preference.checkoutUrl, preference_id: preference.id };
 }
+
+function coreFailureResponse(envelope, error) {
+  const code = error?.code || 'PROVIDER_UNAVAILABLE';
+  const requiresAction = ['PAYMENT_NOT_CONFIRMED', 'HUMAN_ACTION_REQUIRED'].includes(code);
+  const denied = ['INSUFFICIENT_CAPABILITY', 'UNSUPPORTED_ACTION'].includes(code);
+  return coreResponse(envelope, {
+    status: denied ? 'DENIED' : requiresAction ? 'REQUIRES_ACTION' : 'FAILED',
+    error: {
+      code,
+      message: error?.message || 'A operação do GATE Core não pôde ser concluída.',
+      ...(error?.details ? { details: error.details } : {})
+    }
+  });
+}
+
+app.post('/api/v1/core/operations', async (request, reply) => {
+  if (!requireBotSecret(request, reply)) return;
+  const envelope = parse(coreRequestSchema, request.body);
+  if (envelope.actor.type !== 'SERVICE' || envelope.actor.id !== 'whatsapp') {
+    return reply.code(403).send(coreFailureResponse(envelope, Object.assign(
+      new Error('A identidade declarada não corresponde ao serviço autenticado.'),
+      { code: 'INSUFFICIENT_CAPABILITY' }
+    )));
+  }
+  const authorization = authorizeCoreOperation(envelope.actor, envelope.action);
+  if (!authorization.allowed) {
+    return reply.code(403).send(coreFailureResponse(envelope, Object.assign(
+      new Error('O serviço não possui capability para esta operação.'),
+      { code: authorization.code, details: authorization }
+    )));
+  }
+
+  try {
+    let data;
+    if (envelope.action === 'customer.resolve') {
+      const input = parse(z.object({
+        type: z.enum(['WHATSAPP', 'PHONE', 'EMAIL', 'LOGIN', 'PROVIDER_ACCOUNT', 'PARTNER_ID']),
+        value: z.string().min(1).max(500),
+        provider: z.string().min(1).max(100).optional()
+      }), envelope.input);
+      data = await resolveIdentity(db, input);
+    } else if (envelope.action === 'customer.context.get') {
+      data = await getCustomerContext(db, parse(z.uuid(), envelope.subject.id));
+    } else if (envelope.action === 'subscription.get') {
+      const context = await getCustomerContext(db, parse(z.uuid(), envelope.subject.id));
+      data = {
+        customer_id: context.customer_id,
+        subscription_id: context.subscription_id,
+        plan_id: context.plan_id,
+        plan_code: context.plan_code,
+        plan_name: context.plan_name,
+        status: context.subscription_status,
+        started_at: context.started_at,
+        expires_at: context.expires_at,
+        provider: context.provider,
+        provider_reference: context.provider_reference,
+        renewal_policy: context.renewal_policy
+      };
+    } else if (envelope.action === 'payment.request') {
+      const input = parse(z.object({
+        plan_code: z.enum(['monthly', 'quarterly', 'semiannual', 'annual']).optional()
+      }), envelope.input);
+      const created = await createRenewalCheckout({
+        customerId: parse(z.uuid(), envelope.subject.id),
+        planCode: input.plan_code || null,
+        source: 'gate-core-v1',
+        correlationId: envelope.correlation_id
+      });
+      if (!created) {
+        throw Object.assign(new Error('Cliente não encontrado.'), { code: 'CUSTOMER_NOT_FOUND' });
+      }
+      data = {
+        charge_id: created.id,
+        customer_id: created.customer_id,
+        plan_code: created.plan_code,
+        amount_cents: created.amount_cents,
+        currency: 'BRL',
+        checkout_url: created.checkout_url,
+        existing: created.existing
+      };
+    } else if (envelope.action === 'renewal.request') {
+      data = await renewalReadiness(db, {
+        customerId: parse(z.uuid(), envelope.subject.id),
+        subscriptionId: envelope.input.subscription_id
+          ? parse(z.uuid(), envelope.input.subscription_id)
+          : null
+      });
+    } else if (envelope.action === 'support.case.open') {
+      const input = parse(z.object({
+        category: z.string().min(1).max(100),
+        summary: z.string().min(1).max(500),
+        message: z.string().max(4000).optional()
+      }), envelope.input);
+      data = await openSupportCase(db, {
+        customerId: parse(z.uuid(), envelope.subject.id),
+        category: input.category,
+        summary: input.summary,
+        message: input.message || null,
+        requestId: envelope.request_id,
+        correlationId: envelope.correlation_id,
+        actor: envelope.actor
+      });
+    } else {
+      throw Object.assign(new Error('Ação não suportada pelo contrato v1.'), {
+        code: 'UNSUPPORTED_ACTION'
+      });
+    }
+    return coreResponse(envelope, { data });
+  } catch (error) {
+    const statusCode = error.code === 'CUSTOMER_NOT_FOUND'
+      ? 404
+      : ['PAYMENT_NOT_CONFIRMED', 'RENEWAL_ALREADY_COMPLETED'].includes(error.code)
+        ? 409
+        : error.code === 'INSUFFICIENT_CAPABILITY'
+          ? 403
+          : 502;
+    return reply.code(statusCode).send(coreFailureResponse(envelope, error));
+  }
+});
 
 // These routes are for the separately deployed QR-code service only.
 // They expose a short, client-safe message rather than personal records or
