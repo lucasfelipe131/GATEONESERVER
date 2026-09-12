@@ -15,7 +15,13 @@
 .cc-panel .text-button, .cc-row-actions .text-button, .cc-pagination .btn, .cc-row-actions .btn, .cc-close, .cc-filters button { min-height: 44px; }
 .cc-filters select, .cc-filters input { min-height: 44px; }
 .cc-dialog { overflow-wrap: anywhere; overscroll-behavior: contain; }
-.cc-close { position: sticky; top: 0; z-index: 2; background: white; box-shadow: 0 2px 8px #10274115; }
+.cc-dialog-header { position: sticky; top: -28px; z-index: 2; display: flex; justify-content: flex-end; margin: -28px -28px 20px; padding: 14px 28px; background: white; border-bottom: 1px solid #e3e9f1; }
+.cc-close { float: none; margin: 0; background: white; }
+.cc-filters label { flex-basis: 160px; }
+.cc-filters label:first-child { flex-basis: 195px; }
+.conversation-list { grid-template-columns: minmax(0,1fr); }
+.conversation-card, .conversation-card > * { min-width: 0; overflow-wrap: anywhere; }
+.conversation-preview p { white-space: normal; overflow: visible; }
 .cc-dialog h2 { clear: both; }
 .cc-dialog .cc-row-head { clear: both; }
 .cc-error { grid-column: 1 / -1; }
@@ -47,8 +53,10 @@
   .cc-metric { padding: 13px; }
   .cc-metric small { letter-spacing: .035em; line-height: 1.5; }
   .cc-dialog { max-height: calc(100dvh - 24px); width: calc(100vw - 24px); }
+  .cc-dialog-header { top: -18px; margin: -18px -18px 18px; padding: 12px 18px; }
   .cc-dialog h2 { font-size: 22px; }
   .cc-pagination { flex-wrap: wrap; }
   .cc-filters label { flex-basis: calc(50% - 12px); }
+  .cc-filters label:first-child { flex-basis: 100%; }
 }
 @media(prefers-reduced-motion:reduce) { .sidebar { transition: none; } }
