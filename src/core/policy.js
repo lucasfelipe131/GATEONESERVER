@@ -1,11 +1,16 @@
 export const CORE_ACTION_CAPABILITIES = Object.freeze({
   'customer.resolve': 'customer.identity.resolve',
   'customer.context.get': 'customer.context.read',
+  'conversation.process': 'conversation.agent.execute',
   'subscription.get': 'subscription.read',
+  'plan.list': 'plan.read',
   'payment.request': 'payment.request',
+  'payment.status.get': 'payment.read',
   'renewal.request': 'renewal.request',
   'renewal.status.get': 'renewal.read',
-  'support.case.open': 'support.case.open'
+  'support.case.open': 'support.case.open',
+  'support.case.list': 'support.case.read',
+  'conversation.handoff.request': 'conversation.handoff'
 });
 
 const SERVICE_ACTIONS = Object.freeze({
