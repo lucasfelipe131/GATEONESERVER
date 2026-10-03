@@ -6,6 +6,7 @@ import { createDb, getSetting } from './db.js';
 import { verifyDatabaseReady } from './init.js';
 import { createQueues, createRedis } from './queue.js';
 import { scanBilling } from './services/billing.js';
+import { createSimulationBilling } from './services/billing-automation.js';
 import { createCheckoutPreference, createPixPayment } from './integrations/mercadopago.js';
 import {
   sendAccessCreatedTemplate,
@@ -35,6 +36,7 @@ import { startStagingOutbox } from './services/staging-outbox.js';
 
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL, { ssl: config.DATABASE_SSL });
+const billingAutomation = createSimulationBilling({db,config});
 const redis = createRedis(config.REDIS_URL);
 const queues = createQueues(redis);
 
@@ -733,6 +735,11 @@ async function start() {
 
   const scan = async () => {
     try {
+      if (billingAutomation) {
+        const stats = await billingAutomation.scanReminders({timezone:config.TIMEZONE});
+        console.log({stats,automatic:false},'Cobranças e lembretes processados em simulação');
+        return stats;
+      }
       const [salesMode, paymentMode, paused] = await Promise.all([
         getSetting(db, 'sales_mode', config.SALES_MODE),
         getSetting(db, 'payment_mode', config.PAYMENT_MODE),

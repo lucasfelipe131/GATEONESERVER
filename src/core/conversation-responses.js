@@ -46,7 +46,7 @@ export function mergeResponseFacts(base, extra = {}) {
     'customer_id', 'customer_name', 'plan_name', 'subscription_status',
     'expiration', 'payment_status', 'renewal_status', 'checkout_url',
     'amount_cents', 'currency', 'support_case_id', 'handoff_id',
-    'context_status', 'plans', 'operation_state', 'error_code', 'exception_id', 'case_status', 'diagnosis', 'action_performed', 'verification_result'
+    'context_status', 'plans', 'operation_state', 'error_code', 'exception_id', 'case_status', 'diagnosis', 'action_performed', 'verification_result', 'simulated', 'conversation_state'
   ]);
   return Object.freeze(Object.fromEntries(
     Object.entries({ ...base, ...extra }).filter(([key]) => allowedKeys.has(key))
@@ -96,6 +96,7 @@ export function renderConversationResponse({ intent, facts = {}, outcome = null 
   if (outcome === 'HANDOFF_CREATED') {
     return 'Certo. Registrei o atendimento para uma pessoa da equipe continuar com todo o contexto, sem você precisar repetir tudo.';
   }
+  if (outcome === 'HANDOFF_PENDING') return 'Seu atendimento já está encaminhado para a equipe. Vou manter o contexto para você não precisar repetir a solicitação.';
   if (outcome === 'HANDOFF_FAILED') {
     return 'Não consegui registrar o encaminhamento agora. Tente novamente em instantes; não vou afirmar que a equipe recebeu antes da confirmação.';
   }
@@ -137,7 +138,7 @@ export function renderConversationResponse({ intent, facts = {}, outcome = null 
     case 'RENEWAL_REQUEST': {
       if (facts.checkout_url) {
         const amount = currency(facts.amount_cents, facts.currency || 'BRL');
-        return `${prefix}a cobrança da renovação está pronta${amount ? ` no valor de ${amount}` : ''}: ${facts.checkout_url}`;
+        return `${facts.simulated ? '[Simulação] ' : ''}${prefix}${facts.operation_state === 'EXISTING_PAYMENT' || facts.payment_status === 'PENDING' ? 'este é o link da sua cobrança pendente' : 'a cobrança da renovação está pronta'}${amount ? ` no valor de ${amount}` : ''}: ${facts.checkout_url}`;
       }
       return safeResponseForFacts(facts);
     }
@@ -195,13 +196,14 @@ function normalizedText(value) {
   return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
-export function avoidRepeatedResponse(text, recentMessages = []) {
+export function avoidRepeatedResponse(text, recentMessages = [], facts = {}) {
   const normalized = normalizedText(text);
   const recentOutbound = recentMessages
     .filter((message) => String(message.direction).toUpperCase() === 'OUTBOUND')
     .slice(-4)
     .map((message) => normalizedText(message.content));
   if (!recentOutbound.includes(normalized)) return { text, repeated: false };
+  if (facts.checkout_url) return {text:`${facts.simulated ? '[Simulação] ' : ''}A cobrança continua pendente. Você pode usar o mesmo link: ${facts.checkout_url}`,repeated:true};
   return {
     text: 'O estado continua o mesmo da última consulta. Se quiser, posso verificar outro ponto da sua conta.',
     repeated: true

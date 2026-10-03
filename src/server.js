@@ -46,6 +46,7 @@ import {
   sha256
 } from './security.js';
 import { scanBilling, markPaymentApproved } from './services/billing.js';
+import { createSimulationBilling } from './services/billing-automation.js';
 import {
   getCustomerContext,
   getOpenSupportCases,
@@ -106,6 +107,7 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL, { ssl: config.DATABASE_SSL });
+const billingAutomation = createSimulationBilling({db,config});
 const redis = config.REDIS_URL ? createRedis(config.REDIS_URL) : null;
 const queues = redis ? createQueues(redis) : null;
 const app = Fastify({
@@ -799,9 +801,8 @@ app.post('/api/v1/core/operations', async (request, reply) => {
             customerId: toolInput.customer_id,
             subscriptionId: toolInput.subscription_id || null
           }),
-          // PASSO 05 permanece local/fake. A rota não reutiliza silenciosamente
-          // o adapter financeiro real legado; testes E2E injetam um provider fake.
-          createPaymentRequest: async () => {
+          createPaymentRequest: async (toolInput) => {
+            if (billingAutomation) return billingAutomation.requestPayment(toolInput);
             throw Object.assign(
               new Error('Provider autônomo permanece desabilitado fora do ambiente fake.'),
               { code: 'HUMAN_ACTION_REQUIRED' }
@@ -2341,7 +2342,9 @@ app.get('/api/admin/charges', { preHandler: protect(CAPABILITIES.BILLING_READ) }
 app.post('/api/admin/billing/scan', {
   preHandler: protect(CAPABILITIES.BILLING_SCAN, { mutation: true, stepUp: true })
 }, async (request) => {
-  const stats = await scanBilling(db, { timezone: config.TIMEZONE });
+  const stats = billingAutomation
+    ? await billingAutomation.scanReminders({timezone:config.TIMEZONE})
+    : await scanBilling(db, { timezone: config.TIMEZONE });
   await audit(db, {
     actorType: 'user',
     actorId: request.user.id,

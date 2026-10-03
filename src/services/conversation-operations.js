@@ -5,6 +5,20 @@ import { appendOutboxEvent } from '../core/outbox.js';
 export class PgConversationAgentRepository {
   constructor(db) { this.db = db; }
 
+  async recentDecisions(conversationId, customerId) {
+    const result = await this.db.query(`SELECT intents, outcome, response_text, response_facts
+      FROM agent_decisions WHERE conversation_id = $1 AND customer_id IS NOT DISTINCT FROM $2::uuid
+      AND created_at > now() - interval '24 hours' ORDER BY created_at DESC, decision_id DESC LIMIT 5`, [conversationId,customerId]);
+    return result.rows;
+  }
+
+  async activeHandoff(conversationId, customerId) {
+    const result = await this.db.query(`SELECT handoff_id,status FROM conversation_handoffs
+      WHERE conversation_id = $1 AND customer_id IS NOT DISTINCT FROM $2::uuid
+      AND status IN ('REQUESTED','ASSIGNED') ORDER BY requested_at DESC LIMIT 1`, [conversationId,customerId]);
+    return result.rows[0] || null;
+  }
+
   async findDecision(idempotencyKey) {
     const result = await this.db.query(
       `SELECT decision_id, response_text, response_facts, response_status, outcome,
@@ -45,6 +59,11 @@ export class PgConversationAgentRepository {
   async requestHandoff(input) {
     const handoffId = input.handoff_id || randomUUID();
     return this.db.transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`handoff:${input.conversation_id}`]);
+      const active = await client.query(`SELECT handoff_id,status FROM conversation_handoffs
+        WHERE conversation_id = $1 AND customer_id IS NOT DISTINCT FROM $2::uuid
+        AND status IN ('REQUESTED','ASSIGNED') LIMIT 1`, [input.conversation_id,input.customer_id || null]);
+      if (active.rows[0]) return {...active.rows[0],duplicate:true};
       const result = await client.query(
         `INSERT INTO conversation_handoffs
           (handoff_id, conversation_id, customer_id, context_snapshot_id, correlation_id,
@@ -134,6 +153,16 @@ export class InMemoryConversationAgentRepository {
 
   async findDecision(key) { return this.decisions.get(key) || null; }
 
+  async recentDecisions(conversationId, customerId) {
+    return [...this.decisions.values()].filter(row => row.conversation_id === conversationId &&
+      (row.customer_id || null) === (customerId || null) && row.created_at > Date.now() - 86_400_000).reverse().slice(0,5);
+  }
+
+  async activeHandoff(conversationId, customerId) {
+    return [...this.handoffs.values()].find(row => row.conversation_id === conversationId &&
+      (row.customer_id || null) === (customerId || null) && ['REQUESTED','ASSIGNED'].includes(row.status)) || null;
+  }
+
   async claimTurn({ conversationKey, messageId, leaseMs = 30_000 }) {
     const now = Date.now();
     const current = this.leases.get(conversationKey);
@@ -151,6 +180,8 @@ export class InMemoryConversationAgentRepository {
   }
 
   async requestHandoff(input) {
+    const active = await this.activeHandoff(input.conversation_id,input.customer_id);
+    if (active) return {...active,duplicate:true};
     const existing = this.handoffs.get(input.idempotency_key);
     if (existing) return { ...existing, duplicate: true };
     const handoff = { handoff_id: randomUUID(), status: 'REQUESTED', duplicate: false, ...input };
@@ -161,7 +192,7 @@ export class InMemoryConversationAgentRepository {
   async recordDecision(input) {
     const existing = this.decisions.get(input.idempotency_key);
     if (existing) return existing;
-    const decision = { decision_id: randomUUID(), ...input };
+    const decision = { decision_id: randomUUID(), created_at:Date.now(), ...input };
     this.decisions.set(input.idempotency_key, decision);
     return decision;
   }

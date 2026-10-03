@@ -63,9 +63,15 @@ export function detectPromptInjection(value) {
   return INJECTION_RULES.some((rule) => rule.test(text));
 }
 
-function contextualIntent(text, conversationState) {
-  if (!/^(E AGORA|E AI|JA FOI|E ENTAO|COMO ESTA|ALGUMA NOVIDADE)\??$/.test(text)) return null;
+function contextualIntent(text, conversationState, contentType) {
   const state = String(conversationState || '').toUpperCase();
+  if (state === 'WAITING_PAYMENT' && ['IMAGE','PDF','DOCUMENT'].includes(String(contentType).toUpperCase()) && !text) {
+    return {intent:'PAYMENT_EVIDENCE',confidence:'HIGH'};
+  }
+  if (state === 'WAITING_PAYMENT' && /^(E O LINK|O MESMO LINK|MANDA DE NOVO|ENVIA DE NOVO|CADE O LINK)\??$/.test(text)) {
+    return {intent:'PAYMENT_REQUEST',confidence:'HIGH'};
+  }
+  if (!/^(E AGORA|E AI|JA FOI|E ENTAO|COMO ESTA|ALGUMA NOVIDADE)\??$/.test(text)) return null;
   if (state === 'WAITING_PAYMENT') return { intent: 'PAYMENT_STATUS', confidence: 'HIGH' };
   if (['RENEWAL', 'PROCESSING', 'VERIFYING'].includes(state)) {
     return { intent: 'RENEWAL_STATUS', confidence: 'HIGH' };
@@ -87,7 +93,7 @@ export function understandRequest(value, { conversationState = null, contentType
   }
 
   if (['IMAGE', 'PDF', 'DOCUMENT'].includes(String(contentType || '').toUpperCase()) &&
-      /COMPROVANTE|PAGAMENTO|PIX/.test(text)) {
+      /COMPROVANTE|PAGAMENTO|PIX/.test(text) && !RULES.slice(0,3).some(([,rule]) => rule.test(text))) {
     return Object.freeze({
       primary_intent: 'PAYMENT_EVIDENCE',
       confidence: 'HIGH',
@@ -97,7 +103,7 @@ export function understandRequest(value, { conversationState = null, contentType
     });
   }
 
-  const contextual = contextualIntent(text, conversationState);
+  const contextual = contextualIntent(text, conversationState, contentType);
   if (contextual) {
     return Object.freeze({
       primary_intent: contextual.intent,

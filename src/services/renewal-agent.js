@@ -13,7 +13,9 @@ function renewalFacts(facts, result = {}) {
   return mergeResponseFacts(facts, {
     payment_status: result.payment_status ?? facts.payment_status,
     renewal_status: result.renewal_status ?? result.state ?? facts.renewal_status,
-    expiration: result.target_expiration ?? result.expires_at ?? facts.expiration,
+    expiration: result.renewal_status === 'COMPLETED'
+      ? result.target_expiration ?? result.expires_at ?? facts.expiration
+      : result.expires_at ?? facts.expiration,
     operation_state: result.decision || result.status || null
   });
 }
@@ -21,6 +23,9 @@ function renewalFacts(facts, result = {}) {
 export class RenewalAgent {
   async handle({ intentResult, customerId, customer360, turn, facts, context }) {
     const intents = new Set(intentResult.intents.map((item) => item.name));
+    if (['HUMAN_REQUEST','COMPLAINT','CANCELLATION_REQUEST'].some(intent => intents.has(intent))) {
+      return {handled:false,proposed_action:null,facts};
+    }
     const subscriptionId = customer360?.subscription?.subscription_id || null;
     const scopedContext = { ...context, subscription_id: subscriptionId };
 
@@ -60,7 +65,7 @@ export class RenewalAgent {
         customer_id: customerId,
         ...(subscriptionId ? { subscription_id: subscriptionId } : {})
       });
-      let nextFacts = mergeResponseFacts(facts, { payment_status: payment.status || null });
+      let nextFacts = mergeResponseFacts(facts, { payment_status: payment.status || null,simulated:payment.simulated === true });
       if (payment.status === 'CONFIRMED' || intents.has('RENEWAL_STATUS')) {
         const renewal = await turn.execute('getRenewalStatus', {
           customer_id: customerId,
@@ -92,7 +97,9 @@ export class RenewalAgent {
             customer_id: customerId,
             subscription_id: subscription.subscription_id
           });
-          nextFacts = mergeResponseFacts(nextFacts, { payment_status: payment.status || 'PENDING' });
+          nextFacts = mergeResponseFacts(nextFacts, { payment_status: payment.status || 'PENDING',
+            checkout_url:payment.checkout_url || null,amount_cents:payment.amount_cents ?? null,
+            currency:payment.currency || 'BRL',simulated:payment.simulated === true });
         }
         return { handled: true, proposed_action: 'getRenewalStatus', facts: nextFacts };
       }
@@ -121,7 +128,8 @@ export class RenewalAgent {
           checkout_url: payment.checkout_url || null,
           amount_cents: payment.amount_cents ?? null,
           currency: payment.currency || 'BRL',
-          operation_state: payment.existing ? 'EXISTING_PAYMENT' : 'PAYMENT_CREATED'
+          operation_state: payment.existing ? 'EXISTING_PAYMENT' : 'PAYMENT_CREATED',
+          simulated: payment.simulated === true
         })
       };
     }

@@ -55,7 +55,8 @@ function resultFromStored(stored) {
     response_text: stored.response_text,
     response_facts: stored.response_facts || {},
     response_status: stored.response_status,
-    outcome: stored.outcome
+    outcome: stored.outcome,
+    conversation_state: stored.response_facts?.conversation_state || null
   };
 }
 
@@ -94,6 +95,12 @@ export class GateConversationAgent {
         response_text: renderConversationResponse({ intent: 'UNKNOWN', outcome: 'TURN_IN_PROGRESS' })
       };
     }
+    // A competing turn may have committed between the first read and the claim.
+    const completed = await this.repository.findDecision(idempotencyKey);
+    if (completed) {
+      await this.repository.releaseTurn(conversationId,lease.token);
+      return resultFromStored(completed);
+    }
 
     let customerId = null;
     let contextSnapshot = null;
@@ -106,6 +113,7 @@ export class GateConversationAgent {
     let autonomous = true;
     let conversationState = null;
     let supportEligible = null;
+    let recentDecisions = [];
 
     try {
       if (intentResult.security_flags.includes('PROMPT_INJECTION')) {
@@ -116,8 +124,19 @@ export class GateConversationAgent {
         turns.push(discoveryTurn);
         const resolution = await discoveryTurn.execute('resolveCustomer', identity);
         if (resolution.status === 'MATCHED') customerId = resolution.customer_id;
+        recentDecisions = await this.repository.recentDecisions(conversationId,customerId);
+        const activeHandoff = await this.repository.activeHandoff(conversationId,customerId);
+        if (intentResult.primary_intent === 'UNKNOWN') {
+          const contextual = understandRequest(text,{contentType,conversationState:recentDecisions[0]?.response_facts?.conversation_state});
+          if (contextual.primary_intent !== 'UNKNOWN') intentResult = contextual;
+        }
 
-        if (resolution.status === 'AMBIGUOUS') {
+        if (activeHandoff && resolution.status !== 'AMBIGUOUS') {
+          responseFacts = mergeResponseFacts(responseFacts,{handoff_id:activeHandoff.handoff_id});
+          outcome = 'HANDOFF_PENDING';
+          autonomous = false;
+          conversationState = 'human_handoff';
+        } else if (resolution.status === 'AMBIGUOUS') {
           const handoff = await discoveryTurn.execute('requestHumanHandoff', {
             conversation_id: conversationId,
             customer_id: null,
@@ -241,7 +260,20 @@ export class GateConversationAgent {
             autonomous = false;
             conversationState = 'human_handoff';
           } else if (intentResult.primary_intent === 'UNKNOWN') {
-            outcome = 'CLARIFICATION_REQUIRED';
+            const unresolved = recentDecisions.slice(0,2).filter(row => row.intents?.[0]?.name === 'UNKNOWN' &&
+              ['CLARIFICATION_REQUIRED','ANTI_REPETITION_FALLBACK'].includes(row.outcome));
+            if (unresolved.length === 2) {
+              const handoff = await actionTurn.execute('requestHumanHandoff',{
+                conversation_id:conversationId,customer_id:customerId,context_snapshot_id:contextSnapshot.context_snapshot_id,
+                correlation_id:correlationId,reason:'CONVERSATION_NOT_UNDERSTOOD',intent:intentResult,
+                summary:'Três mensagens sem intenção identificada; continuar com o histórico da conversa.',
+                idempotency_key:`${idempotencyKey}:handoff`
+              });
+              responseFacts = mergeResponseFacts(responseFacts,{handoff_id:handoff.handoff_id});
+              proposedAction = 'requestHumanHandoff';
+              outcome = 'HANDOFF_CREATED';
+              conversationState = 'human_handoff';
+            } else outcome = 'CLARIFICATION_REQUIRED';
             autonomous = false;
           }
         }
@@ -287,6 +319,9 @@ export class GateConversationAgent {
     }
 
     try {
+      if (!conversationState && ['CREATED','PENDING'].includes(responseFacts.payment_status)) conversationState = 'waiting_payment';
+      if (!conversationState && ['READY','PROCESSING','VERIFYING','REQUESTED','RETRY_SCHEDULED'].includes(responseFacts.renewal_status)) conversationState = 'renewal';
+      responseFacts = mergeResponseFacts(responseFacts,{conversation_state:conversationState});
       let responseText = renderConversationResponse({
         intent: intentResult.primary_intent,
         facts: responseFacts,
@@ -299,12 +334,18 @@ export class GateConversationAgent {
         responseStatus = 'SAFE_FALLBACK';
         outcome = 'RESPONSE_VALIDATION_FALLBACK';
       }
-      const repeated = avoidRepeatedResponse(
+      const repeated = ['HANDOFF_CREATED','HANDOFF_PENDING','IDENTITY_AMBIGUOUS','IDENTITY_REQUIRED'].includes(outcome)
+        ? {text:responseText,repeated:false} : avoidRepeatedResponse(
         responseText,
-        contextSnapshot?.customer360?.conversation?.recent_messages || []
+        [...(contextSnapshot?.customer360?.conversation?.recent_messages || []),
+          ...recentDecisions.map(row => ({direction:'OUTBOUND',content:row.response_text}))],responseFacts
       );
       responseText = repeated.text;
       if (repeated.repeated) outcome = 'ANTI_REPETITION_FALLBACK';
+      if (!validateConversationResponse(responseText,responseFacts).allowed) {
+        responseText = safeResponseForFacts(responseFacts);
+        responseStatus = 'SAFE_FALLBACK';
+      }
 
       const toolCalls = turns.flatMap((turn) => turn.calls);
       const policyResult = toolCalls.some((call) => call.policy === 'DENY')

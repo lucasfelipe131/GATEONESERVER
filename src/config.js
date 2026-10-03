@@ -25,6 +25,7 @@ const schema = z.object({
   ADMIN_EMAIL: z.string().email().optional(),
   ADMIN_PASSWORD: z.string().min(6).optional(),
   GLOBAL_PAUSE: bool(true),
+  BILLING_AUTOMATION_ENABLED: bool(false),
   SEED_DEMO: bool(false),
   SALES_MODE: z.enum(['simulation', 'approval', 'automatic']).default('approval'),
   PAYMENT_MODE: z.enum(['simulation', 'live']).default('simulation'),

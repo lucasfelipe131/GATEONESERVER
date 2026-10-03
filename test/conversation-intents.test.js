@@ -106,7 +106,7 @@ test('intenção desconhecida permanece conservadora', () => {
 
 test('prompt governance é centralizada, versionada e sem chain-of-thought', () => {
   const prompt = conversationPromptDescriptor();
-  assert.equal(prompt.version, 'GateConversationAgentPrompt.v1');
+  assert.equal(prompt.version, 'GateConversationAgentPrompt.v2');
   assert.equal(prompt.customer_input_trust, 'UNTRUSTED');
   assert.equal(prompt.tool_result_trust, 'DATA_ONLY');
   assert.equal(prompt.stores_chain_of_thought, false);

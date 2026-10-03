@@ -63,6 +63,11 @@ export class PaymentWatcher {
         return { duplicate: false, changed: false, review: 'PAYMENT_NOT_FOUND' };
       }
       const reconciliation = reconcilePayment({ internal: payment, external: event });
+      if (reconciliation.status === 'EXTERNAL_STALE') {
+        await client.query(`UPDATE payment_provider_events SET payment_id = $2, processed_at = now()
+          WHERE id = $1`, [stored.rows[0].id,payment.id]);
+        return {duplicate:false,changed:false,payment_id:payment.id,status:payment.status};
+      }
       if (!trustedConfirmation || ['DIVERGENT', 'REQUIRES_REVIEW'].includes(reconciliation.status)) {
         const reason = !trustedConfirmation ? 'UNTRUSTED_CONFIRMATION_SOURCE' : reconciliation.reason;
         await client.query(
@@ -95,6 +100,12 @@ export class PaymentWatcher {
         `UPDATE payment_provider_events SET payment_id = $2, processed_at = now()
           WHERE id = $1`, [stored.rows[0].id, payment.id]
       );
+      if (event.status === 'CONFIRMED' && payment.charge_id) {
+        await client.query(`UPDATE charges ch SET status = 'paid',paid_at = COALESCE(paid_at,now()),updated_at = now()
+          FROM subscriptions s WHERE ch.id = $1 AND ch.subscription_id = s.id
+          AND s.customer_id = $2 AND s.id = $3 AND ch.status NOT IN ('cancelled','rejected')`,
+        [payment.charge_id,payment.customer_id,payment.subscription_id]);
+      }
       if (changed) {
         await appendOutboxEvent(client, createBusinessEvent({
           eventType: PAYMENT_EVENTS[event.status], correlationId,
