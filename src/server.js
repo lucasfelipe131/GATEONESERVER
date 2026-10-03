@@ -59,6 +59,7 @@ import {
 import { createCustomerContextSnapshot } from './services/customer-context.js';
 import { ConversationToolRegistry } from './services/conversation-tools.js';
 import { GateConversationAgent } from './services/conversation-agent.js';
+import { understandSemantically } from './services/conversation-understanding.js';
 import { SupportAgent } from './services/support-agent.js';
 import { SupportOperations } from './services/support-operations.js';
 import { PgSupportRepository, localSupportEnabled } from './services/support-repository.js';
@@ -825,7 +826,15 @@ app.post('/api/v1/core/operations', async (request, reply) => {
           ...(supportOperations?.handlers() || {})
         }
       });
-      const agent = new GateConversationAgent({ repository, registry, supportAgent:supportOperations ? new SupportAgent() : null, logger: request.log });
+      const agent = new GateConversationAgent({
+        repository, registry, supportAgent:supportOperations ? new SupportAgent() : null,
+        semanticInterpreter: async (message) => {
+          const enabled = await getSetting(db, 'ai_whatsapp_enabled', config.AI_WHATSAPP_ENABLED);
+          if (!enabled) return null;
+          return understandSemantically(await getRuntimeConfig(db, config), message);
+        },
+        logger: request.log
+      });
       data = await agent.process({
         conversationId: input.conversation_id,
         messageId: input.message.id,

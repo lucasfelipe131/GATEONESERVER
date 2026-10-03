@@ -115,7 +115,10 @@ export function understandRequest(value, { conversationState = null, contentType
   }
 
   const found = [];
+  const financialRefusal = /\b(NAO|NUNCA|SEM)\b.{0,35}\b(MANDE|MANDA|ENVIE|ENVIA|GERE|GERA|QUERO|RENOVAR|RENOVACAO|COBRANCA|PIX|PAGAMENTO)\b/.test(text);
+  const financialExplanation = /\b(COMO FUNCIONA|O QUE E|SO (QUERO )?(SABER|ENTENDER)|EXPLIQUE|EXPLICAR)\b/.test(text);
   for (const [name, rule, confidence] of RULES) {
+    if (['PAYMENT_REQUEST', 'RENEWAL_REQUEST'].includes(name) && (financialRefusal || financialExplanation)) continue;
     if (rule.test(text) && !found.some((item) => item.name === name)) {
       found.push({ name, confidence });
     }

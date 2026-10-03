@@ -10,6 +10,7 @@ import {
   validateConversationResponse
 } from '../core/conversation-responses.js';
 import { RenewalAgent } from './renewal-agent.js';
+import { validatedSemanticIntent } from './conversation-understanding.js';
 
 const AUTOMATION_ELIGIBLE = new Set([
   'GREETING', 'RENEWAL_REQUEST', 'PAYMENT_REQUEST', 'PAYMENT_STATUS',
@@ -61,12 +62,13 @@ function resultFromStored(stored) {
 }
 
 export class GateConversationAgent {
-  constructor({ repository, registry, renewalAgent = new RenewalAgent(), supportAgent = null, logger = null } = {}) {
+  constructor({ repository, registry, renewalAgent = new RenewalAgent(), supportAgent = null, semanticInterpreter = null, logger = null } = {}) {
     if (!repository || !registry) throw new Error('GateConversationAgent requer repository e tool registry.');
     this.repository = repository;
     this.registry = registry;
     this.renewalAgent = renewalAgent;
     this.supportAgent = supportAgent;
+    this.semanticInterpreter = semanticInterpreter;
     this.logger = logger;
   }
 
@@ -129,6 +131,23 @@ export class GateConversationAgent {
         if (intentResult.primary_intent === 'UNKNOWN') {
           const contextual = understandRequest(text,{contentType,conversationState:recentDecisions[0]?.response_facts?.conversation_state});
           if (contextual.primary_intent !== 'UNKNOWN') intentResult = contextual;
+        }
+
+        if (intentResult.primary_intent === 'UNKNOWN' && this.semanticInterpreter &&
+            !activeHandoff && resolution.status !== 'AMBIGUOUS') {
+          try {
+            const semantic = await this.semanticInterpreter({
+              text, contentType,
+              conversationState: recentDecisions[0]?.response_facts?.conversation_state
+            });
+            // Validate even injected interpreters; tool policy remains authoritative.
+            const validated = validatedSemanticIntent(semantic && {
+              intent: semantic.primary_intent, confidence: semantic.confidence
+            }, contentType);
+            if (validated) intentResult = validated;
+          } catch {
+            this.logger?.warn?.({ code: 'SEMANTIC_INTERPRETATION_UNAVAILABLE' }, 'Interpretação semântica indisponível; mantendo o fluxo seguro');
+          }
         }
 
         if (activeHandoff && resolution.status !== 'AMBIGUOUS') {

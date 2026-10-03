@@ -40,6 +40,13 @@ test('paguei é evidência e nunca ação de confirmação', () => {
   assert.ok(!result.intents.some((item) => item.name === 'CONFIRM_PAYMENT'));
 });
 
+test('negação e pedido de explicação não geram cobrança ou renovação', () => {
+  for (const text of ['não mande pix', 'não quero renovar', 'como funciona o pix?', 'só quero entender a renovação']) {
+    assert.ok(!understandRequest(text).intents.some((item) => ['PAYMENT_REQUEST', 'RENEWAL_REQUEST'].includes(item.name)), text);
+  }
+  assert.equal(understandRequest('manda o pix').primary_intent, 'PAYMENT_REQUEST');
+});
+
 test('detecta multi-intent para pagamento e renovação', () => {
   const result = understandRequest('paguei e queria saber se já renovou');
   assert.deepEqual(result.intents.map((item) => item.name), [

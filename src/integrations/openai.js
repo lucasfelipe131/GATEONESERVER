@@ -26,12 +26,12 @@ export function extractResponseText(response) {
 
 export async function createAIResponse(
   config,
-  { instructions, input, maxOutputTokens = config.AI_MAX_OUTPUT_TOKENS || 700 },
+  { instructions, input, maxOutputTokens = config.AI_MAX_OUTPUT_TOKENS || 700, responseSchema = null, timeoutMs = 35_000 },
   fetchImpl = fetch
 ) {
   if (!config.OPENAI_API_KEY) throw new Error('Configure a chave da OpenAI no administrador.');
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 35_000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetchImpl(RESPONSES_URL, {
       method: 'POST',
@@ -44,6 +44,10 @@ export async function createAIResponse(
         instructions,
         input,
         max_output_tokens: maxOutputTokens,
+        ...(responseSchema ? { text: { format: {
+          type: 'json_schema', name: responseSchema.name,
+          strict: true, schema: responseSchema.schema
+        } } } : {}),
         store: false
       }),
       signal: controller.signal
