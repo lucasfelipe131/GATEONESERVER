@@ -294,12 +294,17 @@ export class PgSupportRepository extends PgSupportTransaction {
 }
 
 export function localSupportEnabled(env = process.env) {
-  return (
-    env.SUPPORT_AGENT_ENABLED === 'true' &&
-    ['test', 'local'].includes(env.GATE_ENVIRONMENT) &&
-    env.PROVIDER_MODE === 'fake-only' &&
-    env.NODE_ENV !== 'production'
-  );
+  if (env.SUPPORT_AGENT_ENABLED !== 'true' ||
+      env.PROVIDER_MODE !== 'fake-only' || env.NODE_ENV === 'production') return false;
+  if (['test', 'local'].includes(env.GATE_ENVIRONMENT)) return true;
+  // The approved staging deployment retains its own database and simulated providers.
+  return env.GATE_ENVIRONMENT === 'staging-055' && env.NODE_ENV === 'test' &&
+    env.RAILWAY_PROJECT_ID === 'a59164b2-217a-4570-9e7c-e4dff16b3dab' &&
+    env.RAILWAY_ENVIRONMENT_ID === '413bd932-e13e-4196-a66c-e55c98bbdd8b' &&
+    env.GATE_TEST_MODE === 'true' && env.GLOBAL_PAUSE === 'true' &&
+    env.PAYMENT_MODE === 'simulation' && env.WHATSAPP_MODE === 'simulation' &&
+    env.BITPANEL_MODE === 'disabled' && env.AI_ADMIN_ENABLED === 'false' &&
+    env.AI_WHATSAPP_ENABLED === 'false' && env.TELEGRAM_SYNC_ENABLED === 'false';
 }
 export function assertLocalSupport(env) {
   if (!localSupportEnabled(env)) throw supportError('SUPPORT_LOCAL_ONLY');

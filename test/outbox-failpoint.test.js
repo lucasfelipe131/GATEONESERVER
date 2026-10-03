@@ -19,7 +19,16 @@ test('failpoint terminates real child with SIGKILL before ACK',()=>{
     createOutboxFailpoint(${JSON.stringify(env)})({event:{event_id:'E1',correlation_id:'target',event_type:'renewal.ready'},consumer:'stable',workerId:'A',consumed:{processed:true}});
     console.log('ACK_MUST_NOT_HAPPEN');`;
   const result=spawnSync(process.execPath,['--input-type=module','-e',code],{encoding:'utf8'});
-  assert.equal(result.signal,'SIGKILL');
+  assert.ifError(result.error);
+  assert.equal(result.stderr,'');
+  // Windows reports a killed process as exit code 1, without a POSIX signal.
+  if (process.platform === 'win32') {
+    assert.equal(result.status,1);
+    assert.equal(result.signal,null);
+  } else {
+    assert.equal(result.signal,'SIGKILL');
+    assert.equal(result.status,null);
+  }
   assert.match(result.stdout,/COMMITTED_BEFORE_ACK/);
   assert.doesNotMatch(result.stdout,/ACK_MUST_NOT_HAPPEN/);
 });

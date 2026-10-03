@@ -1,0 +1,10 @@
+FROM node:24-bookworm-slim AS node-runtime
+FROM postgres:18-bookworm
+COPY --from=node-runtime /usr/local/ /usr/local/
+WORKDIR /app
+COPY package*.json ./
+RUN node --version && npm --version && pg_dump --version && npm ci --omit=dev --ignore-scripts
+COPY . .
+ENV NODE_ENV=test
+ENTRYPOINT []
+CMD ["node", "scripts/staging06-migrate.js"]

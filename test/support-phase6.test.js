@@ -361,6 +361,25 @@ test('phase6 defaults fail closed outside local fake-only', () => {
     /SUPPORT_LOCAL_ONLY/,
   );
 });
+
+test('phase6 staging requires the isolated project and every simulated mode', () => {
+  const staging = { ...env, GATE_ENVIRONMENT: 'staging-055',
+    RAILWAY_PROJECT_ID: 'a59164b2-217a-4570-9e7c-e4dff16b3dab',
+    RAILWAY_ENVIRONMENT_ID: '413bd932-e13e-4196-a66c-e55c98bbdd8b',
+    GATE_TEST_MODE: 'true', GLOBAL_PAUSE: 'true', PAYMENT_MODE: 'simulation',
+    WHATSAPP_MODE: 'simulation', BITPANEL_MODE: 'disabled',
+    AI_ADMIN_ENABLED: 'false', AI_WHATSAPP_ENABLED: 'false', TELEGRAM_SYNC_ENABLED: 'false' };
+  assert.equal(localSupportEnabled(staging), true);
+  for (const key of Object.keys(staging)) {
+    const invalid = { ...staging, [key]: 'incorrect' };
+    // Other fixture fields are unrelated to deployment eligibility.
+    if (['SUPPORT_AGENT_ENABLED', 'PROVIDER_MODE', 'NODE_ENV', 'GATE_ENVIRONMENT',
+      'RAILWAY_PROJECT_ID', 'RAILWAY_ENVIRONMENT_ID', 'GATE_TEST_MODE', 'GLOBAL_PAUSE',
+      'PAYMENT_MODE', 'WHATSAPP_MODE', 'BITPANEL_MODE', 'AI_ADMIN_ENABLED',
+      'AI_WHATSAPP_ENABLED', 'TELEGRAM_SYNC_ENABLED'].includes(key))
+      assert.equal(localSupportEnabled(invalid), false, key);
+  }
+});
 test('phase6 response facts cannot assert unverified resolution/action', () => {
   assert.equal(
     validateConversationResponse('O caso foi resolvido.', {
