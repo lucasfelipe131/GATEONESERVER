@@ -129,7 +129,11 @@ test('chatbot and automatic billing share durable PostgreSQL operations and conf
       assert.equal((await billing.scanReminders({now:new Date('2026-10-06T12:00:00Z')})).notifications,0);
     });
     await t.test('existing outbox completes and verifies renewal before chatbot announces completion',async () => {
-      outbox = startStagingOutbox({db,env:{...env,GATE_ENVIRONMENT:'staging-055',OUTBOX_DISPATCHER_ENABLED:'true'},workerId:'phase7-test',
+      outbox = startStagingOutbox({db,env:{...env,GATE_ENVIRONMENT:'staging-unified',
+        RAILWAY_PROJECT_ID:'a0f107fe-acaf-459f-a640-38ef6010d1e5',
+        RAILWAY_ENVIRONMENT_ID:'3f3188fb-0289-4f4d-93b9-574cfe1505f5',
+        GLOBAL_PAUSE:'true',AI_ADMIN_ENABLED:'false',AI_WHATSAPP_ENABLED:'false',
+        TELEGRAM_SYNC_ENABLED:'false',OUTBOX_DISPATCHER_ENABLED:'true'},workerId:'unified-stage-test',
         logger:{info(){},warn(){},error(){}}});
       const deadline = Date.now() + 20000;
       let state;

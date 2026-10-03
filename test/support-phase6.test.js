@@ -380,6 +380,24 @@ test('phase6 staging requires the isolated project and every simulated mode', ()
       assert.equal(localSupportEnabled(invalid), false, key);
   }
 });
+test('unified staging rejects production, crossed identities and every unsafe mode', () => {
+  const staging = { ...env, GATE_ENVIRONMENT: 'staging-unified',
+    RAILWAY_PROJECT_ID: 'a0f107fe-acaf-459f-a640-38ef6010d1e5',
+    RAILWAY_ENVIRONMENT_ID: '3f3188fb-0289-4f4d-93b9-574cfe1505f5',
+    GATE_TEST_MODE: 'true', GLOBAL_PAUSE: 'true', PAYMENT_MODE: 'simulation',
+    WHATSAPP_MODE: 'simulation', BITPANEL_MODE: 'disabled',
+    AI_ADMIN_ENABLED: 'false', AI_WHATSAPP_ENABLED: 'false', TELEGRAM_SYNC_ENABLED: 'false' };
+  assert.equal(localSupportEnabled(staging), true);
+  for (const [key, value] of Object.entries({
+    RAILWAY_ENVIRONMENT_ID: '697f58fb-5084-4cb3-bd9a-ecdbc921b7bc',
+    RAILWAY_PROJECT_ID: 'a59164b2-217a-4570-9e7c-e4dff16b3dab',
+    NODE_ENV: 'production', PAYMENT_MODE: 'live', WHATSAPP_MODE: 'live',
+    PROVIDER_MODE: 'live', GLOBAL_PAUSE: 'false', GATE_TEST_MODE: 'false',
+    SUPPORT_AGENT_ENABLED: 'false', BITPANEL_MODE: 'live',
+    AI_ADMIN_ENABLED: 'true', AI_WHATSAPP_ENABLED: 'true', TELEGRAM_SYNC_ENABLED: 'true'
+  })) assert.equal(localSupportEnabled({ ...staging, [key]: value }), false, key);
+});
+
 test('phase6 response facts cannot assert unverified resolution/action', () => {
   assert.equal(
     validateConversationResponse('O caso foi resolvido.', {

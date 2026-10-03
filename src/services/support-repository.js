@@ -297,10 +297,15 @@ export function localSupportEnabled(env = process.env) {
   if (env.SUPPORT_AGENT_ENABLED !== 'true' ||
       env.PROVIDER_MODE !== 'fake-only' || env.NODE_ENV === 'production') return false;
   if (['test', 'local'].includes(env.GATE_ENVIRONMENT)) return true;
-  // The approved staging deployment retains its own database and simulated providers.
-  return env.GATE_ENVIRONMENT === 'staging-055' && env.NODE_ENV === 'test' &&
-    env.RAILWAY_PROJECT_ID === 'a59164b2-217a-4570-9e7c-e4dff16b3dab' &&
-    env.RAILWAY_ENVIRONMENT_ID === '413bd932-e13e-4196-a66c-e55c98bbdd8b' &&
+  // Each approved staging keeps an isolated database and simulated providers.
+  const isolatedStaging =
+    (env.GATE_ENVIRONMENT === 'staging-055' &&
+      env.RAILWAY_PROJECT_ID === 'a59164b2-217a-4570-9e7c-e4dff16b3dab' &&
+      env.RAILWAY_ENVIRONMENT_ID === '413bd932-e13e-4196-a66c-e55c98bbdd8b') ||
+    (env.GATE_ENVIRONMENT === 'staging-unified' &&
+      env.RAILWAY_PROJECT_ID === 'a0f107fe-acaf-459f-a640-38ef6010d1e5' &&
+      env.RAILWAY_ENVIRONMENT_ID === '3f3188fb-0289-4f4d-93b9-574cfe1505f5');
+  return isolatedStaging && env.NODE_ENV === 'test' &&
     env.GATE_TEST_MODE === 'true' && env.GLOBAL_PAUSE === 'true' &&
     env.PAYMENT_MODE === 'simulation' && env.WHATSAPP_MODE === 'simulation' &&
     env.BITPANEL_MODE === 'disabled' && env.AI_ADMIN_ENABLED === 'false' &&

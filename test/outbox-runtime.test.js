@@ -11,6 +11,18 @@ test('dispatcher disabled by default without DB access', () => {
 test('dispatcher fails closed outside fake staging', () => {
   assert.throws(() => startStagingOutbox({ env: { OUTBOX_DISPATCHER_ENABLED: 'true' }, db: null }), /GUARD/);
 });
+
+test('unified dispatcher rejects production environment before database access', () => {
+  assert.throws(() => startStagingOutbox({ db: null, env: {
+    OUTBOX_DISPATCHER_ENABLED: 'true', GATE_ENVIRONMENT: 'staging-unified', NODE_ENV: 'test',
+    RAILWAY_PROJECT_ID: 'a0f107fe-acaf-459f-a640-38ef6010d1e5',
+    RAILWAY_ENVIRONMENT_ID: '697f58fb-5084-4cb3-bd9a-ecdbc921b7bc',
+    SUPPORT_AGENT_ENABLED: 'true', GATE_TEST_MODE: 'true', GLOBAL_PAUSE: 'true',
+    PROVIDER_MODE: 'fake-only', PAYMENT_MODE: 'simulation', WHATSAPP_MODE: 'simulation',
+    BITPANEL_MODE: 'disabled', AI_ADMIN_ENABLED: 'false', AI_WHATSAPP_ENABLED: 'false',
+    TELEGRAM_SYNC_ENABLED: 'false'
+  } }), /OUTBOX_STAGING_GUARD_FAILED/);
+});
 test('shutdown drains active batch before returning and stops new claims', async () => {
   let release, calls = 0;
   const runtime = startOutboxRuntime({ dispatcher: { dispatchBatch() {

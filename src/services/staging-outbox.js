@@ -5,10 +5,13 @@ import { PgRenewalRepository, RenewalOrchestrator } from './renewal-orchestratio
 import { PgProvisioningRepository, ProvisioningOrchestrator } from './provisioning-orchestration.js';
 import { createPhase4EventHandlers } from './phase4-event-handlers.js';
 import { createSupportEventHandlers } from './support-event-handlers.js';
+import { localSupportEnabled } from './support-repository.js';
 
 export function startStagingOutbox({ db, env = process.env, workerId, logger = console }) {
   if (env.OUTBOX_DISPATCHER_ENABLED !== 'true') return null;
-  if (env.GATE_ENVIRONMENT !== 'staging-055' || env.GATE_TEST_MODE !== 'true' ||
+  const stagingAllowed = env.GATE_ENVIRONMENT === 'staging-055' ||
+    (env.GATE_ENVIRONMENT === 'staging-unified' && localSupportEnabled(env));
+  if (!stagingAllowed || env.GATE_TEST_MODE !== 'true' ||
       env.PROVIDER_MODE !== 'fake-only' || env.BITPANEL_MODE !== 'disabled' ||
       env.PAYMENT_MODE !== 'simulation' || env.WHATSAPP_MODE !== 'simulation') {
     throw new Error('OUTBOX_STAGING_GUARD_FAILED');
