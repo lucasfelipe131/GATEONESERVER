@@ -12,6 +12,7 @@ import { createCustomerContextSnapshot } from '../src/services/customer-context.
 import { getCustomerContext, paymentOperationStatus, renewalOperationStatus } from '../src/services/gate-core.js';
 import { PaymentWatcher } from '../src/services/payment-watcher.js';
 import { startStagingOutbox } from '../src/services/staging-outbox.js';
+import {verifyExistingStaging} from '../scripts/staging07-verify.js';
 
 const env = {NODE_ENV:'test',GATE_ENVIRONMENT:'test',SUPPORT_AGENT_ENABLED:'true',PROVIDER_MODE:'fake-only',
   PAYMENT_MODE:'simulation',WHATSAPP_MODE:'simulation',BITPANEL_MODE:'disabled',GATE_TEST_MODE:'true'};
@@ -158,6 +159,15 @@ test('chatbot and automatic billing share durable PostgreSQL operations and conf
       const result = await human.turn('paguei mas quero falar com atendente',randomUUID(),'IMAGE');
       assert.equal(result.intent,'HUMAN_REQUEST'); assert.equal(result.outcome,'HANDOFF_CREATED');
       assert.ok(!result.tool_calls.some(call => call.tool === 'createPaymentRequest'));
+    });
+    await t.test('staging verification uses a verified existing login when no WhatsApp identity exists',async () => {
+      await db.query('UPDATE customers SET whatsapp_e164=NULL WHERE id=$1',[customerId]);
+      await db.query(`INSERT INTO customer_identities(customer_id,identity_type,provider,external_id,normalized_value,verified_at)
+        VALUES($1,'LOGIN','core','existing-synthetic-login','existing-synthetic-login',now())`,[customerId]);
+      const result=await verifyExistingStaging({db,config,env});
+      assert.equal(result.customers_verified,1);
+      assert.deepEqual(result.before,result.after);
+      assert.equal(result.real_payment_requests,0);
     });
     await t.test('opt-out customer receives no reminders or new charges',async () => {
       await db.query("INSERT INTO subscriptions(customer_id,plan_id,status,expires_on) VALUES($1,$2,'active','2026-10-03')",[otherId,planId]);
