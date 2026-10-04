@@ -37,6 +37,7 @@ function paymentDb() {
       if (normalized.startsWith('SELECT r.id, r.payment_id')) {
         return { rows: [{ id: RENEWAL_ID, payment_id: PAYMENT_ID }] };
       }
+      if (normalized.startsWith('SELECT * FROM payments')) return {rowCount:0,rows:[]};
       if (normalized.startsWith('INSERT INTO payments')) {
         state.paymentInserts += 1;
         return { rowCount: 1, rows: [{ id: PAYMENT_ID }] };

@@ -76,7 +76,7 @@ function createMigrationDb({ tables = [], applied = [], migrationTable = false }
 
 test('carrega baseline e migrations em ordem com checksum estável', async () => {
   const migrations = await loadMigrations();
-  assert.deepEqual(migrations.map((item) => item.version), ['0000', '0001', '0002', '0003', '0004', '0005', '0006']);
+  assert.deepEqual(migrations.map((item) => item.version), ['0000', '0001', '0002', '0003', '0004', '0005', '0006', '0007']);
   assert.equal(migrations[0].name, '0000_baseline.sql');
   assert.equal(migrations[1].name, '0001_session_step_up.sql');
   assert.equal(migrations[2].name, '0002_gate_core_contracts.sql');
@@ -228,10 +228,11 @@ test('migration do zero aplica baseline e mudanças uma única vez', async () =>
     '0003_customer_context_memory.sql',
     '0004_billing_renewal_orchestration.sql',
     '0005_whatsapp_autonomous_operations.sql',
-    '0006_support_exception_command_center.sql'
+    '0006_support_exception_command_center.sql',
+    '0007_live_checkout_delivery.sql'
   ]);
   assert.deepEqual(second.executed, []);
-  assert.deepEqual(db.state.applied.map((item) => item.version), ['0000', '0001', '0002', '0003', '0004', '0005', '0006']);
+  assert.deepEqual(db.state.applied.map((item) => item.version), ['0000', '0001', '0002', '0003', '0004', '0005', '0006', '0007']);
   assert.equal((await migrationStatus(db)).ready, true);
   assert.equal((await verifyMigrations(db)).ready, true);
 });
@@ -257,9 +258,10 @@ test('adoção compatível registra baseline sem reexecutá-lo e aplica apenas p
     '0003_customer_context_memory.sql',
     '0004_billing_renewal_orchestration.sql',
     '0005_whatsapp_autonomous_operations.sql',
-    '0006_support_exception_command_center.sql'
+    '0006_support_exception_command_center.sql',
+    '0007_live_checkout_delivery.sql'
   ]);
-  assert.deepEqual(db.state.applied.map((item) => item.version), ['0000', '0001', '0002', '0003', '0004', '0005', '0006']);
+  assert.deepEqual(db.state.applied.map((item) => item.version), ['0000', '0001', '0002', '0003', '0004', '0005', '0006', '0007']);
 });
 
 test('adoção recusa baseline incompleto e checksum divergente', async () => {

@@ -13,11 +13,11 @@ export function createPhase4EventHandlers({ db, renewalOrchestrator }) {
               p.customer_id, p.subscription_id, p.status AS payment_status,
               p.amount_cents, p.currency,
               s.customer_id AS subscription_customer_id,
-              pl.price_cents AS expected_amount_cents
+              ch.amount_cents AS expected_amount_cents
          FROM renewal_jobs r
          JOIN payments p ON p.id = r.payment_id
          JOIN subscriptions s ON s.id = p.subscription_id
-         JOIN plans pl ON pl.id = s.plan_id
+         JOIN charges ch ON ch.id=r.charge_id AND ch.id=p.charge_id AND ch.subscription_id=s.id
         WHERE ($1::uuid IS NULL OR r.id = $1::uuid)
           AND ($2::uuid IS NULL OR p.id = $2::uuid)
         ORDER BY r.created_at DESC LIMIT 1`,

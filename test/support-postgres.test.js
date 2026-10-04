@@ -24,7 +24,7 @@ function adapter(pg) {
         };
       }
       const r = await p.query(sql, params);
-      return { ...r, rowCount: r.affectedRows ?? r.rows.length };
+      return { ...r, rowCount: r.rowCount ?? r.affectedRows ?? r.rows.length };
     },
   });
   return {
@@ -37,7 +37,7 @@ test('phase6 PostgreSQL: migrations, repositories, outbox, dedup, human resoluti
   const db = adapter(pg);
   try {
     const first = await migrateDatabase(db);
-    assert.equal(first.executed.length, 7);
+    assert.equal(first.executed.length, 8);
     assert.equal((await migrateDatabase(db)).executed.length, 0);
     assert.equal((await verifyMigrations(db)).ready, true);
     const customers = [randomUUID(), randomUUID()];

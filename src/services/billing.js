@@ -120,7 +120,22 @@ export async function markPaymentApproved(db, chargeId, payment) {
     if (!externalPaymentId) throw new Error('Pagamento sem identificador externo.');
     const correlationId = charge.rows[0].correlation_id || payment?.correlation_id || randomUUID();
     const paymentKey = paymentIdempotencyKey(provider, externalPaymentId);
-    const persistedPayment = await client.query(
+    const existingPayment = await client.query(`SELECT * FROM payments
+      WHERE provider = $1 AND (external_payment_id = $2 OR
+        (charge_id = $3 AND external_payment_id IS NULL AND status IN ('CREATED','PENDING')))
+      ORDER BY external_payment_id NULLS LAST FOR UPDATE`, [provider,externalPaymentId,chargeId]);
+    if (existingPayment.rows.some(row => row.charge_id !== chargeId ||
+        row.customer_id !== charge.rows[0].customer_id || row.subscription_id !== charge.rows[0].subscription_id ||
+        row.amount_cents !== charge.rows[0].amount_cents || row.currency !== 'BRL')) {
+      throw new Error('PAYMENT_SUBJECT_OR_AMOUNT_MISMATCH');
+    }
+    if (existingPayment.rowCount > 1) throw new Error('AMBIGUOUS_PROVIDER_PAYMENT');
+    const persistedPayment = existingPayment.rowCount
+      ? await client.query(`UPDATE payments SET external_payment_id=$2, status='CONFIRMED',
+        reconciliation_status='MATCHED', review_reason=NULL, confirmed_at=COALESCE(confirmed_at,now()),
+        provider_observed_at=now(),updated_at=now() WHERE id=$1 RETURNING id`,
+        [existingPayment.rows[0].id,externalPaymentId])
+      : await client.query(
       `INSERT INTO payments
         (customer_id, subscription_id, charge_id, provider, external_payment_id,
          amount_cents, currency, status, idempotency_key, correlation_id,

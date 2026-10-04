@@ -360,23 +360,6 @@ export async function renewInBitPanel(config, renewal) {
     const detailsUrl = `${config.BITPANEL_BASE_URL}/list/view/${listId}`;
     await page.goto(detailsUrl, { waitUntil: 'domcontentloaded' });
     const before = await captureListDetails(page);
-    if (
-      before.expiryDate &&
-      renewal.current_expiry &&
-      before.expiryDate > renewal.current_expiry
-    ) {
-      return {
-        operation: 'renew',
-        simulated: false,
-        alreadyRenewed: true,
-        beforeExpiry: renewal.current_expiry,
-        afterExpiry: before.expiryDate,
-        evidencePath: null,
-        listId,
-        username: before.username
-      };
-    }
-
     const row = await findListByUsername(
       page,
       config,
@@ -388,6 +371,12 @@ export async function renewInBitPanel(config, renewal) {
     if (!isGateOneOwner(row.owner)) {
       throw new Error('Automação bloqueada: a lista não pertence ao Gate One Pro Server.');
     }
+    if (!renewal.expected_expiration) throw new Error('RENEWAL_EXPECTED_EXPIRATION_REQUIRED');
+    if (before.expiryDate === renewal.expected_expiration) {
+      return {operation:'renew',simulated:false,alreadyRenewed:true,beforeExpiry:renewal.current_expiry,
+        afterExpiry:before.expiryDate,evidencePath:null,listId,username:before.username};
+    }
+    if (before.expiryDate !== renewal.current_expiry) throw new Error('RENEWAL_PROVIDER_EXPIRATION_MISMATCH');
 
     const menuIcon = page.locator(`i[title="Mais opções, lista ${listId}"]`);
     if ((await menuIcon.count()) !== 1) {
@@ -423,9 +412,7 @@ export async function renewInBitPanel(config, renewal) {
 
     await page.goto(detailsUrl, { waitUntil: 'domcontentloaded' });
     const after = await captureListDetails(page);
-    if (!after.expiryDate || before.expiryDate === after.expiryDate) {
-      throw new Error('A validade não mudou após a renovação.');
-    }
+    if (after.expiryDate !== renewal.expected_expiration) throw new Error('RENEWAL_PROVIDER_EXPIRATION_MISMATCH');
     return {
       operation: 'renew',
       simulated: false,

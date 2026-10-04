@@ -46,7 +46,8 @@ import {
   sha256
 } from './security.js';
 import { scanBilling, markPaymentApproved } from './services/billing.js';
-import { createSimulationBilling } from './services/billing-automation.js';
+import { createBillingAutomation } from './services/live-billing.js';
+import { reconcileMercadoPagoPayment } from './services/mercadopago-reconciliation.js';
 import {
   getCustomerContext,
   getOpenSupportCases,
@@ -108,7 +109,7 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL, { ssl: config.DATABASE_SSL });
-const billingAutomation = createSimulationBilling({db,config});
+const billingAutomation = createBillingAutomation({db,config});
 const redis = config.REDIS_URL ? createRedis(config.REDIS_URL) : null;
 const queues = redis ? createQueues(redis) : null;
 const app = Fastify({
@@ -528,6 +529,12 @@ async function createRenewalCheckout({
   source = 'renewal',
   correlationId = null
 }) {
+  if (config.GATE_LIVE_BILLING_ENABLED && billingAutomation) {
+    const identity = customerId ? {customer_id:customerId,status:'MATCHED'} : await resolveIdentity(db,{type:'WHATSAPP',provider:'whatsapp',value:phone});
+    if(identity.status!=='MATCHED') throw new Error('CUSTOMER_IDENTITY_REQUIRED');
+    const result=await billingAutomation.requestPayment({customer_id:identity.customer_id,plan_code:planCode,correlation_id:correlationId||randomUUID()});
+    return { ...result,chargeId:result.charge_id,checkoutUrl:result.checkout_url };
+  }
   const runtimeConfig = {
     ...(await getRuntimeConfig(db, config)),
     PAYMENT_MODE: await getSetting(db, 'payment_mode', config.PAYMENT_MODE)
@@ -1449,6 +1456,8 @@ app.post('/webhooks/mercadopago', async (request, reply) => {
     PAYMENT_MODE: paymentMode
   };
   const dataId = request.query?.['data.id'] || request.body?.data?.id;
+  if (!dataId || (request.query?.['data.id'] && request.body?.data?.id &&
+      String(request.query['data.id']) !== String(request.body.data.id))) return reply.code(400).send({error:'Identificador de pagamento inválido.'});
   const valid = verifyMercadoPagoWebhook({
     config: runtimeConfig,
     signature: request.headers['x-signature'],
@@ -1467,41 +1476,27 @@ app.post('/webhooks/mercadopago', async (request, reply) => {
      RETURNING id`,
     [eventId, request.body?.type || null, JSON.stringify(request.body || {})]
   );
-  if (!inserted.rowCount) return { received: true, duplicate: true };
+  let receiptId=inserted.rows[0]?.id;
+  if (!receiptId) {
+    const previous=await db.query("SELECT id,processed_at FROM webhook_events WHERE provider='mercadopago' AND provider_event_id=$1",[eventId]);
+    if(previous.rows[0]?.processed_at) return {received:true,duplicate:true};
+    receiptId=previous.rows[0]?.id;
+  }
 
   try {
     if (dataId && runtimeConfig.PAYMENT_MODE === 'live') {
-      const payment = await getMercadoPagoPayment(runtimeConfig, dataId);
-      if (payment.status === 'approved' && payment.external_reference) {
-        const marked = await markPaymentApproved(db, payment.external_reference, payment);
-        if (!marked.duplicate && queues) {
-          await queues.messages.add(
-            'send-payment-confirmation',
-            { chargeId: payment.external_reference },
-            { jobId: `paid-${payment.external_reference}` }
-          );
-        }
-        if (!marked.duplicate) {
-          try {
-            await notifyPaymentByQr(payment.external_reference, payment.id);
-          } catch (notificationError) {
-            // The Mercado Pago event is already safely recorded. A temporary
-            // WhatsApp QR outage must not make the webhook fail or duplicate a payment.
-            app.log.warn({ chargeId: payment.external_reference, error: notificationError.message }, 'Pagamento confirmado, mas aviso ao responsável falhou');
-          }
-        }
-        await maybeQueueBitPanelJob(marked.renewalId);
-      }
+      await reconcileMercadoPagoPayment({db,config:runtimeConfig,paymentId:dataId});
     }
-    await db.query('UPDATE webhook_events SET processed_at = now() WHERE id = $1', [
-      inserted.rows[0].id
+    await db.query('UPDATE webhook_events SET processed_at = now(),error = NULL WHERE id = $1', [
+      receiptId
     ]);
   } catch (error) {
     await db.query('UPDATE webhook_events SET error = $2 WHERE id = $1', [
-      inserted.rows[0].id,
-      error.message
+      receiptId,
+      error.code || 'PROVIDER_RECONCILIATION_FAILED'
     ]);
-    app.log.error({ eventId, error: error.message }, 'Falha no webhook do Mercado Pago');
+    app.log.error({ eventId, code: error.code || 'PROVIDER_RECONCILIATION_FAILED' }, 'Falha no webhook do Mercado Pago');
+    return reply.code(503).send({received:false,retry:true});
   }
   return { received: true };
 });
@@ -2764,6 +2759,11 @@ app.put('/api/admin/settings', {
     const error = new Error('Configure as credenciais ou importe uma sessão do BitPanel antes do modo real.');
     error.statusCode = 409;
     throw error;
+  }
+  if(body.bitpanel_mode==='live'||body.renewal_requires_approval===false) {
+    try {await testBitPanelConnection(runtimeConfig);} catch {
+      throw Object.assign(new Error('O BitPanel não confirmou o acesso. Atualize a sessão autenticada antes de ativar a renovação real.'),{statusCode:409});
+    }
   }
   for (const [key, value] of Object.entries(body)) {
     await setSetting(db, key, value, request.user.id);

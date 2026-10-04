@@ -22,9 +22,9 @@ const config = {BILLING_AUTOMATION_ENABLED:true,PAYMENT_MODE:'simulation',WHATSA
 function adapter(pg) {
   const client = pg => ({query:async (sql,params) => {
     if (!params && /;\s*\S/.test(sql.trim().replace(/;$/,''))) {
-      const r = (await pg.exec(sql)).at(-1); return {...r,rowCount:r.affectedRows ?? r.rows.length};
+      const r = (await pg.exec(sql)).at(-1); return {...r,rowCount:r.rowCount ?? r.affectedRows ?? r.rows.length};
     }
-    const r = await pg.query(sql,params); return {...r,rowCount:r.affectedRows ?? r.rows.length};
+    const r = await pg.query(sql,params); return {...r,rowCount:r.rowCount ?? r.affectedRows ?? r.rows.length};
   }});
   return {...client(pg),transaction:fn => pg.transaction(tx => fn(client(tx)))};
 }

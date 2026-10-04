@@ -38,7 +38,7 @@ function adapter(pg) {
       return { ...results.at(-1), rowCount: results.at(-1)?.affectedRows || 0 };
     }
     const r = await p.query(sql, params);
-    return { ...r, rowCount: r.affectedRows ?? r.rows.length };
+    return { ...r, rowCount: r.rowCount ?? r.affectedRows ?? r.rows.length };
   } });
   return { ...client(pg), transaction: (fn) => pg.transaction((tx) => fn(client(tx))) };
 }
@@ -55,7 +55,7 @@ test('QA06 migration and synthetic fixtures seed once, with actual persisted sup
     assert.ok(first.marker.results.some((r) => r.case_status === 'WAITING_CUSTOMER'));
     const second = await seedQa06(db, loadConfig(syntheticEnv));
     assert.equal(second.seeded, false);
-    assert.equal((await verifyMigrations(db)).applied.length, 7);
+    assert.equal((await verifyMigrations(db)).applied.length, 8);
     const model = new PgCommandCenter({ db, repository: new PgSupportRepository(db) });
     const summary = await model.summary();
     assert.equal(summary.active_customers, 8);

@@ -16,7 +16,18 @@ export class PgConversationAgentRepository {
     const result = await this.db.query(`SELECT handoff_id,status FROM conversation_handoffs
       WHERE conversation_id = $1 AND customer_id IS NOT DISTINCT FROM $2::uuid
       AND status IN ('REQUESTED','ASSIGNED') ORDER BY requested_at DESC LIMIT 1`, [conversationId,customerId]);
-    return result.rows[0] || null;
+    if(result.rows[0]) return result.rows[0];
+    const phone=/^whatsapp:(\+?\d{10,15})$/.exec(conversationId)?.[1]?.replace(/\D/g,'');
+    if(!phone) return null;
+    const legacy=await this.db.query(`SELECT 1 FROM conversation_sessions cs WHERE
+      regexp_replace(cs.whatsapp_e164,'[^0-9]','','g')=$1 AND cs.state='support' AND cs.expires_at>now()
+      AND ($2::uuid IS NULL OR EXISTS(SELECT 1 FROM customers c WHERE c.id=$2 AND regexp_replace(COALESCE(c.whatsapp_e164,''),'[^0-9]','','g')=$1))
+      AND NOT EXISTS(SELECT 1 FROM conversation_handoffs h WHERE h.conversation_id=$3 AND h.customer_id IS NOT DISTINCT FROM $2::uuid)`,
+      [phone,customerId,conversationId]);
+    if(!legacy.rowCount) return null;
+    return this.requestHandoff({conversation_id:conversationId,customer_id:customerId,correlation_id:randomUUID(),
+      reason:'LEGACY_HUMAN_HANDOFF_PRESERVED',idempotency_key:`legacy-handoff:${conversationId}:${customerId||'unknown'}`,
+      requested_by:{type:'SYSTEM',id:'gate-handoff-migration'}});
   }
 
   async findDecision(idempotencyKey) {

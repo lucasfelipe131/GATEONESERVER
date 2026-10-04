@@ -70,6 +70,8 @@ export async function createPixPayment(config, charge) {
   if (!notificationUrl) throw new Error('URL pública do webhook do Mercado Pago não configurada.');
 
   const response = await fetch(`${API_URL}/v1/payments`, {
+    signal: AbortSignal.timeout(15_000),
+    redirect: 'error',
     method: 'POST',
     headers: {
       Authorization: `Bearer ${config.MERCADOPAGO_ACCESS_TOKEN}`,
@@ -126,6 +128,8 @@ export async function createCheckoutPreference(config, charge) {
   const notificationUrl =
     config.MERCADOPAGO_NOTIFICATION_URL || `${base}/webhooks/mercadopago`;
   const response = await fetch(`${API_URL}/checkout/preferences`, {
+    signal: AbortSignal.timeout(15_000),
+    redirect: 'error',
     method: 'POST',
     headers: {
       Authorization: `Bearer ${config.MERCADOPAGO_ACCESS_TOKEN}`,
@@ -179,9 +183,44 @@ export async function createCheckoutPreference(config, charge) {
 export async function getMercadoPagoPayment(config, paymentId) {
   requireLiveConfig(config);
   const response = await fetch(`${API_URL}/v1/payments/${encodeURIComponent(paymentId)}`, {
+    signal: AbortSignal.timeout(10_000),
+    redirect: 'error',
     headers: { Authorization: `Bearer ${config.MERCADOPAGO_ACCESS_TOKEN}` }
   });
   const body = await response.json();
   if (!response.ok) throw new Error(`Não foi possível consultar o pagamento ${paymentId}.`);
+  return body;
+}
+
+export async function getMercadoPagoAccount(config) {
+  requireLiveConfig(config);
+  const response = await fetch('https://api.mercadolibre.com/users/me', {
+    headers: { Authorization: `Bearer ${config.MERCADOPAGO_ACCESS_TOKEN}` },
+    signal: AbortSignal.timeout(10_000), redirect: 'error'
+  });
+  const body = await response.json();
+  if (!response.ok || !body.id) throw new Error('MERCADOPAGO_ACCOUNT_UNAVAILABLE');
+  return { id: String(body.id) };
+}
+
+export async function searchMercadoPagoPreferences(config, chargeId) {
+  requireLiveConfig(config);
+  const response = await fetch(`${API_URL}/checkout/preferences/search?external_reference=${encodeURIComponent(chargeId)}`, {
+    headers: { Authorization: `Bearer ${config.MERCADOPAGO_ACCESS_TOKEN}` },
+    signal: AbortSignal.timeout(10_000), redirect: 'error'
+  });
+  const body = await response.json();
+  if (!response.ok || !Array.isArray(body.elements)) throw new Error('CHECKOUT_RECOVERY_UNAVAILABLE');
+  return body.elements;
+}
+
+export async function getMercadoPagoPreference(config, preferenceId) {
+  requireLiveConfig(config);
+  const response = await fetch(`${API_URL}/checkout/preferences/${encodeURIComponent(preferenceId)}`, {
+    headers: { Authorization: `Bearer ${config.MERCADOPAGO_ACCESS_TOKEN}` },
+    signal: AbortSignal.timeout(10_000), redirect: 'error'
+  });
+  const body = await response.json();
+  if (!response.ok) throw new Error('CHECKOUT_RECOVERY_UNAVAILABLE');
   return body;
 }

@@ -6,7 +6,9 @@ import { createDb, getSetting } from './db.js';
 import { verifyDatabaseReady } from './init.js';
 import { createQueues, createRedis } from './queue.js';
 import { scanBilling } from './services/billing.js';
-import { createSimulationBilling } from './services/billing-automation.js';
+import { createBillingAutomation } from './services/live-billing.js';
+import { startLiveOutbox, deliverCoreNotification, sendQrDelivery } from './services/live-outbox.js';
+import { claimRenewalExecution, expectedRenewalExpiration } from './services/renewal-execution.js';
 import { createCheckoutPreference, createPixPayment } from './integrations/mercadopago.js';
 import {
   sendAccessCreatedTemplate,
@@ -36,7 +38,7 @@ import { startStagingOutbox } from './services/staging-outbox.js';
 
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL, { ssl: config.DATABASE_SSL });
-const billingAutomation = createSimulationBilling({db,config});
+const billingAutomation = createBillingAutomation({db,config});
 const redis = createRedis(config.REDIS_URL);
 const queues = createQueues(redis);
 
@@ -60,25 +62,13 @@ async function effectiveConfig() {
   };
 }
 
-async function sendQrNotice(runtimeConfig, to, text) {
+async function sendQrNotice(runtimeConfig, to, text, deliveryKey) {
   if (!runtimeConfig.GATE_ONE_WHATSAPP_QR_URL || !runtimeConfig.GATE_ONE_WHATSAPP_NOTIFY_SECRET) {
     return null;
   }
-  const response = await fetch(
-    `${runtimeConfig.GATE_ONE_WHATSAPP_QR_URL.replace(/\/$/, '')}/api/gate-one/notify`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Gate-One-Notify-Secret': runtimeConfig.GATE_ONE_WHATSAPP_NOTIFY_SECRET
-      },
-      body: JSON.stringify({ to, text })
-    }
-  );
-  if (!response.ok) {
-    throw new Error(`WhatsApp QR recusou a confirmação da renovação (${response.status}).`);
-  }
-  return { channel: 'whatsapp_qr', providerId: null, simulated: false, content: text };
+  const response=await sendQrDelivery(runtimeConfig,{to,text,deliveryKey});
+  if(!response.ok || !response.providerId) throw new Error('QR_DELIVERY_UNCONFIRMED');
+  return { channel: 'whatsapp_qr', providerId: response.providerId, simulated: false, content: text };
 }
 
 async function deliverRenewalResult(runtimeConfig, renewal, outcome, operation, renewedUntilBr) {
@@ -97,14 +87,8 @@ async function deliverRenewalResult(runtimeConfig, renewal, outcome, operation, 
         `Nova validade: ${renewedUntilBr}.`
       ].join('\n');
 
-  try {
-    const qr = await sendQrNotice(runtimeConfig, renewal.whatsapp_e164, content);
-    if (qr) return qr;
-  } catch (error) {
-    if (!runtimeConfig.WHATSAPP_ACCESS_TOKEN || !runtimeConfig.WHATSAPP_PHONE_NUMBER_ID) {
-      throw error;
-    }
-  }
+  const qr = await sendQrNotice(runtimeConfig, renewal.whatsapp_e164, content,`renewal-completed-${renewal.id}`);
+  if (qr) return qr;
 
   const message = operation === 'provision'
     ? await sendAccessCreatedTemplate(runtimeConfig, renewal, outcome, renewedUntilBr)
@@ -178,6 +162,8 @@ async function processMessage(job) {
   const runtimeConfig = await effectiveConfig();
   const paused = await getSetting(db, 'global_pause', config.GLOBAL_PAUSE);
   if (paused) throw new Error('Automações pausadas pelo administrador.');
+
+  if (job.name === 'send-core-notification') return deliverCoreNotification({db,config:runtimeConfig,notificationId:job.data.notificationId});
 
   if (job.name === 'send-free-text') {
     const response = await sendText(runtimeConfig, job.data.to, job.data.text);
@@ -283,6 +269,7 @@ async function processMessage(job) {
     throw new Error('Cobrança não aprovada. Envio bloqueado.');
   }
   if (charge.opt_out_at) throw new Error('Cliente solicitou saída das mensagens.');
+  if(config.GATE_LIVE_BILLING_ENABLED&&charge.stage!=='new_sale') return billingAutomation.requestChargeNotice({chargeId:charge.id});
   const qrDelivery = Boolean(
     runtimeConfig.GATE_ONE_WHATSAPP_QR_URL &&
       runtimeConfig.GATE_ONE_WHATSAPP_NOTIFY_SECRET
@@ -297,7 +284,7 @@ async function processMessage(job) {
   };
   const qrText = `${charge.message_text}\n\nPague pelo link seguro:\n${charge.checkout_url}`;
   const response = qrDelivery
-    ? await sendQrNotice(runtimeConfig, charge.whatsapp_e164, qrText)
+    ? await sendQrNotice(runtimeConfig, charge.whatsapp_e164, qrText,`legacy-charge-${charge.id}`)
     : job.data.conversationWindow
       ? await sendText(
           runtimeConfig,
@@ -369,7 +356,9 @@ async function processRenewal(job) {
     throw new Error('Renovação não aprovada. Execução bloqueada.');
   }
   const operation = bitPanelOperationFor(renewal);
+  if(runtimeConfig.BITPANEL_MODE==='disabled') throw new Error('Automação BitPanel desativada.');
   const correlationId = renewal.correlation_id || randomUUID();
+  renewal.expected_expiration=expectedRenewalExpiration(renewal.current_expiry,renewal.duration_months,{timezone:config.TIMEZONE});
   if (
     operation === 'renew' &&
     (!renewal.automation_eligible || !isGateOneOwner(renewal.bitpanel_owner))
@@ -387,27 +376,14 @@ async function processRenewal(job) {
     );
   }
 
-  await db.transaction(async (client) => {
-    await client.query(
-      `UPDATE renewal_jobs
-          SET status = 'running', core_status = 'PROCESSING',
-              correlation_id = $2, attempts = attempts + 1, updated_at = now()
-        WHERE id = $1`,
-      [renewal.id, correlationId]
-    );
-    await appendOutboxEvent(client, createBusinessEvent({
-      eventType: 'renewal.processing',
-      correlationId,
-      actor: { type: 'WORKER', id: 'gate-one-renewals' },
-      subject: { type: 'renewal', id: renewal.id },
-      payload: { operation, attempt: Number(renewal.attempts || 0) + 1 }
-    }));
-  });
+  const claim=await claimRenewalExecution(db,{renewalId:renewal.id,correlationId,requiresApproval:runtimeConfig.RENEWAL_REQUIRES_APPROVAL});
+  if(!claim.claimed) return {duplicate:true};
   try {
     const outcome =
       operation === 'provision'
         ? await provisionInBitPanel(runtimeConfig, renewal)
         : await renewInBitPanel(runtimeConfig, renewal);
+    if(!outcome.simulated && outcome.afterExpiry!==renewal.expected_expiration) throw new Error('RENEWAL_PROVIDER_EXPIRATION_MISMATCH');
     const renewedUntil = await db.transaction(async (client) => {
       const encryptedAccessPassword = outcome.password
         ? encryptSecret(outcome.password, config.COOKIE_SECRET)
@@ -575,7 +551,7 @@ async function processRenewal(job) {
     }
     return outcome;
   } catch (error) {
-    const humanAction = /captcha|autentica(?:ç|c)ão humana|interven(?:ç|c)ão|manual/i.test(
+    const humanAction = runtimeConfig.BITPANEL_MODE==='live' || /captcha|autentica(?:ç|c)ão humana|interven(?:ç|c)ão|manual/i.test(
       String(error.message || '')
     );
     await db.transaction(async (client) => {
@@ -626,7 +602,7 @@ async function recoverAutomaticRenewals() {
        JOIN charges ch ON ch.id = r.charge_id
        JOIN subscriptions s ON s.id = ch.subscription_id
        JOIN customers c ON c.id = s.customer_id
-      WHERE r.status IN ('awaiting_approval', 'manual_review')
+      WHERE r.status = 'awaiting_approval' AND r.attempts=0 AND (r.core_status IS NULL OR r.core_status='READY')
         AND ch.status = 'paid'
       ORDER BY r.created_at
       LIMIT 100`
@@ -641,7 +617,7 @@ async function recoverAutomaticRenewals() {
       `UPDATE renewal_jobs
           SET status = 'queued', approved_at = COALESCE(approved_at, now()),
               error = NULL, updated_at = now()
-        WHERE id = $1 AND status IN ('awaiting_approval', 'manual_review')
+        WHERE id = $1 AND status = 'awaiting_approval' AND attempts=0 AND (core_status IS NULL OR core_status='READY')
         RETURNING id`,
       [item.id]
     );
@@ -692,6 +668,7 @@ async function queueAutomaticCharge(chargeId) {
 }
 
 async function recoverAutomaticCharges() {
+  if(config.GATE_LIVE_BILLING_ENABLED) return {recovered:0,skipped:true,reason:'CORE_NOTIFICATIONS_OWN_DELIVERY'};
   const [salesMode, paymentMode, paused] = await Promise.all([
     getSetting(db, 'sales_mode', config.SALES_MODE),
     getSetting(db, 'payment_mode', config.PAYMENT_MODE),
@@ -718,7 +695,9 @@ async function recoverAutomaticCharges() {
 
 async function start() {
   await verifyDatabaseReady(db);
-  const outboxRuntime = startStagingOutbox({ db, workerId: `gate-worker:${randomUUID()}` });
+  const outboxRuntime = config.GATE_LIVE_BILLING_ENABLED
+    ? startLiveOutbox({db,config,queues,workerId:`gate-live-worker:${randomUUID()}`})
+    : startStagingOutbox({ db, workerId: `gate-worker:${randomUUID()}` });
   const messageWorker = new Worker('gate-one-messages', processMessage, {
     connection: redis,
     concurrency: 5
@@ -737,7 +716,7 @@ async function start() {
     try {
       if (billingAutomation) {
         const stats = await billingAutomation.scanReminders({timezone:config.TIMEZONE});
-        console.log({stats,automatic:false},'Cobranças e lembretes processados em simulação');
+        console.log({stats,automatic:config.GATE_LIVE_BILLING_ENABLED},'Cobranças e lembretes processados');
         return stats;
       }
       const [salesMode, paymentMode, paused] = await Promise.all([
