@@ -7,6 +7,7 @@ import { migrateDatabase } from '../src/migrations.js';
 import { registerQrInbound } from '../src/services/customer-memory.js';
 import { processWhatsAppRegistration } from '../src/services/whatsapp-registration.js';
 import { createCustomerContextSnapshot } from '../src/services/customer-context.js';
+import { openSupportCase } from '../src/services/gate-core.js';
 
 function adapter(pg) {
   const client = pg => ({ query: async (sql, params) => {
@@ -94,6 +95,13 @@ test('WhatsApp self-registration persists both audiences without granting accoun
       const snapshot = await createCustomerContextSnapshot(db, { customerId: existingId, purpose: 'SUPPORT', channel: 'WHATSAPP', requestedScopes: ['MEMORY'], correlationId: randomUUID() });
       const profile = snapshot.customer360.memories.find(m => m.key === 'self_registration.profile');
       assert.equal(profile.value.device, 'TV LG'); assert.equal(profile.customer_id, existingId);
+    });
+    await t.test('a newly opened technical case matches the partial unique index and emits one event', async () => {
+      const input = { customerId: existingId, category: 'TECHNICAL_SUPPORT', summary: 'Suporte sintético',
+        message: 'Sem sinal', requestId: randomUUID(), correlationId: randomUUID(), actor: { type: 'SERVICE', id: 'synthetic-test' } };
+      const first = await openSupportCase(db, input), duplicate = await openSupportCase(db, input);
+      assert.equal(duplicate.id, first.id); assert.equal(first.duplicate, false); assert.equal(duplicate.duplicate, true);
+      assert.equal((await db.query("SELECT count(*)::int n FROM gate_event_outbox WHERE event_type='support.case_opened' AND subject->>'id'=$1", [first.id])).rows[0].n, 1);
     });
   } finally { await pg.close(); }
 });

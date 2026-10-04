@@ -155,7 +155,7 @@ export async function openSupportCase(db, {
       `INSERT INTO customer_issues
         (customer_id, category, summary, last_message, correlation_id, idempotency_key)
        VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (idempotency_key) DO UPDATE
+       ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO UPDATE
          SET last_mentioned_at = customer_issues.last_mentioned_at
        RETURNING id, status, created_at, (xmax = 0) AS inserted`,
       [customerId, category, summary, message, correlationId, requestId]
