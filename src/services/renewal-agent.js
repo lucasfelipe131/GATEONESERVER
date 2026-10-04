@@ -127,6 +127,7 @@ export class RenewalAgent {
           payment_status: payment.status || 'PENDING',
           checkout_url: payment.checkout_url || null,
           amount_cents: payment.amount_cents ?? null,
+          plan_name: payment.plan_name || nextFacts.plan_name,
           currency: payment.currency || 'BRL',
           operation_state: payment.existing ? 'EXISTING_PAYMENT' : 'PAYMENT_CREATED',
           simulated: payment.simulated === true

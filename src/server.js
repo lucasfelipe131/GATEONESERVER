@@ -64,6 +64,8 @@ import { understandSemantically } from './services/conversation-understanding.js
 import { SupportAgent } from './services/support-agent.js';
 import { SupportOperations } from './services/support-operations.js';
 import { PgSupportRepository, localSupportEnabled } from './services/support-repository.js';
+import { processWhatsAppRegistration } from './services/whatsapp-registration.js';
+import { GuidedSupportAgent } from './services/support-guidance.js';
 import { PgCommandCenter, registerCommandCenter } from './services/command-center.js';
 import { PgConversationAgentRepository } from './services/conversation-operations.js';
 import { buildIdempotencyKey, renderChargeMessage } from './domain/billing.js';
@@ -834,7 +836,7 @@ app.post('/api/v1/core/operations', async (request, reply) => {
         }
       });
       const agent = new GateConversationAgent({
-        repository, registry, supportAgent:supportOperations ? new SupportAgent() : null,
+        repository, registry, supportAgent:supportOperations ? new SupportAgent() : new GuidedSupportAgent(),
         semanticInterpreter: async (message) => {
           const enabled = await getSetting(db, 'ai_whatsapp_enabled', config.AI_WHATSAPP_ENABLED);
           if (!enabled) return null;
@@ -1005,6 +1007,16 @@ app.post('/api/integrations/whatsapp/inbound', async (request, reply) => {
     text: body.text,
     providerId: body.messageId || null
   });
+});
+
+app.post('/api/integrations/whatsapp/registration', async (request, reply) => {
+  if (!requireBotSecret(request, reply)) return;
+  const body = parse(z.object({
+    whatsapp: z.string().min(10).max(30),
+    text: z.string().min(1).max(4000),
+    messageId: z.string().min(1).max(250)
+  }), request.body);
+  return processWhatsAppRegistration(db, { phone: body.whatsapp, text: body.text, messageId: body.messageId });
 });
 
 app.post('/api/integrations/whatsapp/name', async (request, reply) => {

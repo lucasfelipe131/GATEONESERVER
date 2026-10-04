@@ -17,6 +17,14 @@ test('catálogo formaliza todos os intents mínimos do agente', () => {
   ]);
 });
 
+test('menu choices are understood while numeric technical answers stay in the scoped support flow', () => {
+  for (const [text, intent] of [['1','PLAN_QUERY'],['2','SUBSCRIPTION_QUERY'],['3','RENEWAL_REQUEST'],['4','HUMAN_REQUEST']]) {
+    assert.equal(understandRequest(text).primary_intent, intent);
+  }
+  assert.equal(understandRequest('1', { conversationState: 'support_scope' }).primary_intent, 'SUPPORT_REQUEST');
+  assert.equal(understandRequest('4', { conversationState: 'support_scope' }).primary_intent, 'HUMAN_REQUEST');
+});
+
 test('entende greeting, renovação, pix, vencimento e suporte sem menu', () => {
   const cases = [
     ['oi', 'GREETING'],

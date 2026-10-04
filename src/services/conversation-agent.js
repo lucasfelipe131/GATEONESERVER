@@ -128,7 +128,7 @@ export class GateConversationAgent {
         if (resolution.status === 'MATCHED') customerId = resolution.customer_id;
         recentDecisions = await this.repository.recentDecisions(conversationId,customerId);
         const activeHandoff = await this.repository.activeHandoff(conversationId,customerId);
-        if (intentResult.primary_intent === 'UNKNOWN') {
+        if (intentResult.primary_intent === 'UNKNOWN' || /^\s*[12]\s*$/.test(text)) {
           const contextual = understandRequest(text,{contentType,conversationState:recentDecisions[0]?.response_facts?.conversation_state});
           if (contextual.primary_intent !== 'UNKNOWN') intentResult = contextual;
         }
@@ -232,7 +232,7 @@ export class GateConversationAgent {
             proposedAction = 'getCustomerContext';
           } else if (this.supportAgent && ['SUPPORT_REQUEST','HUMAN_REQUEST','COMPLAINT','CANCELLATION_REQUEST'].includes(intentResult.primary_intent)) {
             const support = await this.supportAgent.handle({turn:actionTurn,customerId,customer360,intentResult,text,
-              conversationId,contextSnapshotId:contextSnapshot.context_snapshot_id,correlationId,idempotencyKey,facts:responseFacts});
+              conversationId,contextSnapshotId:contextSnapshot.context_snapshot_id,correlationId,idempotencyKey,facts:responseFacts,recentDecisions});
             responseFacts=support.facts; outcome=support.outcome; autonomous=support.autonomous;
             conversationState=support.conversationState; supportEligible=support.eligible; proposedAction='SupportAgent';
           } else if (intentResult.primary_intent === 'SUPPORT_REQUEST') {

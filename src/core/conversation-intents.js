@@ -31,7 +31,7 @@ function normalize(value) {
 }
 
 const RULES = Object.freeze([
-  ['HUMAN_REQUEST', /\b(ATENDENTE|HUMANO|PESSOA|FALAR COM (ALGUEM|A EQUIPE|ATENDENTE)|QUERO AJUDA HUMANA)\b/, 'HIGH'],
+  ['HUMAN_REQUEST', /^4$|\b(ATENDENTE|HUMANO|PESSOA|FALAR COM (ALGUEM|A EQUIPE|ATENDENTE)|QUERO AJUDA HUMANA)\b/, 'HIGH'],
   ['CANCELLATION_REQUEST', /\b(CANCELAR|CANCELAMENTO|ENCERRAR (O )?PLANO|NAO QUERO MAIS)\b/, 'HIGH'],
   ['COMPLAINT', /\b(RECLAMACAO|RECLAMAR|ABSURDO|PESSIMO|INSATISFEIT[OA]|NAO AGUENTO MAIS)\b/, 'HIGH'],
   ['REFERRAL', /\b(INDICAR|INDICACAO|AMIGO|INDIQUEI)\b/, 'MEDIUM'],
@@ -43,9 +43,9 @@ const RULES = Object.freeze([
   ['PAYMENT_STATUS', /\b(PAGAMENTO|PIX)\b.*\b(CAIU|CONFIRMADO|APROVADO|IDENTIFICADO|STATUS)\b|\bJA CAIU\b/, 'HIGH'],
   ['RENEWAL_STATUS', /\b(JA RENOVOU|FOI RENOVAD[OA]|STATUS DA RENOVACAO|RENOVACAO.*(STATUS|CONCLUIDA|PROCESSANDO))\b/, 'HIGH'],
   ['PAYMENT_REQUEST', /\b(MANDA|ENVIA|GERA|QUERO|PRECISO)\b.*\b(PIX|LINK|COBRANCA|PAGAMENTO)\b|\bPIX\b/, 'HIGH'],
-  ['RENEWAL_REQUEST', /\b(QUERO|PRECISO|VOU|PODE|GOSTARIA DE)? ?RENOVAR\b|\bRENOVACAO\b/, 'HIGH'],
-  ['PLAN_QUERY', /\b(PLANOS|VALORES?|PRECOS?|QUANTO CUSTA|MUDAR MEU PLANO|MENSAL|TRIMESTRAL|SEMESTRAL|ANUAL)\b/, 'HIGH'],
-  ['SUBSCRIPTION_QUERY', /\b(MINHA CONTA|MINHA ASSINATURA|MEU PLANO|STATUS DO PLANO|MEU ACESSO)\b/, 'HIGH'],
+  ['RENEWAL_REQUEST', /^3$|\b(QUERO|PRECISO|VOU|PODE|GOSTARIA DE)? ?RENOVAR\b|\bRENOVACAO\b/, 'HIGH'],
+  ['PLAN_QUERY', /^1$|\b(PLANOS|VALORES?|PRECOS?|QUANTO CUSTA|MUDAR MEU PLANO|MENSAL|TRIMESTRAL|SEMESTRAL|ANUAL)\b/, 'HIGH'],
+  ['SUBSCRIPTION_QUERY', /^2$|\b(MINHA CONTA|MINHA ASSINATURA|MEU PLANO|STATUS DO PLANO|MEU ACESSO)\b/, 'HIGH'],
   ['GREETING', /^(OI|OLA|OPA|E AI|BOM DIA|BOA TARDE|BOA NOITE|TUDO BEM|BLZ)$/, 'HIGH']
 ]);
 
@@ -65,6 +65,9 @@ export function detectPromptInjection(value) {
 
 function contextualIntent(text, conversationState, contentType) {
   const state = String(conversationState || '').toUpperCase();
+  if (/^SUPPORT_(DEVICE|APPLICATION|SCOPE|RESULT)$/.test(state) && /^[12]$/.test(text)) {
+    return { intent: 'SUPPORT_REQUEST', confidence: 'HIGH' };
+  }
   if (state === 'WAITING_PAYMENT' && ['IMAGE','PDF','DOCUMENT'].includes(String(contentType).toUpperCase()) && !text) {
     return {intent:'PAYMENT_EVIDENCE',confidence:'HIGH'};
   }
@@ -132,6 +135,9 @@ export function understandRequest(value, { conversationState = null, contentType
     }
   }
 
+  if (!found.length && /^SUPPORT_(DEVICE|APPLICATION|SCOPE|RESULT)$/.test(String(conversationState || '').toUpperCase()) && text) {
+    found.push({ name: 'SUPPORT_REQUEST', confidence: 'HIGH' });
+  }
   const intents = found.length ? found : [{ name: 'UNKNOWN', confidence: 'LOW' }];
   return Object.freeze({
     primary_intent: intents[0].name,

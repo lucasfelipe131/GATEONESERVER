@@ -126,3 +126,28 @@ test('live mode is limited to the canonical production environment and cannot re
   }
   assert.equal(moneyInCents('30.10'),3010);assert.throws(()=>moneyInCents('30.001'));
 });
+
+test('generic renewal reuses a pending different plan; explicit plan conflicts never replace that charge', async () => {
+  const pg = new PGlite({ extensions: { pgcrypto } }), db = adapter(pg);
+  const customer = randomUUID(), subscription = randomUUID(), monthly = randomUUID(), quarterly = randomUUID(), charge = randomUUID();
+  let creates = 0, recoveries = 0;
+  try {
+    await migrateDatabase(db);
+    await db.query("INSERT INTO plans(id,code,name,duration_months,price_cents) VALUES($1,'monthly','Mensal',1,3000),($2,'quarterly','Trimestral',3,8500)", [monthly, quarterly]);
+    await db.query("INSERT INTO customers(id,name,whatsapp_e164,status) VALUES($1,'Teste Plano','+5511999999998','active')", [customer]);
+    await db.query("INSERT INTO subscriptions(id,customer_id,plan_id,status,expires_on) VALUES($1,$2,$3,'active','2026-11-01')", [subscription, customer, monthly]);
+    await db.query(`INSERT INTO charges(id,subscription_id,plan_id,stage,status,amount_cents,due_on,idempotency_key,mercado_pago_preference_id,message_text)
+      VALUES($1,$2,$3,'manual','approved',8500,'2026-11-01','existing-quarterly','synthetic-quarterly','Cobrança sintética')`, [charge, subscription, quarterly]);
+    const billing = new LiveBillingAutomation({ db, assertEnabled: async () => {}, createCheckout: async () => { creates++; throw new Error('must reuse'); },
+      recoverCheckout: async () => { recoveries++; return { id: 'synthetic-quarterly', checkoutUrl: 'https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=synthetic-quarterly', simulated: false }; } });
+    const result = await billing.requestPayment({ customer_id: customer });
+    assert.equal(result.charge_id, charge); assert.equal(result.plan_code, 'quarterly'); assert.equal(result.amount_cents, 8500);
+    assert.equal(creates, 0); assert.equal(recoveries, 1);
+    assert.equal((await billing.requestPayment({ customer_id: customer })).checkout_url, result.checkout_url);
+    await assert.rejects(billing.requestPayment({ customer_id: customer, plan_code: 'monthly' }), { code: 'PENDING_PAYMENT_PLAN_CONFLICT' });
+    assert.equal((await db.query('SELECT count(*)::int n FROM charges')).rows[0].n, 1);
+    assert.equal((await db.query('SELECT count(*)::int n FROM payments')).rows[0].n, 1);
+    assert.equal((await db.query('SELECT requested_extension_months FROM renewal_jobs')).rows[0].requested_extension_months, 3);
+    assert.equal((await db.query('SELECT plan_id FROM subscriptions')).rows[0].plan_id, monthly);
+  } finally { await pg.close(); }
+});

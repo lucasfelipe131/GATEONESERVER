@@ -46,7 +46,7 @@ export function mergeResponseFacts(base, extra = {}) {
     'customer_id', 'customer_name', 'plan_name', 'subscription_status',
     'expiration', 'payment_status', 'renewal_status', 'checkout_url',
     'amount_cents', 'currency', 'support_case_id', 'handoff_id',
-    'context_status', 'plans', 'operation_state', 'error_code', 'exception_id', 'case_status', 'diagnosis', 'action_performed', 'verification_result', 'simulated', 'conversation_state'
+    'context_status', 'plans', 'operation_state', 'error_code', 'exception_id', 'case_status', 'diagnosis', 'action_performed', 'verification_result', 'simulated', 'conversation_state', 'support_session', 'support_reply'
   ]);
   return Object.freeze(Object.fromEntries(
     Object.entries({ ...base, ...extra }).filter(([key]) => allowedKeys.has(key))
@@ -54,6 +54,15 @@ export function mergeResponseFacts(base, extra = {}) {
 }
 
 export function safeResponseForFacts(facts = {}) {
+  const failures = {
+    PENDING_PAYMENT_PLAN_CONFLICT: 'Já existe uma cobrança pendente para outro plano. Envie QUERO RENOVAR, sem escolher outro plano, para consultar o link existente; para mudar o plano dessa cobrança, envie ATENDENTE.',
+    SUBSCRIPTION_NOT_FOUND: 'Não encontrei uma assinatura vinculada a este número. Envie CADASTRO para preencher ou atualizar seus dados; se já for cliente, o vínculo será conferido antes de acessar outra conta.',
+    CHECKOUT_IN_PROGRESS: 'Estou preparando a cobrança anterior. Aguarde alguns instantes e envie QUERO RENOVAR novamente para consultar o mesmo link.',
+    CHECKOUT_RESULT_REQUIRES_REVIEW: 'A resposta da cobrança precisa ser conferida antes de gerar outro link. Envie ATENDENTE para a equipe verificar e evitar uma cobrança duplicada.',
+    LIVE_BILLING_PAUSED_OR_UNAVAILABLE: 'Não consegui acessar a cobrança agora. Envie ATENDENTE para conferir seu pagamento com a equipe.',
+    SIMULATED_PAYMENT_REJECTED: 'A cobrança encontrada precisa ser revisada antes de receber um pagamento real. Envie ATENDENTE para a equipe conferir.'
+  };
+  if (failures[facts.error_code]) return failures[facts.error_code];
   if (facts.renewal_status === 'COMPLETED') {
     const expiration = formatDate(facts.expiration);
     return expiration
@@ -100,6 +109,7 @@ export function renderConversationResponse({ intent, facts = {}, outcome = null 
   if (outcome === 'HANDOFF_FAILED') {
     return 'Não consegui registrar o encaminhamento agora. Tente novamente em instantes; não vou afirmar que a equipe recebeu antes da confirmação.';
   }
+  if (facts.error_code) return safeResponseForFacts(facts);
 
   switch (intent) {
     case 'GREETING': {
@@ -147,6 +157,7 @@ export function renderConversationResponse({ intent, facts = {}, outcome = null 
     case 'RENEWAL_STATUS':
       return safeResponseForFacts(facts);
     case 'SUPPORT_REQUEST':
+      if (facts.support_reply) return facts.support_reply;
       if (['RESOLVED','CLOSED'].includes(facts.case_status) && ['VERIFIED','HUMAN_VERIFIED'].includes(facts.verification_result)) {
         return 'O caso foi resolvido e o resultado foi verificado. Registrei a solução no histórico do atendimento.';
       }
@@ -197,6 +208,7 @@ function normalizedText(value) {
 }
 
 export function avoidRepeatedResponse(text, recentMessages = [], facts = {}) {
+  if (facts.support_reply || facts.error_code) return { text, repeated: false };
   const normalized = normalizedText(text);
   const recentOutbound = recentMessages
     .filter((message) => String(message.direction).toUpperCase() === 'OUTBOUND')

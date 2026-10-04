@@ -39,13 +39,17 @@ export class LiveBillingAutomation extends SimulationBillingAutomation {
   async reserve({customer_id:customerId,subscription_id:subscriptionId=null,plan_code:planCode=null,correlation_id:correlationId=randomUUID()}) {
     return this.db.transaction(async client => {
       const subscription = await this.subscription(client,{customerId,subscriptionId});
-      const plan = (await client.query('SELECT * FROM plans WHERE active=true AND code=$1',[planCode||subscription.plan_code])).rows[0];
-      if (!plan) throw fail('PLAN_NOT_FOUND');
       let charge = (await client.query(`SELECT ch.*, COALESCE(ch.plan_id,s.plan_id) AS effective_plan_id
         FROM charges ch JOIN subscriptions s ON s.id=ch.subscription_id WHERE ch.subscription_id=$1
         AND ch.status IN ('draft','awaiting_approval','approved','sent')
         ORDER BY ch.created_at DESC LIMIT 1 FOR UPDATE OF ch`,[subscription.subscription_id])).rows[0];
       const existing = Boolean(charge);
+      // A generic renewal request reuses the pending charge's plan. An explicit
+      // change still requires review; never cancel or replace a pending payment.
+      const plan = charge && !planCode
+        ? (await client.query('SELECT * FROM plans WHERE active=true AND id=$1',[charge.effective_plan_id])).rows[0]
+        : (await client.query('SELECT * FROM plans WHERE active=true AND code=$1',[planCode||subscription.plan_code])).rows[0];
+      if (!plan) throw fail('PLAN_NOT_FOUND');
       if (charge && charge.effective_plan_id !== plan.id) throw fail('PENDING_PAYMENT_PLAN_CONFLICT');
       if (charge && (String(charge.mercado_pago_preference_id||'').startsWith('SIM-') ||
           String(charge.mercado_pago_payment_id||'').startsWith('SIM-'))) throw fail('SIMULATED_PAYMENT_REJECTED');
