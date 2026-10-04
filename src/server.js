@@ -1449,7 +1449,7 @@ app.post(
   }
 );
 
-app.post('/webhooks/mercadopago', async (request, reply) => {
+async function handleMercadoPagoWebhook(request, reply) {
   const paymentMode = await getSetting(db, 'payment_mode', config.PAYMENT_MODE);
   const runtimeConfig = {
     ...(await getRuntimeConfig(db, config)),
@@ -1499,7 +1499,12 @@ app.post('/webhooks/mercadopago', async (request, reply) => {
     return reply.code(503).send({received:false,retry:true});
   }
   return { received: true };
-});
+}
+
+app.post('/webhooks/mercadopago', handleMercadoPagoWebhook);
+// Existing checkout preferences used the landing page URL as their callback.
+// Keep those notifications on the same signed, provider-verified handler.
+app.post('/captacao', handleMercadoPagoWebhook);
 
 app.get('/api/admin/summary', { preHandler: protect(CAPABILITIES.DASHBOARD_READ) }, async () => {
   const [customers, charges, renewals, leads, revenue, settings] = await Promise.all([
