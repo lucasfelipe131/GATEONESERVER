@@ -279,6 +279,46 @@ test('tool result injection é tratada como dado e não como instrução', async
   assert.doesNotMatch(result.response_text, /confirmado/i);
 });
 
+test('handoff sends one acknowledgement, stays silent while requested or assigned, and resumes after resolution', async () => {
+  const runtime = fakeRuntime();
+  const first = await runtime.process('atendente', 'handoff-start');
+  assert.equal(first.outcome, 'HANDOFF_CREATED');
+  assert.equal(first.suppress_reply, false);
+  assert.ok(first.response_text);
+  const duplicate = await runtime.process('atendente', 'handoff-start');
+  assert.equal(duplicate.suppress_reply, true);
+  assert.equal(duplicate.response_text, '');
+  const handoff = [...runtime.repository.handoffs.values()][0];
+  for (const status of ['REQUESTED', 'ASSIGNED']) {
+    handoff.status = status;
+    for (const text of ['oi', 'atendente', 'quero pagar', 'formas de pagamento']) {
+      const pending = await runtime.process(text, `${status}:${text}`);
+      assert.equal(pending.outcome, 'HANDOFF_PENDING');
+      assert.equal(pending.suppress_reply, true);
+      assert.equal(pending.response_text, '');
+      assert.deepEqual(pending.tool_calls.map(call => call.tool), ['resolveCustomer']);
+    }
+  }
+  assert.equal(runtime.repository.handoffs.size, 1);
+  assert.equal(runtime.state.paymentCreates, 0);
+  handoff.status = 'RESOLVED';
+  const resumed = await runtime.process('oi', 'resolved');
+  assert.equal(resumed.suppress_reply, false);
+  assert.ok(resumed.response_text);
+});
+
+test('unidentified and ambiguous contacts also stay silent after their handoff', async () => {
+  for (const phone of ['unknown', 'ambiguous']) {
+    const runtime = fakeRuntime();
+    await runtime.process('atendente', 'start', phone);
+    const pending = await runtime.process('oi', 'followup', phone);
+    assert.equal(pending.outcome, 'HANDOFF_PENDING');
+    assert.equal(pending.suppress_reply, true);
+    assert.equal(pending.response_text, '');
+    assert.equal(runtime.repository.handoffs.size, 1);
+  }
+});
+
 test('pedido humano só afirma handoff depois do registro efetivo', async () => {
   const runtime = fakeRuntime();
   const result = await runtime.process('quero falar com alguém', 'msg-human');

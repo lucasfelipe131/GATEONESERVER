@@ -45,6 +45,7 @@ function statusFromToolError(error) {
 }
 
 function resultFromStored(stored) {
+  const suppressReply = stored.outcome === 'HANDOFF_PENDING' || Boolean(stored.response_facts?.handoff_id);
   return {
     contract: 'GateConversationTurn.v1',
     handled: true,
@@ -53,7 +54,8 @@ function resultFromStored(stored) {
     customer_id: stored.customer_id || null,
     context_snapshot_id: stored.context_snapshot_id || null,
     correlation_id: stored.correlation_id,
-    response_text: stored.response_text,
+    response_text: suppressReply ? '' : stored.response_text,
+    suppress_reply: suppressReply,
     response_facts: stored.response_facts || {},
     response_status: stored.response_status,
     outcome: stored.outcome,
@@ -151,7 +153,7 @@ export class GateConversationAgent {
           }
         }
 
-        if (activeHandoff && resolution.status !== 'AMBIGUOUS') {
+        if (activeHandoff) {
           responseFacts = mergeResponseFacts(responseFacts,{handoff_id:activeHandoff.handoff_id});
           outcome = 'HANDOFF_PENDING';
           autonomous = false;
@@ -430,6 +432,7 @@ export class GateConversationAgent {
         response_text: responseText,
         outcome,
         conversation_state: conversationState,
+        suppress_reply: outcome === 'HANDOFF_PENDING',
         tool_calls: toolCalls.map((call) => ({
           tool: call.tool,
           status: call.status,

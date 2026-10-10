@@ -106,7 +106,7 @@ export function renderConversationResponse({ intent, facts = {}, outcome = null 
   if (outcome === 'HANDOFF_CREATED') {
     return 'Certo. Registrei o atendimento para uma pessoa da equipe continuar com todo o contexto, sem você precisar repetir tudo.';
   }
-  if (outcome === 'HANDOFF_PENDING') return 'Seu atendimento já está encaminhado para a equipe. Vou manter o contexto para você não precisar repetir a solicitação.';
+  if (outcome === 'HANDOFF_PENDING') return '';
   if (outcome === 'HANDOFF_FAILED') {
     return 'Não consegui registrar o encaminhamento agora. Tente novamente em instantes; não vou afirmar que a equipe recebeu antes da confirmação.';
   }
