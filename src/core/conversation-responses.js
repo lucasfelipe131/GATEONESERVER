@@ -46,7 +46,7 @@ export function mergeResponseFacts(base, extra = {}) {
     'customer_id', 'customer_name', 'plan_name', 'subscription_status',
     'expiration', 'payment_status', 'renewal_status', 'checkout_url',
     'amount_cents', 'currency', 'support_case_id', 'handoff_id',
-    'context_status', 'plans', 'operation_state', 'error_code', 'exception_id', 'case_status', 'diagnosis', 'action_performed', 'verification_result', 'simulated', 'conversation_state', 'support_session', 'support_reply'
+    'context_status', 'plans', 'payment_methods', 'operation_state', 'error_code', 'exception_id', 'case_status', 'diagnosis', 'action_performed', 'verification_result', 'simulated', 'conversation_state', 'support_session', 'support_reply'
   ]);
   return Object.freeze(Object.fromEntries(
     Object.entries({ ...base, ...extra }).filter(([key]) => allowedKeys.has(key))
@@ -55,6 +55,7 @@ export function mergeResponseFacts(base, extra = {}) {
 
 export function safeResponseForFacts(facts = {}) {
   const failures = {
+    PAYMENT_OPTIONS_UNAVAILABLE: 'Não consegui consultar as formas de pagamento agora. As opções disponíveis são exibidas no checkout seguro do Mercado Pago; você também pode enviar ATENDENTE.',
     PENDING_PAYMENT_PLAN_CONFLICT: 'Já existe uma cobrança pendente para outro plano. Envie QUERO RENOVAR, sem escolher outro plano, para consultar o link existente; para mudar o plano dessa cobrança, envie ATENDENTE.',
     SUBSCRIPTION_NOT_FOUND: 'Não encontrei uma assinatura vinculada a este número. Envie CADASTRO para preencher ou atualizar seus dados; se já for cliente, o vínculo será conferido antes de acessar outra conta.',
     CHECKOUT_IN_PROGRESS: 'Estou preparando a cobrança anterior. Aguarde alguns instantes e envie QUERO RENOVAR novamente para consultar o mesmo link.',
@@ -144,11 +145,16 @@ export function renderConversationResponse({ intent, facts = {}, outcome = null 
         return `• ${plan.name}${price ? ` — ${price}` : ''}`;
       }).join('\n')}`;
     }
+    case 'PAYMENT_METHODS_QUERY': {
+      const allowed = new Set(['Pix', 'Cartão de crédito', 'Boleto']);
+      const methods = Array.isArray(facts.payment_methods) ? facts.payment_methods.filter(method => allowed.has(method)) : [];
+      return `${facts.simulated ? '[Simulação] ' : ''}${methods.length ? `O Mercado Pago oferece ${methods.join(', ')}.` : 'As formas de pagamento disponíveis aparecem no checkout do Mercado Pago.'} Você escolhe a opção no link seguro; a disponibilidade e as condições finais são mostradas lá. Para receber sua cobrança, envie QUERO PAGAR ou QUERO RENOVAR. Nunca envie número de cartão, senha ou código de segurança pelo WhatsApp.`;
+    }
     case 'PAYMENT_REQUEST':
     case 'RENEWAL_REQUEST': {
       if (facts.checkout_url) {
         const amount = currency(facts.amount_cents, facts.currency || 'BRL');
-        return `${facts.simulated ? '[Simulação] ' : ''}${prefix}${facts.operation_state === 'EXISTING_PAYMENT' || facts.payment_status === 'PENDING' ? 'este é o link da sua cobrança pendente' : 'a cobrança da renovação está pronta'}${amount ? ` no valor de ${amount}` : ''}: ${facts.checkout_url}`;
+        return `${facts.simulated ? '[Simulação] ' : ''}${prefix}${facts.operation_state === 'EXISTING_PAYMENT' || facts.payment_status === 'PENDING' ? 'este é o link da sua cobrança pendente' : 'a cobrança da renovação está pronta'}${facts.plan_name ? ` do plano ${facts.plan_name}` : ''}${amount ? ` no valor de ${amount}` : ''}:\n${facts.checkout_url}\n\nEscolha a forma de pagamento no checkout seguro do Mercado Pago. A confirmação é automática após a aprovação do provedor; comprovante ou retorno do checkout não confirmam o pagamento. Nunca envie dados de cartão pelo WhatsApp.`;
       }
       return safeResponseForFacts(facts);
     }

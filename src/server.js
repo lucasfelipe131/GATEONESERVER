@@ -71,6 +71,7 @@ import { PgConversationAgentRepository } from './services/conversation-operation
 import { buildIdempotencyKey, renderChargeMessage } from './domain/billing.js';
 import {
   createCheckoutPreference,
+  getMercadoPagoPaymentOptions,
   getMercadoPagoPayment,
   getMercadoPagoReadiness,
   verifyMercadoPagoWebhook
@@ -799,6 +800,12 @@ app.post('/api/v1/core/operations', async (request, reply) => {
             return { subscription_id: context.subscription_id, expires_at: context.expires_at };
           },
           listPlans: () => listActivePlans(db),
+          getPaymentOptions: async () => {
+            const runtime = await getRuntimeConfig(db, config);
+            runtime.PAYMENT_MODE = await getSetting(db, 'payment_mode', config.PAYMENT_MODE);
+            try { return await getMercadoPagoPaymentOptions(runtime); }
+            catch { throw Object.assign(new Error('PAYMENT_OPTIONS_UNAVAILABLE'), { code: 'PAYMENT_OPTIONS_UNAVAILABLE' }); }
+          },
           getPaymentStatus: (toolInput) => paymentOperationStatus(db, {
             customerId: toolInput.customer_id,
             subscriptionId: toolInput.subscription_id || null

@@ -69,7 +69,7 @@ test('chatbot and automatic billing share durable PostgreSQL operations and conf
       const result = await bot.turn('quero renovar','first');
       assert.equal(result.proposed_action,'createPaymentRequest',JSON.stringify(result));
       assert.equal(result.response_facts.payment_status,'PENDING');
-      assert.match(result.response_text,/\[Simulação\].*https:\/\/staging.example\/pagamento/);
+      assert.match(result.response_text,/\[Simulação\][\s\S]*https:\/\/staging.example\/pagamento/);
       assert.equal(result.conversation_state,'waiting_payment');
       charge = (await db.query('SELECT * FROM charges')).rows[0];
       payment = (await db.query('SELECT * FROM payments')).rows[0];

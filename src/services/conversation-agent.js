@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { understandRequest } from '../core/conversation-intents.js';
+import { understandRequest, detectRequestedPlan } from '../core/conversation-intents.js';
 import { GATE_CONVERSATION_AGENT_PROMPT_VERSION } from '../core/conversation-prompt.js';
 import {
   avoidRepeatedResponse,
@@ -13,14 +13,14 @@ import { RenewalAgent } from './renewal-agent.js';
 import { validatedSemanticIntent } from './conversation-understanding.js';
 
 const AUTOMATION_ELIGIBLE = new Set([
-  'GREETING', 'RENEWAL_REQUEST', 'PAYMENT_REQUEST', 'PAYMENT_STATUS',
+  'GREETING', 'RENEWAL_REQUEST', 'PAYMENT_REQUEST', 'PAYMENT_METHODS_QUERY', 'PAYMENT_STATUS',
   'PAYMENT_EVIDENCE', 'EXPIRATION_QUERY', 'RENEWAL_STATUS',
   'SUBSCRIPTION_QUERY', 'SUPPORT_REQUEST', 'PLAN_QUERY'
 ]);
 
 function contextPurpose(intent) {
   if (['RENEWAL_REQUEST', 'RENEWAL_STATUS'].includes(intent)) return 'RENEWAL';
-  if (['PAYMENT_REQUEST', 'PAYMENT_STATUS', 'PAYMENT_EVIDENCE', 'EXPIRATION_QUERY'].includes(intent)) return 'PAYMENT';
+  if (['PAYMENT_REQUEST', 'PAYMENT_METHODS_QUERY', 'PAYMENT_STATUS', 'PAYMENT_EVIDENCE', 'EXPIRATION_QUERY'].includes(intent)) return 'PAYMENT';
   if (['SUPPORT_REQUEST', 'COMPLAINT', 'HUMAN_REQUEST', 'CANCELLATION_REQUEST'].includes(intent)) return 'SUPPORT';
   if (['PLAN_QUERY', 'NEW_CUSTOMER', 'TRIAL_REQUEST', 'REFERRAL'].includes(intent)) return 'SALES';
   return 'CONVERSATION';
@@ -107,6 +107,7 @@ export class GateConversationAgent {
     let customerId = null;
     let contextSnapshot = null;
     let intentResult = understandRequest(text, { contentType });
+    planCode = detectRequestedPlan(text) || planCode;
     let turns = [];
     let responseFacts = responseFactsFromContext(null);
     let proposedAction = null;
@@ -184,6 +185,10 @@ export class GateConversationAgent {
             outcome = 'HANDOFF_CREATED';
             autonomous = false;
             conversationState = 'human_handoff';
+          } else if (intentResult.primary_intent === 'PAYMENT_METHODS_QUERY') {
+            const options = await discoveryTurn.execute('getPaymentOptions', {});
+            responseFacts = mergeResponseFacts(responseFacts, { payment_methods: options.methods, simulated: options.simulated === true });
+            proposedAction = 'getPaymentOptions';
           } else if (['PLAN_QUERY', 'NEW_CUSTOMER', 'TRIAL_REQUEST', 'REFERRAL'].includes(intentResult.primary_intent)) {
             const plans = await discoveryTurn.execute('listPlans', {});
             responseFacts = mergeResponseFacts(responseFacts, { plans });
