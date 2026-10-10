@@ -14,7 +14,7 @@ export class PgConversationAgentRepository {
 
   async activeHandoff(conversationId, customerId) {
     const result = await this.db.query(`SELECT handoff_id,status FROM conversation_handoffs
-      WHERE conversation_id = $1 AND customer_id IS NOT DISTINCT FROM $2::uuid
+      WHERE conversation_id = $1 AND (customer_id IS NOT DISTINCT FROM $2::uuid OR customer_id IS NULL)
       AND status IN ('REQUESTED','ASSIGNED') ORDER BY requested_at DESC LIMIT 1`, [conversationId,customerId]);
     if(result.rows[0]) return result.rows[0];
     const phone=/^whatsapp:(\+?\d{10,15})$/.exec(conversationId)?.[1]?.replace(/\D/g,'');
@@ -22,7 +22,7 @@ export class PgConversationAgentRepository {
     const legacy=await this.db.query(`SELECT 1 FROM conversation_sessions cs WHERE
       regexp_replace(cs.whatsapp_e164,'[^0-9]','','g')=$1 AND cs.state='support' AND cs.expires_at>now()
       AND ($2::uuid IS NULL OR EXISTS(SELECT 1 FROM customers c WHERE c.id=$2 AND regexp_replace(COALESCE(c.whatsapp_e164,''),'[^0-9]','','g')=$1))
-      AND NOT EXISTS(SELECT 1 FROM conversation_handoffs h WHERE h.conversation_id=$3 AND h.customer_id IS NOT DISTINCT FROM $2::uuid)`,
+      AND NOT EXISTS(SELECT 1 FROM conversation_handoffs h WHERE h.conversation_id=$3 AND (h.customer_id IS NOT DISTINCT FROM $2::uuid OR h.customer_id IS NULL))`,
       [phone,customerId,conversationId]);
     if(!legacy.rowCount) return null;
     return this.requestHandoff({conversation_id:conversationId,customer_id:customerId,correlation_id:randomUUID(),
@@ -72,7 +72,7 @@ export class PgConversationAgentRepository {
     return this.db.transaction(async (client) => {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`handoff:${input.conversation_id}`]);
       const active = await client.query(`SELECT handoff_id,status FROM conversation_handoffs
-        WHERE conversation_id = $1 AND customer_id IS NOT DISTINCT FROM $2::uuid
+        WHERE conversation_id = $1 AND (customer_id IS NOT DISTINCT FROM $2::uuid OR customer_id IS NULL)
         AND status IN ('REQUESTED','ASSIGNED') LIMIT 1`, [input.conversation_id,input.customer_id || null]);
       if (active.rows[0]) return {...active.rows[0],duplicate:true};
       const result = await client.query(
@@ -171,7 +171,7 @@ export class InMemoryConversationAgentRepository {
 
   async activeHandoff(conversationId, customerId) {
     return [...this.handoffs.values()].find(row => row.conversation_id === conversationId &&
-      (row.customer_id || null) === (customerId || null) && ['REQUESTED','ASSIGNED'].includes(row.status)) || null;
+      (!row.customer_id || row.customer_id === (customerId || null)) && ['REQUESTED','ASSIGNED'].includes(row.status)) || null;
   }
 
   async claimTurn({ conversationKey, messageId, leaseMs = 30_000 }) {

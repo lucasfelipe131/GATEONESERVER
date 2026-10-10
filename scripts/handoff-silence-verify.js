@@ -63,6 +63,12 @@ export async function verifyHandoffSilence({ db, config, env = process.env }) {
       await client.query("UPDATE conversation_handoffs SET status='RESOLVED' WHERE handoff_id=$1", [handoff.handoff_id]);
       assert.equal((await inbound('oi')).automationPaused, false);
       report.cases.push({ status: 'RESOLVED', automationPaused: false });
+      const unidentified = await repository.requestHandoff({ conversation_id: conversationId,
+        customer_id: null, correlation_id: randomUUID(), reason: 'SYNTHETIC_UNIDENTIFIED',
+        idempotency_key: randomUUID() });
+      assert.equal((await inbound('MENU')).automationPaused, true);
+      report.cases.push({ status: 'UNIDENTIFIED_TO_MATCHED', automationPaused: true });
+      await client.query("UPDATE conversation_handoffs SET status='RESOLVED' WHERE handoff_id=$1", [unidentified.handoff_id]);
       const legacyPhone = `55119${randomInt(10000000, 99999999)}`;
       await registerQrInbound(isolated, { phone: legacyPhone, text: 'atendente', providerId: randomUUID() });
       await setConversationState(isolated, legacyPhone, 'support');

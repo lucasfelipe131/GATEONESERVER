@@ -319,6 +319,21 @@ test('unidentified and ambiguous contacts also stay silent after their handoff',
   }
 });
 
+test('identifying a contact after an unidentified handoff cannot restart automatic replies', async () => {
+  let matched = false;
+  const runtime = fakeRuntime({ handlers: { resolveCustomer: async () => matched
+    ? { status: 'MATCHED', customer_id: CUSTOMER_A } : { status: 'NOT_FOUND' } } });
+  const first = await runtime.process('atendente', 'unknown-handoff');
+  assert.equal(first.customer_id, null);
+  matched = true;
+  const pending = await runtime.process('quero pagar', 'identified-later');
+  assert.equal(pending.outcome, 'HANDOFF_PENDING');
+  assert.equal(pending.suppress_reply, true);
+  assert.equal(pending.response_text, '');
+  assert.equal(runtime.state.paymentCreates, 0);
+  assert.equal(runtime.repository.handoffs.size, 1);
+});
+
 test('pedido humano só afirma handoff depois do registro efetivo', async () => {
   const runtime = fakeRuntime();
   const result = await runtime.process('quero falar com alguém', 'msg-human');

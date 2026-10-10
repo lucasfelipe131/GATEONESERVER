@@ -18,7 +18,7 @@ test('handoff pause survives session expiry and restarts, preserves inbound hist
   try {
     await migrateDatabase(db);
     const report = await verifyHandoffSilence({ db, config, env });
-    assert.equal(report.cases.length, 4);
+    assert.equal(report.cases.length, 5);
     assert.equal(report.rolledBack, true);
     assert.equal(report.databaseCountsUnchanged, true);
     assert.equal(report.messagesSent, 0);
