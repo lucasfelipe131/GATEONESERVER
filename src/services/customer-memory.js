@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { normalizePhone } from '../security.js';
+import { PgConversationAgentRepository } from './conversation-operations.js';
 
 const PLACEHOLDER_NAMES = new Set(['', 'cliente', 'customer', 'sem nome', 'não informado']);
 
@@ -321,6 +322,10 @@ export async function registerQrInbound(db, {
 }) {
   const normalized = normalizePhone(phone);
   const customer = await findOrCreateCustomer(db, { phone: normalized, displayName });
+  const handoffRepository = new PgConversationAgentRepository(db);
+  const handoff = await handoffRepository.activeHandoff(
+    `whatsapp:${normalized.replace(/\D/g, '')}`, customer.id
+  );
   const conversation = await touchConversationActivity(db, {
     phone: normalized,
     customerId: customer.id
@@ -331,6 +336,10 @@ export async function registerQrInbound(db, {
     conversationId: conversation.conversation_id,
     correlationId: conversation.correlation_id
   });
+  if (saved && handoff && /^MENU$/i.test(String(text || '').trim())) {
+    await handoffRepository.resumeHandoffAutomation(`whatsapp:${normalized.replace(/\D/g, '')}`,customer.id);
+    handoff.automation_resumed = true;
+  }
   const issue = detectCustomerIssue(text);
   const issueRecord = saved
     ? await recordIssue(db, customer.id, text, issue, conversation.correlation_id)
@@ -352,6 +361,7 @@ export async function registerQrInbound(db, {
     },
     needsName,
     duplicate: !saved,
+    automationPaused: Boolean(handoff && !handoff.automation_resumed),
     conversationId: conversation.conversation_id,
     correlationId: conversation.correlation_id,
     sessionState: session?.state || 'idle',

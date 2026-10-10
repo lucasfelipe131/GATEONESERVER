@@ -4,7 +4,7 @@ import { detectPromptInjection } from '../core/conversation-intents.js';
 // Semantic interpretation can suggest queries or a human handoff, never a
 // payment, renewal, cancellation or provisioning instruction.
 export const SEMANTIC_INTENTS = Object.freeze([
-  'GREETING', 'EXPIRATION_QUERY', 'SUBSCRIPTION_QUERY', 'PAYMENT_STATUS',
+  'GREETING', 'EXPIRATION_QUERY', 'SUBSCRIPTION_QUERY', 'PAYMENT_STATUS', 'PAYMENT_METHODS_QUERY',
   'RENEWAL_STATUS', 'PLAN_QUERY', 'SUPPORT_REQUEST', 'HUMAN_REQUEST', 'UNKNOWN'
 ]);
 const STATES = new Set(['GENERAL', 'WAITING_PAYMENT', 'RENEWAL', 'PROCESSING', 'VERIFYING']);

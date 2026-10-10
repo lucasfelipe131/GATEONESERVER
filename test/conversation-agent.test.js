@@ -170,9 +170,12 @@ test('IA maliciosa ou indisponível não cria cobrança nem contorna instrução
   assert.equal((await offline.process('algo sem sentido', 'semantic-offline')).intent, 'UNKNOWN');
 });
 
-test('E2E local: quero renovar cria uma única cobrança fake e só confirma após verification', async () => {
+test('E2E local: renewal selects a plan before one fake charge and confirms only after verification', async () => {
   const runtime = fakeRuntime();
-  const requested = await runtime.process('quero renovar', 'msg-1');
+  const selection = await runtime.process('quero renovar', 'msg-selection');
+  assert.equal(selection.conversation_state,'awaiting_plan');
+  assert.equal(runtime.state.paymentCreates,0);
+  const requested = await runtime.process('mensal', 'msg-1');
   assert.equal(requested.intent, 'RENEWAL_REQUEST');
   assert.equal(requested.proposed_action, 'createPaymentRequest');
   assert.equal(requested.response_facts.payment_status, 'PENDING');
@@ -202,8 +205,8 @@ test('pagamento pending não inicia provisioning nem confirma pagamento', async 
 
 test('mensagens próximas convergem para a mesma decisão por idempotência', async () => {
   const runtime = fakeRuntime();
-  const first = await runtime.process('quero renovar', 'same-message');
-  const duplicate = await runtime.process('quero renovar', 'same-message');
+  const first = await runtime.process('quero renovar mensal', 'same-message');
+  const duplicate = await runtime.process('quero renovar mensal', 'same-message');
   assert.equal(first.decision_id, duplicate.decision_id);
   assert.equal(duplicate.duplicate, true);
   assert.equal(runtime.state.paymentCreates, 1);
@@ -212,7 +215,7 @@ test('mensagens próximas convergem para a mesma decisão por idempotência', as
 
 test('quero renovar seguido de manda o pix converge para uma cobrança', async () => {
   const runtime = fakeRuntime();
-  await runtime.process('quero renovar', 'msg-sequence-1');
+  await runtime.process('quero renovar mensal', 'msg-sequence-1');
   const second = await runtime.process('manda o pix', 'msg-sequence-2');
   assert.equal(runtime.state.paymentCreates, 1);
   assert.equal(second.response_facts.payment_status, 'PENDING');
@@ -221,7 +224,7 @@ test('quero renovar seguido de manda o pix converge para uma cobrança', async (
 
 test('reinício do agente consulta operação persistida e não inicia nova saga', async () => {
   const runtime = fakeRuntime();
-  await runtime.process('quero renovar', 'msg-before-restart');
+  await runtime.process('quero renovar mensal', 'msg-before-restart');
   const restarted = new GateConversationAgent({
     repository: runtime.repository,
     registry: runtime.registry
@@ -279,6 +282,61 @@ test('tool result injection é tratada como dado e não como instrução', async
   assert.doesNotMatch(result.response_text, /confirmado/i);
 });
 
+test('handoff sends one acknowledgement, stays silent while requested or assigned, and resumes after resolution', async () => {
+  const runtime = fakeRuntime();
+  const first = await runtime.process('atendente', 'handoff-start');
+  assert.equal(first.outcome, 'HANDOFF_CREATED');
+  assert.equal(first.suppress_reply, false);
+  assert.ok(first.response_text);
+  const duplicate = await runtime.process('atendente', 'handoff-start');
+  assert.equal(duplicate.suppress_reply, true);
+  assert.equal(duplicate.response_text, '');
+  const handoff = [...runtime.repository.handoffs.values()][0];
+  for (const status of ['REQUESTED', 'ASSIGNED']) {
+    handoff.status = status;
+    for (const text of ['oi', 'atendente', 'quero pagar', 'formas de pagamento']) {
+      const pending = await runtime.process(text, `${status}:${text}`);
+      assert.equal(pending.outcome, 'HANDOFF_PENDING');
+      assert.equal(pending.suppress_reply, true);
+      assert.equal(pending.response_text, '');
+      assert.deepEqual(pending.tool_calls.map(call => call.tool), ['resolveCustomer']);
+    }
+  }
+  assert.equal(runtime.repository.handoffs.size, 1);
+  assert.equal(runtime.state.paymentCreates, 0);
+  handoff.status = 'RESOLVED';
+  const resumed = await runtime.process('oi', 'resolved');
+  assert.equal(resumed.suppress_reply, false);
+  assert.ok(resumed.response_text);
+});
+
+test('unidentified and ambiguous contacts also stay silent after their handoff', async () => {
+  for (const phone of ['unknown', 'ambiguous']) {
+    const runtime = fakeRuntime();
+    await runtime.process('atendente', 'start', phone);
+    const pending = await runtime.process('oi', 'followup', phone);
+    assert.equal(pending.outcome, 'HANDOFF_PENDING');
+    assert.equal(pending.suppress_reply, true);
+    assert.equal(pending.response_text, '');
+    assert.equal(runtime.repository.handoffs.size, 1);
+  }
+});
+
+test('identifying a contact after an unidentified handoff cannot restart automatic replies', async () => {
+  let matched = false;
+  const runtime = fakeRuntime({ handlers: { resolveCustomer: async () => matched
+    ? { status: 'MATCHED', customer_id: CUSTOMER_A } : { status: 'NOT_FOUND' } } });
+  const first = await runtime.process('atendente', 'unknown-handoff');
+  assert.equal(first.customer_id, null);
+  matched = true;
+  const pending = await runtime.process('quero pagar', 'identified-later');
+  assert.equal(pending.outcome, 'HANDOFF_PENDING');
+  assert.equal(pending.suppress_reply, true);
+  assert.equal(pending.response_text, '');
+  assert.equal(runtime.state.paymentCreates, 0);
+  assert.equal(runtime.repository.handoffs.size, 1);
+});
+
 test('pedido humano só afirma handoff depois do registro efetivo', async () => {
   const runtime = fakeRuntime();
   const result = await runtime.process('quero falar com alguém', 'msg-human');
@@ -286,6 +344,21 @@ test('pedido humano só afirma handoff depois do registro efetivo', async () => 
   assert.ok(result.response_facts.handoff_id);
   assert.match(result.response_text, /Registrei o atendimento/i);
   assert.equal(runtime.repository.handoffs.size, 1);
+});
+
+test('MENU opts into automation without cancelling the human request; a new human request pauses again', async () => {
+  const runtime=fakeRuntime();
+  const first=await runtime.process('atendente','handoff-optin');
+  assert.match(first.response_text,/MENU/);
+  await runtime.process('menu','optin-menu');
+  const plans=await runtime.process('planos','optin-plans');
+  assert.equal(plans.proposed_action,'listPlans');
+  assert.equal(runtime.repository.handoffs.size,1);
+  assert.equal([...runtime.repository.handoffs.values()][0].status,'REQUESTED');
+  const again=await runtime.process('atendente','optin-return-human');
+  assert.equal(again.outcome,'HANDOFF_CREATED');
+  assert.equal(again.response_facts.handoff_id,first.response_facts.handoff_id);
+  assert.equal((await runtime.process('oi','optin-wait')).suppress_reply,true);
 });
 
 test('identidade ambígua bloqueia consulta e registra handoff', async () => {
@@ -305,7 +378,7 @@ test('provider human action registra handoff e nunca declara sucesso', async () 
       }
     }
   });
-  const result = await runtime.process('quero renovar', 'msg-provider-human');
+  const result = await runtime.process('quero renovar mensal', 'msg-provider-human');
   assert.equal(result.outcome, 'HANDOFF_CREATED');
   assert.ok(result.response_facts.handoff_id);
   assert.doesNotMatch(result.response_text, /sucesso|concluída/i);

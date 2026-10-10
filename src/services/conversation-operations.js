@@ -13,8 +13,9 @@ export class PgConversationAgentRepository {
   }
 
   async activeHandoff(conversationId, customerId) {
-    const result = await this.db.query(`SELECT handoff_id,status FROM conversation_handoffs
-      WHERE conversation_id = $1 AND customer_id IS NOT DISTINCT FROM $2::uuid
+    const result = await this.db.query(`SELECT handoff_id,status,
+      COALESCE(intent->>'automation_resumed','false') = 'true' AS automation_resumed FROM conversation_handoffs
+      WHERE conversation_id = $1 AND (customer_id IS NOT DISTINCT FROM $2::uuid OR customer_id IS NULL)
       AND status IN ('REQUESTED','ASSIGNED') ORDER BY requested_at DESC LIMIT 1`, [conversationId,customerId]);
     if(result.rows[0]) return result.rows[0];
     const phone=/^whatsapp:(\+?\d{10,15})$/.exec(conversationId)?.[1]?.replace(/\D/g,'');
@@ -22,7 +23,7 @@ export class PgConversationAgentRepository {
     const legacy=await this.db.query(`SELECT 1 FROM conversation_sessions cs WHERE
       regexp_replace(cs.whatsapp_e164,'[^0-9]','','g')=$1 AND cs.state='support' AND cs.expires_at>now()
       AND ($2::uuid IS NULL OR EXISTS(SELECT 1 FROM customers c WHERE c.id=$2 AND regexp_replace(COALESCE(c.whatsapp_e164,''),'[^0-9]','','g')=$1))
-      AND NOT EXISTS(SELECT 1 FROM conversation_handoffs h WHERE h.conversation_id=$3 AND h.customer_id IS NOT DISTINCT FROM $2::uuid)`,
+      AND NOT EXISTS(SELECT 1 FROM conversation_handoffs h WHERE h.conversation_id=$3 AND (h.customer_id IS NOT DISTINCT FROM $2::uuid OR h.customer_id IS NULL))`,
       [phone,customerId,conversationId]);
     if(!legacy.rowCount) return null;
     return this.requestHandoff({conversation_id:conversationId,customer_id:customerId,correlation_id:randomUUID(),
@@ -38,6 +39,14 @@ export class PgConversationAgentRepository {
       [idempotencyKey]
     );
     return result.rows[0] || null;
+  }
+
+  async resumeHandoffAutomation(conversationId, customerId) {
+    const result = await this.db.query(`UPDATE conversation_handoffs
+      SET intent = (CASE WHEN jsonb_typeof(intent)='object' THEN intent ELSE '{}'::jsonb END) || jsonb_build_object('automation_resumed',true), updated_at=now()
+      WHERE conversation_id=$1 AND (customer_id IS NOT DISTINCT FROM $2::uuid OR customer_id IS NULL)
+        AND status IN ('REQUESTED','ASSIGNED') RETURNING handoff_id`, [conversationId,customerId]);
+    return result.rowCount > 0;
   }
 
   async claimTurn({ conversationKey, messageId, customerId = null, leaseMs = 30_000 }) {
@@ -72,9 +81,13 @@ export class PgConversationAgentRepository {
     return this.db.transaction(async (client) => {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`handoff:${input.conversation_id}`]);
       const active = await client.query(`SELECT handoff_id,status FROM conversation_handoffs
-        WHERE conversation_id = $1 AND customer_id IS NOT DISTINCT FROM $2::uuid
+        WHERE conversation_id = $1 AND (customer_id IS NOT DISTINCT FROM $2::uuid OR customer_id IS NULL)
         AND status IN ('REQUESTED','ASSIGNED') LIMIT 1`, [input.conversation_id,input.customer_id || null]);
-      if (active.rows[0]) return {...active.rows[0],duplicate:true};
+      if (active.rows[0]) {
+        await client.query(`UPDATE conversation_handoffs SET intent=(CASE WHEN jsonb_typeof(intent)='object' THEN intent ELSE '{}'::jsonb END) ||
+          jsonb_build_object('automation_resumed',false),updated_at=now() WHERE handoff_id=$1`,[active.rows[0].handoff_id]);
+        return {...active.rows[0],duplicate:true};
+      }
       const result = await client.query(
         `INSERT INTO conversation_handoffs
           (handoff_id, conversation_id, customer_id, context_snapshot_id, correlation_id,
@@ -171,7 +184,14 @@ export class InMemoryConversationAgentRepository {
 
   async activeHandoff(conversationId, customerId) {
     return [...this.handoffs.values()].find(row => row.conversation_id === conversationId &&
-      (row.customer_id || null) === (customerId || null) && ['REQUESTED','ASSIGNED'].includes(row.status)) || null;
+      (!row.customer_id || row.customer_id === (customerId || null)) && ['REQUESTED','ASSIGNED'].includes(row.status)) || null;
+  }
+
+  async resumeHandoffAutomation(conversationId, customerId) {
+    const row = await this.activeHandoff(conversationId,customerId);
+    if (!row) return false;
+    row.automation_resumed = true;
+    return true;
   }
 
   async claimTurn({ conversationKey, messageId, leaseMs = 30_000 }) {
@@ -192,7 +212,7 @@ export class InMemoryConversationAgentRepository {
 
   async requestHandoff(input) {
     const active = await this.activeHandoff(input.conversation_id,input.customer_id);
-    if (active) return {...active,duplicate:true};
+    if (active) { active.automation_resumed = false; return {...active,duplicate:true}; }
     const existing = this.handoffs.get(input.idempotency_key);
     if (existing) return { ...existing, duplicate: true };
     const handoff = { handoff_id: randomUUID(), status: 'REQUESTED', duplicate: false, ...input };
