@@ -46,7 +46,7 @@ export async function verifyHandoffSilence({ db, config, env = process.env }) {
       for (const status of ['REQUESTED', 'ASSIGNED']) {
         await client.query('UPDATE conversation_handoffs SET status=$2 WHERE handoff_id=$1', [handoff.handoff_id, status]);
         await client.query("UPDATE conversation_sessions SET expires_at=now()-interval '2 days' WHERE whatsapp_e164=$1", [`+${phone}`]);
-        for (const text of ['oi', 'MENU', 'CADASTRO', 'quero pagar', '[Imagem recebida] comprovante']) {
+        for (const text of ['oi', 'me mostre as opções', 'CADASTRO', 'quero pagar', '[Imagem recebida] comprovante']) {
           assert.equal((await inbound(text)).automationPaused, true);
         }
         const agent = new GateConversationAgent({ repository: new PgConversationAgentRepository(isolated),
@@ -60,19 +60,26 @@ export async function verifyHandoffSilence({ db, config, env = process.env }) {
         assert.equal(pending.response_text, '');
         report.cases.push({ status, automationPaused: true, reply: 'SUPPRESSED', sessionExpiry: 'DOES_NOT_RESUME' });
       }
+      assert.equal((await inbound('MENU')).automationPaused, false);
+      assert.equal((await inbound('PLANOS')).automationPaused, false);
+      assert.equal((await new PgConversationAgentRepository(isolated).activeHandoff(conversationId,start.customer.id)).status,'ASSIGNED');
+      const resumed = await repository.requestHandoff({conversation_id:conversationId,customer_id:start.customer.id});
+      assert.equal(resumed.handoff_id,handoff.handoff_id);
+      assert.equal((await inbound('oi')).automationPaused,true);
+      report.cases.push({status:'CUSTOMER_MENU',automationPaused:false,teamRequestPreserved:true,atendentePausesAgain:true});
       await client.query("UPDATE conversation_handoffs SET status='RESOLVED' WHERE handoff_id=$1", [handoff.handoff_id]);
       assert.equal((await inbound('oi')).automationPaused, false);
       report.cases.push({ status: 'RESOLVED', automationPaused: false });
       const unidentified = await repository.requestHandoff({ conversation_id: conversationId,
         customer_id: null, correlation_id: randomUUID(), reason: 'SYNTHETIC_UNIDENTIFIED',
         idempotency_key: randomUUID() });
-      assert.equal((await inbound('MENU')).automationPaused, true);
+      assert.equal((await inbound('oi')).automationPaused, true);
       report.cases.push({ status: 'UNIDENTIFIED_TO_MATCHED', automationPaused: true });
       await client.query("UPDATE conversation_handoffs SET status='RESOLVED' WHERE handoff_id=$1", [unidentified.handoff_id]);
       const legacyPhone = `55119${randomInt(10000000, 99999999)}`;
       await registerQrInbound(isolated, { phone: legacyPhone, text: 'atendente', providerId: randomUUID() });
       await setConversationState(isolated, legacyPhone, 'support');
-      assert.equal((await registerQrInbound(isolated, { phone: legacyPhone, text: 'MENU', providerId: randomUUID() })).automationPaused, true);
+      assert.equal((await registerQrInbound(isolated, { phone: legacyPhone, text: 'oi', providerId: randomUUID() })).automationPaused, true);
       report.cases.push({ status: 'LEGACY_SUPPORT', automationPaused: true });
       const financial = await count(sql => client.query(sql));
       assert.equal(financial.charges, before.charges);

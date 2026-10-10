@@ -9,8 +9,8 @@ export const TOOL_RISK_LEVELS = Object.freeze(['LOW', 'MEDIUM', 'HIGH']);
 
 const INTENT_TOOL_ALLOWLIST = Object.freeze({
   GREETING: ['resolveCustomer', 'getCustomerContext'],
-  RENEWAL_REQUEST: ['resolveCustomer', 'getCustomerContext', 'getSubscription', 'getPaymentStatus', 'getRenewalStatus', 'requestRenewal', 'createPaymentRequest'],
-  PAYMENT_REQUEST: ['resolveCustomer', 'getCustomerContext', 'getSubscription', 'getPaymentStatus', 'getRenewalStatus', 'requestRenewal', 'createPaymentRequest'],
+  RENEWAL_REQUEST: ['resolveCustomer', 'getCustomerContext', 'getSubscription', 'getPaymentStatus', 'getRenewalStatus', 'listPlans', 'requestRenewal', 'createPaymentRequest'],
+  PAYMENT_REQUEST: ['resolveCustomer', 'getCustomerContext', 'getSubscription', 'getPaymentStatus', 'getRenewalStatus', 'listPlans', 'requestRenewal', 'createPaymentRequest'],
   PAYMENT_METHODS_QUERY: ['resolveCustomer', 'getCustomerContext', 'getPaymentOptions'],
   PAYMENT_STATUS: ['resolveCustomer', 'getCustomerContext', 'getPaymentStatus', 'getRenewalStatus'],
   PAYMENT_EVIDENCE: ['resolveCustomer', 'getCustomerContext', 'getPaymentStatus', 'getRenewalStatus'],

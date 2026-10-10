@@ -66,7 +66,7 @@ test('chatbot and automatic billing share durable PostgreSQL operations and conf
     let bot = await runtime(db,billing,customerId);
     let charge, payment;
     await t.test('renewal creates one persisted charge, payment and waiting renewal with simulation label',async () => {
-      const result = await bot.turn('quero renovar','first');
+      const result = await bot.turn('quero renovar mensal','first');
       assert.equal(result.proposed_action,'createPaymentRequest',JSON.stringify(result));
       assert.equal(result.response_facts.payment_status,'PENDING');
       assert.match(result.response_text,/\[Simulação\][\s\S]*https:\/\/staging.example\/pagamento/);
@@ -77,7 +77,7 @@ test('chatbot and automatic billing share durable PostgreSQL operations and conf
       assert.equal((await db.query('SELECT count(*)::int AS n FROM renewal_jobs')).rows[0].n,1);
     });
     await t.test('duplicate message, another request, restart and contextual resend preserve the same link',async () => {
-      const duplicate = await bot.turn('quero renovar','first'); assert.equal(duplicate.duplicate,true);
+      const duplicate = await bot.turn('quero renovar mensal','first'); assert.equal(duplicate.duplicate,true);
       assert.equal(duplicate.conversation_state,'waiting_payment');
       const second = await bot.turn('manda o pix'); assert.ok(second.response_text.includes(charge.checkout_url));
       bot = await runtime(db,billing,customerId);

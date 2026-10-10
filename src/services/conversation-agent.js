@@ -130,7 +130,11 @@ export class GateConversationAgent {
         const resolution = await discoveryTurn.execute('resolveCustomer', identity);
         if (resolution.status === 'MATCHED') customerId = resolution.customer_id;
         recentDecisions = await this.repository.recentDecisions(conversationId,customerId);
-        const activeHandoff = await this.repository.activeHandoff(conversationId,customerId);
+        let activeHandoff = await this.repository.activeHandoff(conversationId,customerId);
+        if (activeHandoff && /^MENU$/i.test(String(text || '').trim())) {
+          await this.repository.resumeHandoffAutomation(conversationId,customerId);
+          activeHandoff = null;
+        } else if (activeHandoff?.automation_resumed) activeHandoff = null;
         if (intentResult.primary_intent === 'UNKNOWN' || /^\s*[12]\s*$/.test(text)) {
           const contextual = understandRequest(text,{contentType,conversationState:recentDecisions[0]?.response_facts?.conversation_state});
           if (contextual.primary_intent !== 'UNKNOWN') intentResult = contextual;
@@ -345,6 +349,7 @@ export class GateConversationAgent {
     }
 
     try {
+      if (!conversationState && responseFacts.conversation_state === 'awaiting_plan') conversationState = 'awaiting_plan';
       if (!conversationState && ['CREATED','PENDING'].includes(responseFacts.payment_status)) conversationState = 'waiting_payment';
       if (!conversationState && ['READY','PROCESSING','VERIFYING','REQUESTED','RETRY_SCHEDULED'].includes(responseFacts.renewal_status)) conversationState = 'renewal';
       responseFacts = mergeResponseFacts(responseFacts,{conversation_state:conversationState});

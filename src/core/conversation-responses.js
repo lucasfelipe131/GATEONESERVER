@@ -95,7 +95,7 @@ export function renderConversationResponse({ intent, facts = {}, outcome = null 
     return 'Não localizei sua assinatura neste número. Qual é o seu login/ID do Gate One?';
   }
   if (outcome === 'IDENTITY_AMBIGUOUS') {
-    return 'Encontrei mais de um cadastro possível. Registrei a necessidade de validação humana para não acessar a conta errada.';
+    return 'Encontrei mais de um cadastro possível. Registrei a necessidade de validação humana para não acessar a conta errada. Se a espera demorar, digite MENU para consultar as opções automáticas; o pedido para a equipe continua registrado.';
   }
   if (outcome === 'TURN_IN_PROGRESS') {
     return 'Estou concluindo sua solicitação anterior. Em instantes você pode consultar o estado novamente.';
@@ -104,7 +104,7 @@ export function renderConversationResponse({ intent, facts = {}, outcome = null 
     return 'Entendi a solicitação, mas preciso que você confirme claramente a operação antes de continuar.';
   }
   if (outcome === 'HANDOFF_CREATED') {
-    return 'Certo. Registrei o atendimento para uma pessoa da equipe continuar com todo o contexto, sem você precisar repetir tudo.';
+    return 'Certo. Registrei o atendimento para uma pessoa da equipe continuar com todo o contexto, sem você precisar repetir tudo. Vou aguardar em silêncio. Se a espera demorar, digite MENU para voltar às opções automáticas; seu pedido para a equipe continua registrado. Para aguardar novamente, digite ATENDENTE.';
   }
   if (outcome === 'HANDOFF_PENDING') return '';
   if (outcome === 'HANDOFF_FAILED') {
@@ -152,6 +152,9 @@ export function renderConversationResponse({ intent, facts = {}, outcome = null 
     }
     case 'PAYMENT_REQUEST':
     case 'RENEWAL_REQUEST': {
+      if (facts.conversation_state === 'awaiting_plan') {
+        return `Escolha o plano que deseja renovar:\n${renderConversationResponse({intent:'PLAN_QUERY',facts})}\n\nDigite MENSAL, TRIMESTRAL, SEMESTRAL ou ANUAL para gerar o link do plano escolhido.`;
+      }
       if (facts.checkout_url) {
         const amount = currency(facts.amount_cents, facts.currency || 'BRL');
         return `${facts.simulated ? '[Simulação] ' : ''}${prefix}${facts.operation_state === 'EXISTING_PAYMENT' || facts.payment_status === 'PENDING' ? 'este é o link da sua cobrança pendente' : 'a cobrança da renovação está pronta'}${facts.plan_name ? ` do plano ${facts.plan_name}` : ''}${amount ? ` no valor de ${amount}` : ''}:\n${facts.checkout_url}\n\nEscolha a forma de pagamento no checkout seguro do Mercado Pago. A confirmação é automática após a aprovação do provedor; comprovante ou retorno do checkout não confirmam o pagamento. Nunca envie dados de cartão pelo WhatsApp.`;

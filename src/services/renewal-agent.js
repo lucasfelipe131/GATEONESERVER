@@ -124,6 +124,12 @@ export class RenewalAgent {
         return { handled: true, proposed_action: 'getRenewalStatus', facts: nextFacts };
       }
 
+      if (!context.plan_code) {
+        const plans = await turn.execute('listPlans', {});
+        return { handled: true, proposed_action: 'listPlans',
+          facts: mergeResponseFacts(nextFacts,{plans,conversation_state:'awaiting_plan'}) };
+      }
+
       const requested = await turn.execute('requestRenewal', toolInput(customerId, {
         ...scopedContext,
         subscription_id: subscription.subscription_id
