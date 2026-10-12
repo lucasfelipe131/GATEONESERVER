@@ -66,6 +66,8 @@ import { SupportOperations } from './services/support-operations.js';
 import { PgSupportRepository, localSupportEnabled } from './services/support-repository.js';
 import { processWhatsAppRegistration } from './services/whatsapp-registration.js';
 import { GuidedSupportAgent } from './services/support-guidance.js';
+import { CustomerPortal } from './services/customer-portal.js';
+import { registerCustomerPortal } from './customer-portal-routes.js';
 import { PgCommandCenter, registerCommandCenter } from './services/command-center.js';
 import { PgConversationAgentRepository } from './services/conversation-operations.js';
 import { buildIdempotencyKey, renderChargeMessage } from './domain/billing.js';
@@ -113,6 +115,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL, { ssl: config.DATABASE_SSL });
 const billingAutomation = createBillingAutomation({db,config});
+const customerPortal = new CustomerPortal({db,config,billing:billingAutomation,getPaymentOptions:async()=>{
+  const runtime=await getRuntimeConfig(db,config);
+  runtime.PAYMENT_MODE=await getSetting(db,'payment_mode',config.PAYMENT_MODE);
+  return getMercadoPagoPaymentOptions(runtime);
+}});
 const redis = config.REDIS_URL ? createRedis(config.REDIS_URL) : null;
 const queues = redis ? createQueues(redis) : null;
 const app = Fastify({
@@ -124,6 +131,7 @@ const app = Fastify({
       'res.headers.set-cookie',
       '*.password',
       '*.token',
+      '*.portalUrl',
       '*.OPENAI_API_KEY',
       '*.pix_copy_paste'
     ]
@@ -1943,15 +1951,14 @@ app.post('/api/admin/customers', {
   const encryptedAccessPassword = body.accessPassword?.trim()
     ? encryptSecret(body.accessPassword.trim(), config.COOKIE_SECRET)
     : null;
-  const portalToken = randomToken(24);
   const result = await db.transaction(async (client) => {
     const plan = await client.query('SELECT id FROM plans WHERE code = $1', [body.planCode]);
     if (!plan.rows[0]) throw new Error('Plano não encontrado.');
     const customer = await client.query(
       `INSERT INTO customers
         (name, whatsapp_e164, bitpanel_reference, access_password_encrypted,
-         source, status, operational_stage, consent_contact, portal_token_hash)
-       VALUES ($1, $2, $3, $4, 'manual', 'active', $5, $6, $7)
+         source, status, operational_stage, consent_contact)
+       VALUES ($1, $2, $3, $4, 'manual', 'active', $5, $6)
        RETURNING id`,
       [
         body.name,
@@ -1959,8 +1966,7 @@ app.post('/api/admin/customers', {
         body.bitpanelReference || null,
         encryptedAccessPassword,
         body.operationalStage,
-        body.consentContact,
-        sha256(portalToken)
+        body.consentContact
       ]
     );
     const subscription = await client.query(
@@ -1987,9 +1993,7 @@ app.post('/api/admin/customers', {
   });
   return reply.code(201).send({
     ...result,
-    portalUrl: config.PUBLIC_BASE_URL
-      ? `${config.PUBLIC_BASE_URL}/cliente/${portalToken}`
-      : `/cliente/${portalToken}`
+    ...await customerPortal.issueLink({customerId:result.customerId,requestKey:`admin-create:${randomUUID()}`})
   });
 });
 
@@ -2157,14 +2161,7 @@ app.delete('/api/admin/customers/:id', {
 app.post('/api/admin/customers/:id/portal-link', {
   preHandler: protect(CAPABILITIES.CUSTOMER_PORTAL_LINK_CREATE, { mutation: true })
 }, async (request, reply) => {
-  const portalToken = randomToken(24);
-  const result = await db.query(
-    `UPDATE customers
-        SET portal_token_hash = $2, updated_at = now()
-      WHERE id = $1
-      RETURNING id`,
-    [request.params.id, sha256(portalToken)]
-  );
+  const result = await db.query('SELECT id FROM customers WHERE id=$1',[request.params.id]);
   if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado.' });
   await audit(db, {
     actorType: 'user',
@@ -2174,11 +2171,7 @@ app.post('/api/admin/customers/:id/portal-link', {
     entityId: result.rows[0].id,
     ip: request.ip
   });
-  return {
-    portalUrl: config.PUBLIC_BASE_URL
-      ? `${config.PUBLIC_BASE_URL}/cliente/${portalToken}`
-      : `/cliente/${portalToken}`
-  };
+  return customerPortal.issueLink({customerId:result.rows[0].id,requestKey:`admin:${randomUUID()}`});
 });
 
 app.post('/api/admin/customers/import', {
@@ -2664,7 +2657,9 @@ app.get('/api/admin/settings', { preHandler: protect(CAPABILITIES.SETTINGS_READ)
     'bitpanel_mode',
     'renewal_requires_approval',
     'ai_admin_enabled',
-    'ai_whatsapp_enabled'
+    'ai_whatsapp_enabled',
+    'privacy_controller_name',
+    'privacy_contact'
   ];
   const values = Object.fromEntries(
     await Promise.all(keys.map(async (key) => [key, await getSetting(db, key, null)]))
@@ -2704,7 +2699,9 @@ app.put('/api/admin/settings', {
       bitpanel_mode: z.enum(['disabled', 'simulation', 'live']).optional(),
       renewal_requires_approval: z.boolean().optional(),
       ai_admin_enabled: z.boolean().optional(),
-      ai_whatsapp_enabled: z.boolean().optional()
+      ai_whatsapp_enabled: z.boolean().optional(),
+      privacy_controller_name: z.string().trim().max(160).optional(),
+      privacy_contact: z.string().trim().max(200).optional()
     }),
     request.body
   );
@@ -2984,196 +2981,8 @@ app.post(
   }
 );
 
-app.get('/api/portal/:token', async (request, reply) => {
-  const result = await db.query(
-    `SELECT c.id AS customer_id, c.name, c.status, s.expires_on::text,
-            p.code AS plan_code, p.name AS plan_name, p.price_cents,
-            COALESCE((SELECT sum(points) FROM loyalty_ledger l WHERE l.customer_id = c.id), 0)::int AS points
-       FROM customers c
-       LEFT JOIN LATERAL (
-         SELECT * FROM subscriptions WHERE customer_id = c.id ORDER BY created_at DESC LIMIT 1
-       ) s ON true
-       LEFT JOIN plans p ON p.id = s.plan_id
-      WHERE c.portal_token_hash = $1`,
-    [sha256(request.params.token)]
-  );
-  if (!result.rows[0]) return reply.code(404).send({ error: 'Acesso do cliente inválido.' });
-  const customer = result.rows[0];
-  const [plans, pending] = await Promise.all([
-    db.query(
-      'SELECT code, name, duration_months, price_cents, description FROM plans WHERE active = true ORDER BY sort_order'
-    ),
-    db.query(
-      `SELECT ch.status, ch.amount_cents, ch.created_at, p.code AS plan_code, p.name AS plan_name
-         FROM charges ch
-         JOIN subscriptions s ON s.id = ch.subscription_id
-         JOIN plans p ON p.id = COALESCE(ch.plan_id, s.plan_id)
-        WHERE s.customer_id = $1
-          AND ch.stage = 'manual'
-          AND ch.status IN ('awaiting_approval', 'approved', 'sent')
-        ORDER BY ch.created_at DESC
-        LIMIT 1`,
-      [customer.customer_id]
-    )
-  ]);
-  delete customer.customer_id;
-  return {
-    ...customer,
-    plans: plans.rows,
-    pending_renewal: pending.rows[0] || null,
-    whatsapp_url: config.PUBLIC_WHATSAPP_NUMBER
-      ? `https://wa.me/${config.PUBLIC_WHATSAPP_NUMBER}`
-      : null
-  };
-});
+registerCustomerPortal(app,{db,config,billingAutomation,getPaymentOptions:customerPortal.getPaymentOptions,requireBotSecret});
 
-app.post(
-  '/api/portal/:token/renewals',
-  { config: { rateLimit: { max: 6, timeWindow: '1 hour' } } },
-  async (request, reply) => {
-    const body = parse(
-      z.object({ planCode: z.enum(['monthly', 'quarterly', 'semiannual', 'annual']) }),
-      request.body
-    );
-    const portalHash = sha256(request.params.token);
-    const [globalPause, salesMode] = await Promise.all([
-      getSetting(db, 'global_pause', config.GLOBAL_PAUSE),
-      getSetting(db, 'sales_mode', config.SALES_MODE)
-    ]);
-    const initialStatus = !globalPause && salesMode === 'automatic'
-      ? 'approved'
-      : 'awaiting_approval';
-
-    const created = await db.transaction(async (client) => {
-      const customerResult = await client.query(
-        `SELECT c.id, c.name, c.whatsapp_e164, c.consent_contact,
-                s.id AS subscription_id, s.expires_on::text
-           FROM customers c
-           JOIN LATERAL (
-             SELECT * FROM subscriptions
-              WHERE customer_id = c.id AND status <> 'cancelled'
-              ORDER BY created_at DESC LIMIT 1
-           ) s ON true
-          WHERE c.portal_token_hash = $1
-          FOR UPDATE OF c`,
-        [portalHash]
-      );
-      const customer = customerResult.rows[0];
-      if (!customer) {
-        const error = new Error('Acesso do cliente inválido.');
-        error.statusCode = 404;
-        throw error;
-      }
-      const planResult = await client.query(
-        'SELECT id, code, name, price_cents FROM plans WHERE code = $1 AND active = true',
-        [body.planCode]
-      );
-      const plan = planResult.rows[0];
-      if (!plan) {
-        const error = new Error('Plano indisponível.');
-        error.statusCode = 409;
-        throw error;
-      }
-      const idempotencyKey = buildIdempotencyKey(
-        customer.subscription_id,
-        `portal-${plan.code}`,
-        customer.expires_on
-      );
-      const message = renderChargeMessage({
-        name: customer.name,
-        planName: plan.name,
-        expiresOn: customer.expires_on,
-        amountCents: plan.price_cents,
-        stage: 'manual'
-      });
-      const chargeResult = await client.query(
-        `INSERT INTO charges
-          (subscription_id, plan_id, stage, status, amount_cents, due_on,
-           idempotency_key, message_text)
-         VALUES ($1, $2, 'manual', $3, $4, CURRENT_DATE, $5, $6)
-         ON CONFLICT (idempotency_key) DO UPDATE
-           SET updated_at = charges.updated_at
-         RETURNING id, status, amount_cents`,
-        [
-          customer.subscription_id,
-          plan.id,
-          initialStatus,
-          plan.price_cents,
-          idempotencyKey,
-          message
-        ]
-      );
-      return {
-        ...chargeResult.rows[0],
-        customerId: customer.id,
-        customerPhone: customer.whatsapp_e164,
-        planCode: plan.code,
-        planName: plan.name
-      };
-    });
-
-    let queued = false;
-    if (created.status === 'approved' && queues) {
-      await queues.messages.add(
-        'send-charge',
-        { chargeId: created.id },
-        {
-          jobId: `portal-charge-${created.id}`,
-          attempts: 20,
-          backoff: { type: 'fixed', delay: 300_000 },
-          removeOnComplete: 1000,
-          removeOnFail: 2000
-        }
-      );
-      queued = true;
-    }
-    await audit(db, {
-      actorType: 'customer',
-      actorId: created.customerId,
-      action: 'billing.portal_renewal_requested',
-      entityType: 'charge',
-      entityId: created.id,
-      after: {
-        planCode: created.planCode,
-        status: created.status,
-        queued
-      },
-      ip: request.ip
-    });
-    const runtimeConfig = {
-      ...(await getRuntimeConfig(db, config)),
-      PAYMENT_MODE: await getSetting(db, 'payment_mode', config.PAYMENT_MODE)
-    };
-    const chargeDetails = await db.query(
-      `SELECT ch.id, ch.idempotency_key, ch.amount_cents,
-              c.name AS customer_name, c.email AS customer_email,
-              c.whatsapp_e164 AS customer_phone,
-              p.code AS plan_code, p.name AS plan_name, p.duration_months
-         FROM charges ch
-         JOIN subscriptions s ON s.id = ch.subscription_id
-         JOIN customers c ON c.id = s.customer_id
-         JOIN plans p ON p.id = ch.plan_id
-        WHERE ch.id = $1`,
-      [created.id]
-    );
-    const preference = await createCheckoutPreference(runtimeConfig, chargeDetails.rows[0]);
-    await db.query(
-      `UPDATE charges SET mercado_pago_preference_id = $2, checkout_url = $3, updated_at = now()
-        WHERE id = $1`,
-      [created.id, preference.id, preference.checkoutUrl]
-    );
-    return reply.code(201).send({
-      ok: true,
-      status: created.status,
-      queued,
-      planName: created.planName,
-      checkoutUrl: preference.checkoutUrl,
-      message: `Plano ${created.planName} escolhido. Abrindo o pagamento seguro do Mercado Pago.`
-    });
-  }
-);
-
-app.get('/cliente/:token', async (_request, reply) => reply.sendFile('portal.html'));
 app.get('/captacao', async (_request, reply) => reply.sendFile('landing.html'));
 app.get('/pagamento', async (_request, reply) => reply.sendFile('payment.html'));
 app.get('/', async (_request, reply) => reply.sendFile('index.html'));

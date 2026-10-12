@@ -21,6 +21,13 @@ function currency(cents, code = 'BRL') {
   return (cents / 100).toLocaleString('pt-BR', { style: 'currency', currency: code });
 }
 
+function paymentChoices(facts) {
+  const allowed=new Set(['Pix','Cartão de crédito','Boleto']);
+  const methods=[...new Set((Array.isArray(facts.payment_methods)?facts.payment_methods:[]).filter(method=>allowed.has(method)))];
+  return methods.length ? `Formas de pagamento no Mercado Pago:\n${methods.map(method=>`• ${method}`).join('\n')}\nAs condições e a disponibilidade final aparecem no checkout.`
+    : 'Consulte as formas de pagamento disponíveis no checkout seguro do Mercado Pago.';
+}
+
 export function responseFactsFromContext(customer360 = null) {
   const subscription = customer360?.subscription || null;
   return {
@@ -153,11 +160,11 @@ export function renderConversationResponse({ intent, facts = {}, outcome = null 
     case 'PAYMENT_REQUEST':
     case 'RENEWAL_REQUEST': {
       if (facts.conversation_state === 'awaiting_plan') {
-        return `Escolha o plano que deseja renovar:\n${renderConversationResponse({intent:'PLAN_QUERY',facts})}\n\nDigite MENSAL, TRIMESTRAL, SEMESTRAL ou ANUAL para gerar o link do plano escolhido.`;
+        return `Escolha o plano que deseja renovar:\n${renderConversationResponse({intent:'PLAN_QUERY',facts})}\n\n${paymentChoices(facts)}\n\nDigite MENSAL, TRIMESTRAL, SEMESTRAL ou ANUAL para gerar o link do plano escolhido.`;
       }
       if (facts.checkout_url) {
         const amount = currency(facts.amount_cents, facts.currency || 'BRL');
-        return `${facts.simulated ? '[Simulação] ' : ''}${prefix}${facts.operation_state === 'EXISTING_PAYMENT' || facts.payment_status === 'PENDING' ? 'este é o link da sua cobrança pendente' : 'a cobrança da renovação está pronta'}${facts.plan_name ? ` do plano ${facts.plan_name}` : ''}${amount ? ` no valor de ${amount}` : ''}:\n${facts.checkout_url}\n\nEscolha a forma de pagamento no checkout seguro do Mercado Pago. A confirmação é automática após a aprovação do provedor; comprovante ou retorno do checkout não confirmam o pagamento. Nunca envie dados de cartão pelo WhatsApp.`;
+        return `${facts.simulated ? '[Simulação] ' : ''}${prefix}${facts.operation_state === 'EXISTING_PAYMENT' || facts.payment_status === 'PENDING' ? 'este é o link da sua cobrança pendente' : 'a cobrança da renovação está pronta'}${facts.plan_name ? ` do plano ${facts.plan_name}` : ''}${amount ? ` no valor de ${amount}` : ''}:\n${facts.checkout_url}\n\n${paymentChoices(facts)}\n\nA confirmação é automática após a aprovação do provedor; comprovante ou retorno do checkout não confirmam o pagamento. Nunca envie dados de cartão pelo WhatsApp.`;
       }
       return safeResponseForFacts(facts);
     }
@@ -224,7 +231,7 @@ export function avoidRepeatedResponse(text, recentMessages = [], facts = {}) {
     .slice(-4)
     .map((message) => normalizedText(message.content));
   if (!recentOutbound.includes(normalized)) return { text, repeated: false };
-  if (facts.checkout_url) return {text:`${facts.simulated ? '[Simulação] ' : ''}A cobrança continua pendente. Você pode usar o mesmo link: ${facts.checkout_url}`,repeated:true};
+  if (facts.checkout_url) return {text:`${facts.simulated ? '[Simulação] ' : ''}A cobrança continua pendente. Você pode usar o mesmo link: ${facts.checkout_url}\n\n${paymentChoices(facts)}`,repeated:true};
   return {
     text: 'O estado continua o mesmo da última consulta. Se quiser, posso verificar outro ponto da sua conta.',
     repeated: true

@@ -679,6 +679,8 @@ async function loadSettings() {
   $('#automaticRenewal').checked = settings.renewal_requires_approval === false;
   $('#aiAdminEnabled').checked = settings.ai_admin_enabled === true;
   $('#aiWhatsappEnabled').checked = settings.ai_whatsapp_enabled === true;
+  $('#privacyController').value=settings.privacy_controller_name || '';
+  $('#privacyContact').value=settings.privacy_contact || '';
   renderIntegrations('#settingsIntegrations', result.integrations);
   $('#bitpanelSessionStatus').textContent = result.integrations.bitpanelSession
     ? 'Sessão autenticada protegida e pronta para teste.'
@@ -1084,7 +1086,9 @@ $('#saveSettings').addEventListener('click', async (event) => {
         bitpanel_mode: $('#bitpanelMode').value,
         renewal_requires_approval: !$('#automaticRenewal').checked,
         ai_admin_enabled: $('#aiAdminEnabled').checked,
-        ai_whatsapp_enabled: $('#aiWhatsappEnabled').checked
+        ai_whatsapp_enabled: $('#aiWhatsappEnabled').checked,
+        privacy_controller_name: $('#privacyController').value.trim(),
+        privacy_contact: $('#privacyContact').value.trim()
       })
     });
     toast('Configurações salvas.');

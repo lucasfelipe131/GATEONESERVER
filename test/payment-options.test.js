@@ -6,6 +6,7 @@ import { ConversationToolRegistry } from '../src/services/conversation-tools.js'
 import { GateConversationAgent } from '../src/services/conversation-agent.js';
 import { InMemoryConversationAgentRepository } from '../src/services/conversation-operations.js';
 import { RenewalAgent } from '../src/services/renewal-agent.js';
+import { renderConversationResponse } from '../src/core/conversation-responses.js';
 
 test('payment questions stay read-only; explicit card/boleto requests permit billing', () => {
   for (const text of ['7', 'quais formas de pagamento?', 'aceita pix?', 'posso pagar no cartão?',
@@ -79,6 +80,7 @@ test('selected plan renews rather than listing catalog; pending card/boleto requ
   let creates = 0;
   let pending = false;
   const turn = { execute: async (name, input) => {
+    if (name === 'getPaymentOptions') return {methods:['Pix','Cartão de crédito','Boleto'],simulated:false};
     if (name === 'listPlans') throw new Error('selected plan must not list plans');
     if (name === 'getSubscription') return { subscription_id: 'sub' };
     if (['getRenewalStatus', 'requestRenewal'].includes(name)) return { decision: pending ? 'PAYMENT_PENDING' : 'PAYMENT_REQUIRED' };
@@ -93,11 +95,33 @@ test('selected plan renews rather than listing catalog; pending card/boleto requ
   const run = (text, ctx = context) => agent.handle({ intentResult: understandRequest(text), customerId: 'customer', customer360, turn, facts: {}, context: ctx });
   const first = await run('quero renovar trimestral no cartão');
   assert.equal(first.proposed_action, 'createPaymentRequest'); assert.equal(creates, 1);
+  const message = renderConversationResponse({intent:'PAYMENT_REQUEST',facts:first.facts});
+  assert.match(message,/• Pix/); assert.match(message,/• Cartão de crédito/); assert.match(message,/• Boleto/);
   pending = true;
   const second = await run('manda o boleto');
   assert.equal(second.facts.checkout_url, first.facts.checkout_url); assert.equal(creates, 1);
   await assert.rejects(run('quero renovar mensal', { ...context, plan_code: 'monthly' }), { code: 'PENDING_PAYMENT_PLAN_CONFLICT' });
   assert.equal(creates, 1);
+});
+
+test('automatic payment options accompany plan selection and a catalog outage preserves the checkout', async () => {
+  const agent=new RenewalAgent(); let unavailable=false,creates=0;
+  const turn={execute:async name=>{
+    if(name==='getSubscription')return {subscription_id:'sub'};
+    if(['getRenewalStatus','requestRenewal'].includes(name))return {decision:'PAYMENT_REQUIRED'};
+    if(name==='getPaymentOptions'){if(unavailable)throw Object.assign(new Error('unavailable'),{code:'PAYMENT_OPTIONS_UNAVAILABLE'});return {methods:['Pix','Boleto']};}
+    if(name==='listPlans')return [{code:'monthly',name:'Mensal',price_cents:3000}];
+    if(name==='createPaymentRequest'){creates++;return {status:'PENDING',checkout_url:'https://www.mercadopago.com.br/synthetic',amount_cents:3000};}
+    throw new Error(name);
+  }};
+  const input={intentResult:understandRequest('quero renovar'),customerId:'synthetic',customer360:{subscription:{subscription_id:'sub'}},turn,facts:{},context:{idempotency_key:'synthetic',correlation_id:'synthetic'}};
+  const selection=await agent.handle(input);
+  const message=renderConversationResponse({intent:'RENEWAL_REQUEST',facts:selection.facts});
+  assert.match(message,/Escolha o plano/);assert.match(message,/• Pix/);assert.match(message,/• Boleto/);assert.doesNotMatch(message,/• Cartão/);assert.equal(creates,0);
+  unavailable=true;
+  const checkout=await agent.handle({...input,context:{...input.context,plan_code:'monthly'}});
+  const response=renderConversationResponse({intent:'RENEWAL_REQUEST',facts:checkout.facts});
+  assert.match(response,/https:\/\/www.mercadopago.com.br\/synthetic/);assert.match(response,/Consulte as formas de pagamento/);assert.equal(creates,1);
 });
 
 test('pending checkout without a link invokes durable recovery, preserving the charge', async () => {
@@ -106,6 +130,7 @@ test('pending checkout without a link invokes durable recovery, preserving the c
     customer360: { subscription: { subscription_id: 'sub' } }, facts: {},
     context: { idempotency_key: 'synthetic', correlation_id: 'synthetic' },
     turn: { execute: async name => {
+      if (name === 'getPaymentOptions') return {methods:['Pix','Boleto'],simulated:false};
       if (name === 'getSubscription') return { subscription_id: 'sub' };
       if (name === 'getRenewalStatus') return { decision: 'PAYMENT_PENDING' };
       if (name === 'getPaymentStatus') return { status: 'PENDING', charge_id: 'original-charge' };

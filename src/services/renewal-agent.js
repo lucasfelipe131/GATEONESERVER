@@ -21,6 +21,15 @@ function renewalFacts(facts, result = {}) {
 }
 
 export class RenewalAgent {
+  async paymentFacts(turn, facts) {
+    try {
+      const options=await turn.execute('getPaymentOptions',{});
+      return mergeResponseFacts(facts,{payment_methods:options.methods});
+    } catch(error) {
+      if (!['PAYMENT_OPTIONS_UNAVAILABLE','TOOL_TIMEOUT','TOOL_HANDLER_UNAVAILABLE'].includes(error.code)) throw error;
+      return mergeResponseFacts(facts,{payment_methods:[]});
+    }
+  }
   async handle({ intentResult, customerId, customer360, turn, facts, context }) {
     const intents = new Set(intentResult.intents.map((item) => item.name));
     if (['HUMAN_REQUEST','COMPLAINT','CANCELLATION_REQUEST'].some(intent => intents.has(intent))) {
@@ -97,6 +106,7 @@ export class RenewalAgent {
         subscription_id: subscription.subscription_id
       });
       let nextFacts = renewalFacts(facts, renewal);
+      if (['PAYMENT_REQUIRED','PAYMENT_PENDING'].includes(renewal.decision)) nextFacts=await this.paymentFacts(turn,nextFacts);
       if (renewal.decision !== 'PAYMENT_REQUIRED') {
         if (renewal.decision === 'PAYMENT_PENDING') {
           const payment = await turn.execute('getPaymentStatus', {

@@ -1,43 +1,37 @@
 <!doctype html>
 <html lang="pt-BR">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#07172f" />
-    <meta name="referrer" content="no-referrer" />
-    <title>Minha assinatura — Gate One Pro</title>
-    <link rel="icon" type="image/png" href="/assets/gate-one-mark.png" />
-    <link rel="stylesheet" href="/styles.css" />
-  </head>
-  <body class="landing">
-    <nav class="landing-nav">
-      <div class="brand"><img class="brand-logo" src="/assets/gate-one-mark.png" alt="" aria-hidden="true" /><span><strong>Gate One Pro</strong><small>Área do cliente</small></span></div>
-    </nav>
-    <section class="landing-hero">
-      <span class="eyebrow">SUA ASSINATURA</span>
-      <h1 id="portalGreeting">Carregando sua conta…</h1>
-      <p>Acompanhe sua validade, consulte os pontos do Gate Club e solicite sua renovação.</p>
-    </section>
-    <section class="plan-section">
-      <article class="plan-card featured">
-        <span class="eyebrow">PLANO ATUAL</span>
-        <h2 id="portalPlan">—</h2>
-        <div class="price" id="portalPrice">—</div>
-        <div class="benefits">
-          <span>✓ Validade: <strong id="portalExpiry">—</strong></span>
-          <span>✓ Situação: <strong id="portalStatus">—</strong></span>
-          <span>✓ Pontos Gate Club: <strong id="portalPoints">0</strong></span>
-        </div>
-      </article>
-      <article class="plan-card">
-        <span class="eyebrow">RENOVAÇÃO</span>
-        <h2>Escolha seu próximo ciclo</h2>
-        <p class="muted">Escolha seu plano. No modo automático, a cobrança Pix é criada e enviada imediatamente pelo WhatsApp; a renovação ocorre somente após o pagamento confirmado.</p>
-        <div class="renewal-options" id="renewalPlans"></div>
-        <p class="portal-message" id="portalMessage" role="status"></p>
-        <a class="text-button portal-help" id="portalWhatsapp" href="#" target="_blank" rel="noreferrer">Preciso de ajuda pelo WhatsApp →</a>
-      </article>
-    </section>
-    <script src="/portal.js" type="module"></script>
-  </body>
-</html>
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#07172f" /><meta name="referrer" content="no-referrer" />
+  <title>Minha conta — Gate One Pro</title>
+  <link rel="icon" href="/assets/gate-one-mark.png" /><link rel="stylesheet" href="/portal.css" />
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/cliente"><img src="/assets/gate-one-mark.png" alt="" /><span>Gate One Pro<small>Área do cliente</small></span></a><button id="logout" class="quiet" hidden>Sair</button></header>
+  <main>
+    <section class="intro"><span class="eyebrow">SEU ESPAÇO GATE ONE</span><h1 id="greeting">Sua conta, em um só lugar.</h1><p id="introText">Seu acesso, seus pagamentos e seu cadastro. Tudo conectado ao WhatsApp.</p></section>
+    <p id="message" class="message" role="status" aria-live="polite"></p>
+    <section id="entry" class="card entry" hidden><span class="card-icon">↗</span><h2>Entre pelo seu WhatsApp</h2><p>Envie <strong>PORTAL</strong> ao chatbot e abra o link pessoal que ele enviar. Se ainda não for cliente, use o mesmo caminho para preencher seu cadastro básico.</p><a id="entryWhatsapp" class="primary" hidden>Entrar ou cadastrar pelo WhatsApp</a><p class="muted">O link é de uso único e vale por 15 minutos. Seu cadastro não solicita CPF.</p><a href="/privacidade" class="text-link">Leia o aviso de privacidade</a></section>
+    <div id="account" hidden>
+      <nav class="tabs" aria-label="Sua conta"><button class="tab active" data-tab="overview" aria-current="page">Minha conta</button><button class="tab" data-tab="payments">Pagamentos</button><button class="tab" data-tab="profile">Meu cadastro</button></nav>
+      <section id="overview" class="tab-panel">
+        <div class="summary-grid"><article class="card plan"><span class="eyebrow">SEU PLANO</span><h2 id="plan">—</h2><p id="price" class="big-number">—</p><div class="plan-footer"><span id="subscriptionStatus" class="pill">—</span><span>Válido até <strong id="expiry">—</strong></span></div></article>
+          <article class="card"><span class="eyebrow">SEU ACESSO</span><h2>Informações do login</h2><p class="muted">Use o login do seu serviço. O acesso a esta área é feito pelo link pessoal enviado no WhatsApp.</p><div class="login-line"><strong id="login">—</strong><button id="copyLogin" class="quiet" hidden>Copiar</button></div><p id="accessNote" class="muted"></p><a id="accessHelp" class="text-link" hidden>Ajuda com meu acesso →</a></article></div>
+        <article class="card next-step"><div><span class="eyebrow">NO SEU TEMPO</span><h2>Pronto para renovar?</h2><p>Escolha o próximo plano e veja as formas de pagamento disponíveis no Mercado Pago.</p></div><button class="primary" data-tab="payments">Ver pagamentos</button></article>
+      </section>
+      <section id="payments" class="tab-panel" hidden>
+        <div class="section-heading"><div><span class="eyebrow">SIMPLES E SEGURO</span><h2>Seus pagamentos</h2></div><button id="refresh" class="quiet">Atualizar situação</button></div>
+        <article class="card"><div id="paymentMethods" class="method-list"></div><p class="muted">Você escolhe a forma de pagamento no checkout. A confirmação aparece aqui e no WhatsApp após a aprovação oficial do Mercado Pago.</p><div id="paymentHistory" class="payment-history"></div></article>
+        <article class="card"><h2>Escolha o plano para renovar</h2><p class="muted">Escolher um plano apenas mostra o valor. A cobrança é criada quando você confirmar no botão abaixo.</p><div id="renewalPlans" class="renewal-options"></div><div id="selectedPlan" class="selection" hidden></div><button id="createPayment" class="primary" disabled>Gerar link de pagamento</button><p class="muted">Pagamento confirmado e renovação do serviço são etapas separadas. A nova validade aparece quando a renovação for verificada.</p></article>
+      </section>
+      <section id="profile" class="tab-panel" hidden>
+        <div class="section-heading"><div><span class="eyebrow">SÓ O NECESSÁRIO</span><h2>Seu cadastro básico</h2><p>Sem CPF, sem dados de cartão e sem senha.</p></div></div>
+        <form id="profileForm" class="card"><div class="form-grid"><label>Nome<input name="name" autocomplete="name" required minlength="2" maxlength="120" /></label><label>WhatsApp verificado<input name="whatsapp" readonly /><small>Para usar outro número, fale com a equipe pelo WhatsApp.</small></label><label>E-mail <span class="muted">(opcional)</span><input name="email" type="email" autocomplete="email" maxlength="200" /></label><label>Já tem um login do serviço? <span class="muted">(opcional)</span><input name="claimedLogin" autocomplete="off" maxlength="80" /><small>O vínculo será conferido pela equipe. Não informe senha.</small></label></div>
+          <div class="privacy-box"><h3>Seus dados, suas escolhas</h3><p>Nome e WhatsApp identificam o atendimento e a assinatura. O e-mail é opcional. Leia os detalhes no <a href="/privacidade" target="_blank" rel="noreferrer">aviso de privacidade</a>.</p><label class="check"><input name="noticeAcknowledged" type="checkbox" required /><span>Li o aviso de privacidade e estou ciente de como meus dados serão usados para o cadastro, atendimento e assinatura.</span></label><label class="check"><input name="consentContact" type="checkbox" /><span>Autorizo receber avisos de vencimento e acompanhamento pelo WhatsApp. É opcional e posso retirar esta autorização a qualquer momento.</span></label><p id="noticeOwner" class="muted"></p></div><button class="primary" id="saveProfile">Salvar meu cadastro</button></form>
+        <article class="card rights"><h2>Privacidade ao seu alcance</h2><p>Você pode consultar e corrigir seus dados ou solicitar atendimento sobre privacidade.</p><div class="rights-actions"><a class="quiet" href="/api/portal/me/export" download>Baixar resumo dos meus dados</a><button class="quiet" id="withdraw">Parar avisos opcionais</button><button class="quiet" data-privacy="ACCESS">Pedir cópia completa</button><button class="quiet" data-privacy="ERASURE">Solicitar eliminação dos dados</button></div><p class="muted">Pedidos de eliminação passam por conferência, inclusive quanto a registros que precisem ser conservados por obrigação legal. Enviar o pedido não apaga imediatamente a conta ou pagamentos.</p><div id="privacyRequests"></div></article>
+      </section>
+      <a id="whatsappHelp" class="help-link" hidden>Continuar atendimento pelo WhatsApp →</a>
+    </div>
+  </main><footer>Gate One Pro · <a href="/privacidade">Privacidade</a> · Seu cadastro não solicita CPF.</footer>
+  <script src="/portal.js" type="module"></script>
+</body></html>
