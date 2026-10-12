@@ -107,13 +107,40 @@ async function uniqueVisible(candidates) {
 
 async function findListSearchField(page) {
   // Current Vuetify inputs have empty placeholders; the label is the stable identity.
-  const labelled = await uniqueVisible(page.getByLabel('Buscar por nome', { exact: true }));
+  const labelledFields = page.getByLabel('Buscar por nome', { exact: true });
+  const labelled = await uniqueVisible(labelledFields);
   if (labelled) return labelled;
   const legacy = await uniqueVisible(page.locator(
     "input[placeholder='Buscar' i], input[placeholder='Pesquisar' i], input[placeholder='Buscar por nome' i], input[placeholder='Pesquisar por nome' i], input[type='search']"
   ));
-  if (!legacy) throw readFailure('BITPANEL_READ_UNAVAILABLE');
-  return legacy;
+  if (legacy) return legacy;
+  try { await labelledFields.first().waitFor({ state: 'visible', timeout: 20_000 }); }
+  catch { throw readFailure('BITPANEL_READ_UNAVAILABLE'); }
+  const hydrated = await uniqueVisible(labelledFields);
+  if (!hydrated) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+  return hydrated;
+}
+
+async function waitForBitPanelListData(page, baseUrl, { afterSearch = false } = {}) {
+  const assertList = () => {
+    const current = new URL(page.url());
+    if (current.origin !== baseUrl) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+    if (current.pathname.includes('/login')) throw readFailure('BITPANEL_READ_REAUTH_REQUIRED');
+    if (page.url() !== `${baseUrl}/list`) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  };
+  if (afterSearch) await page.waitForTimeout(700);
+  // The search asynchronously replaces the table; a visible empty tbody is not data readiness.
+  try { await page.waitForLoadState('networkidle', { timeout: 20_000 }); }
+  catch { assertList(); throw readFailure('BITPANEL_READ_TIMEOUT'); }
+  assertList();
+  const headers = page.locator('table thead th');
+  try { await headers.first().waitFor({ state: 'visible', timeout: 5_000 }); }
+  catch { throw readFailure('BITPANEL_READ_UNAVAILABLE'); }
+  const names = (await headers.allInnerTexts()).map(normalizeBitPanelText);
+  for (const pattern of [/^(?:#?id|#|codigo)$/, /proprietario|revendedor|owner/, /usuario|login/]) {
+    if (names.filter(name => pattern.test(name)).length !== 1) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+  }
+  assertList();
 }
 
 async function listDetailValue(page, label) {
@@ -215,11 +242,11 @@ async function captureListDetails(page, { expectedListId, expectedUsername, incl
 }
 
 async function findListByUsername(page, config, username) {
-  await page.goto(`${config.BITPANEL_BASE_URL}/list`, { waitUntil: 'domcontentloaded' });
-  await page.locator('table tbody').waitFor({ state: 'visible' });
+  const baseUrl = readBaseUrl(config);
+  await page.goto(`${baseUrl}/list`, { waitUntil: 'domcontentloaded' });
   const search = await findListSearchField(page);
   await search.fill(username);
-  await page.waitForTimeout(700);
+  await waitForBitPanelListData(page, baseUrl, { afterSearch: true });
 
   const columns = await tableColumnMap(page);
   const rows = page.locator('table tbody tr');
@@ -382,10 +409,9 @@ export async function readBitPanelAccessFromPage(page, config, binding) {
   await page.goto(`${baseUrl}/list`, { waitUntil: 'domcontentloaded' });
   if (new URL(page.url()).origin !== baseUrl) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
   if (new URL(page.url()).pathname.includes('/login')) throw readFailure('BITPANEL_READ_REAUTH_REQUIRED');
-  await page.locator('table tbody').waitFor({ state: 'visible' });
   const search = await findListSearchField(page);
   await search.fill(expected.username);
-  await page.waitForTimeout(700);
+  await waitForBitPanelListData(page, baseUrl, { afterSearch: true });
   const columns = await tableColumnMap(page), rows = page.locator('table tbody tr');
   const matches = [];
   for (let index = 0; index < await rows.count(); index += 1) {
@@ -543,11 +569,11 @@ function statusFromBitPanel(value, expiryDate) {
   return 'active';
 }
 
-export async function testBitPanelConnection(config) {
-  return runWithBrowser(config, async (page) => {
-    await page.goto(`${config.BITPANEL_BASE_URL}/list`, { waitUntil: 'domcontentloaded' });
-    const table = page.locator('table tbody');
-    await table.waitFor({ state: 'visible' });
+export async function testBitPanelConnection(config, { withSession = runWithBrowser } = {}) {
+  return withSession(config, async (page) => {
+    const baseUrl = readBaseUrl(config);
+    await page.goto(`${baseUrl}/list`, { waitUntil: 'domcontentloaded' });
+    await waitForBitPanelListData(page, baseUrl);
     return { ok: true, message: 'Login confirmado e lista de clientes encontrada.' };
   });
 }

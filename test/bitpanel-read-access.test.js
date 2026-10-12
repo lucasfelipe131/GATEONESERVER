@@ -1,27 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readBitPanelAccessFromPage, readBitPanelLinkedAccess, readBitPanelCustomerInformation, parseBitPanelDnsLinks, parseBitPanelCustomerNotices } from '../src/integrations/bitpanel.js';
+import { readBitPanelAccessFromPage, readBitPanelLinkedAccess, readBitPanelCustomerInformation, parseBitPanelDnsLinks, parseBitPanelCustomerNotices, testBitPanelConnection } from '../src/integrations/bitpanel.js';
 
 const config={BITPANEL_BASE_URL:'https://bitpanel.vip',BITPANEL_LOGIN_URL:'https://bitpanel.vip/login'};
 const binding={listId:'12345',username:'client.one',owner:'Gate One Pro Server'};
 function fixture({rows=[['12345','','Gate One Pro Server','Ativa','client.one','','31/12/2026']],detailUsername='client.one',detailId='12345',next=false,
-  labelFields=1,legacyFields=0,detailRows=1,flatLegacy=false,usernameLabels=1,passwordRows=1}={}) {
-  const calls={passwordReads:0,boldReads:0,writes:0,urls:[],searches:[]};let currentUrl;
+  labelFields=1,legacyFields=0,detailRows=1,flatLegacy=false,usernameLabels=1,passwordRows=1,loadingMs=0,emptyHeaders=false,duplicateHeaders=false,networkTimeout=false}={}) {
+  const calls={passwordReads:0,boldReads:0,writes:0,urls:[],searches:[],waits:[],earlyReads:0};let currentUrl,ready=loadingMs===0,pending;
   const cells=row=>({count:async()=>row.length,nth:index=>({innerText:async()=>row[index]})});
   const detailText=pattern=>{
     if(pattern.source.includes('Usuário'))return`Usuário: ${detailUsername}`;
     if(pattern.source.includes('Senha')){calls.passwordReads++;return'Senha: synthetic-access';}
     return'Data de validade: 31/12/2026';
   };
-  const fields=(count,name)=>({count:async()=>count,nth:()=>({isVisible:async()=>true,fill:async value=>{calls.searches.push({name,value});}})});
+  const fields=(count,name)=>({count:async()=>count,first:()=>({waitFor:async()=>{if(!count)throw Error('no field');}}),nth:()=>({isVisible:async()=>true,fill:async value=>{calls.searches.push({name,value});if(loadingMs)pending=new Promise(resolve=>setTimeout(()=>{ready=true;resolve();},loadingMs));}})});
   const page={
     url:()=>currentUrl,
     goto:async url=>{calls.urls.push(url);currentUrl=url.includes('/view/')?`https://bitpanel.vip/list/view/${detailId}`:url;},
-    waitForTimeout:async()=>{},
+    waitForTimeout:async ms=>{calls.waits.push(ms);},
+    waitForLoadState:async(state,options)=>{assert.equal(state,'networkidle');assert.deepEqual(options,{timeout:20000});if(networkTimeout)throw Error('pending network');await pending;},
     locator:selector=>{
       if(selector==='table tbody')return{waitFor:async()=>{}};
-      if(selector==='table thead th')return{allInnerTexts:async()=>['ID','','Proprietário','Estado','Usuário','','Validade']};
-      if(selector==='table tbody tr')return{count:async()=>rows.length,nth:i=>({locator:()=>cells(rows[i])})};
+      if(selector==='table thead th')return{first:()=>({waitFor:async()=>{if(emptyHeaders)throw Error('empty header');}}),allInnerTexts:async()=>{if(!ready){calls.earlyReads++;return [];}return emptyHeaders?[]:duplicateHeaders?['ID','ID','Proprietário','Usuário']:['ID','','Proprietário','Estado','Usuário','','Validade'];}};
+      if(selector==='table tbody tr')return{count:async()=>{if(!ready){calls.earlyReads++;return 0;}return rows.length;},nth:i=>({locator:()=>cells(rows[i])})};
       if(selector==='li')return{filter:({hasText})=>({
         count:async()=>hasText.source.includes('Senha')?passwordRows:detailRows,
         innerText:async()=>detailText(hasText)
@@ -93,6 +94,24 @@ test('BitPanel reader exposes only fixed error codes and never passes invalid bi
   await assert.rejects(readBitPanelLinkedAccess({...config,BITPANEL_BASE_URL:'https://outside.invalid'},binding,{withSession}),{code:'BITPANEL_READ_LINK_UNVERIFIED'});
   await assert.rejects(readBitPanelLinkedAccess({...config,BITPANEL_LOGIN_URL:'https://outside.invalid/login'},binding,{withSession}),{code:'BITPANEL_READ_LINK_UNVERIFIED'});
   assert.equal(sessions,1);
+});
+
+test('search waits for an in-flight response to hydrate headers and rows before verifying the linked account',async()=>{
+  const {page,calls}=fixture({loadingMs:200});const result=await readBitPanelAccessFromPage(page,config,binding);
+  assert.equal(result.listId,'12345');assert.deepEqual(calls.waits,[700]);assert.equal(calls.earlyReads,0);assert.equal(calls.passwordReads,1);assert.equal(calls.writes,0);
+});
+
+test('empty or ambiguous headers and unsettled search results never authorize a password read',async()=>{
+  for(const [options,code] of [[{emptyHeaders:true},'BITPANEL_READ_UNAVAILABLE'],[{duplicateHeaders:true},'BITPANEL_READ_UNAVAILABLE'],[{networkTimeout:true},'BITPANEL_READ_TIMEOUT']]){
+    const {page,calls}=fixture(options);await assert.rejects(readBitPanelAccessFromPage(page,config,binding),{code});assert.equal(calls.passwordReads,0);assert.equal(calls.writes,0);assert.equal(calls.urls.length,1);
+  }
+});
+
+test('connection proof requires real list headers and never reports a placeholder tbody as a ready list',async()=>{
+  for(const options of [{emptyHeaders:true},{duplicateHeaders:true}]){
+    const f=fixture(options);await assert.rejects(testBitPanelConnection(config,{withSession:async(_config,task)=>task(f.page)}),{code:'BITPANEL_READ_UNAVAILABLE'});assert.equal(f.calls.passwordReads,0);assert.equal(f.calls.writes,0);
+  }
+  const f=fixture();assert.equal((await testBitPanelConnection(config,{withSession:async(_config,task)=>task(f.page)})).ok,true);assert.equal(f.calls.searches.length,0);assert.equal(f.calls.passwordReads,0);
 });
 
 test('DNS parser requires an explicitly reviewed source and omits private addresses, embedded credentials and login links',()=>{

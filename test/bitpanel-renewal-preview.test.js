@@ -43,7 +43,7 @@ function fixture(options={}) {
         if(id)currentUrl=`https://bitpanel.vip/list/view/${id}`;
       }
     },
-    waitForTimeout:async()=>{},screenshot:async()=>{calls.screenshots++;},
+    waitForTimeout:async()=>{},waitForLoadState:async(state,options)=>{assert.equal(state,'networkidle');assert.deepEqual(options,{timeout:20000});},screenshot:async()=>{calls.screenshots++;},
     getByLabel:()=>({count:async()=>1,nth:()=>search}),
     getByText:pattern=>one(pattern.source.includes('Usuário')?'Usuário:':pattern.source.includes('Senha')?'Senha:':'Data de validade:'),
     getByRole:(role,{name})=>{
@@ -57,7 +57,7 @@ function fixture(options={}) {
         if(hasText.test('Senha:'))return{...one('Senha: synthetic-secret'),innerText:async()=>{calls.passwordReads++;return'Senha: synthetic-secret';}};
         return one(`Data de validade: ${calls.finalClicks?'31/01/2027':beforeExpiry}`);
       }};
-      if(selector==='table thead th')return{allInnerTexts:async()=>['Usuário','Validade','Proprietário','ID','Estado']};
+      if(selector==='table thead th')return{first:()=>({waitFor:async()=>{}}),allInnerTexts:async()=>['Usuário','Validade','Proprietário','ID','Estado']};
       if(selector==='table tbody tr')return{count:async()=>rows.length,nth:index=>({locator:()=>({count:async()=>rows[index].length,nth:cell=>one(rows[index][cell])})})};
       if(selector==='.v-dialog--active')return dialog;
       if(selector.startsWith('i[title='))return{count:async()=>1,click:async()=>{}};
