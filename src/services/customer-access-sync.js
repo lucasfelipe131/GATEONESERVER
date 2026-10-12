@@ -149,7 +149,11 @@ export class CustomerAccessSync {
         LEFT JOIN customer_access_sync a ON a.customer_id=c.id
         WHERE c.whatsapp_e164 IS NOT NULL AND (c.bitpanel_reference IS NOT NULL OR a.customer_id IS NOT NULL)
           AND (a.attempted_at IS NULL OR a.attempted_at <= now()-interval '15 minutes')
-        ORDER BY a.attempted_at ASC NULLS FIRST,c.id LIMIT $1`, [boundedLimit])).rows;
+        ORDER BY CASE WHEN c.automation_eligible IS TRUE AND
+          regexp_replace(lower(normalize(c.bitpanel_owner,NFD)),'[^a-z0-9]','','g') IN ('gateoneproserver','gateoneserver') AND
+          (SELECT s.bitpanel_list_id FROM subscriptions s WHERE s.customer_id=c.id
+            ORDER BY s.created_at DESC,s.id DESC LIMIT 1) ~ '^[0-9]{1,20}$'
+          THEN 0 ELSE 1 END,a.attempted_at ASC NULLS FIRST,c.id LIMIT $1`, [boundedLimit])).rows;
       let runtime;
       try { runtime = await this.runtimeConfig(); } catch { runtime = null; }
       if (this.readInformation) {

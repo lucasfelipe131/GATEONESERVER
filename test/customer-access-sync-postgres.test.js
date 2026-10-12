@@ -101,6 +101,35 @@ test('read sync serializes worker replicas, obeys batch bounds, and never looks 
   }finally{await f.pg.close();}
 });
 
+test('a batch of five prioritizes an eligible linked Gate One customer before six unverified candidates',async()=>{
+  const f=await fixture();try{
+    await f.enable();
+    await f.db.query("UPDATE customers SET bitpanel_owner='Other reseller' WHERE id IN ($1,$2)",[f.one,f.two]);
+    const plan=(await f.db.query('SELECT id FROM plans')).rows[0].id;
+    const eligible='ffffffff-ffff-4fff-8fff-fffffffffff0';
+    const invalid=Array.from({length:4},(_unused,index)=>`00000000-0000-4000-8000-${String(index+1).padStart(12,'0')}`);
+    for(const [index,id] of [...invalid,eligible].entries()){
+      await f.db.query(`INSERT INTO customers(id,name,whatsapp_e164,bitpanel_reference,bitpanel_owner,automation_eligible)
+        VALUES($1,'Synthetic batch priority',$2,$3,$4,true)`,[id,`55119999998${String(index).padStart(2,'0')}`,
+        `batch.customer${index}`,id===eligible?' GÁTE - ONE PRO SERVER ':'Other reseller']);
+      await f.db.query("INSERT INTO subscriptions(id,customer_id,plan_id,expires_on,bitpanel_list_id) VALUES($1,$2,$3,'2026-12-31',$4)",
+        [randomUUID(),id,plan,String(90000+index)]);
+    }
+    const before=await f.counts(),reads=[];
+    const service=f.service({readAccess:async(_runtime,binding)=>{
+      reads.push(binding.listId);
+      return{...binding,password:'synthetic-priority',sourceUrl:`https://bitpanel.vip/list/view/${binding.listId}`};
+    }});
+    const report=await service.sync({limit:5});
+    assert.equal(report.checked,5);assert.equal(report.synced,1);assert.equal(report.unverified,4);
+    assert.deepEqual(reads,['90004']);
+    assert.equal((await service.metadata(eligible)).status,'READY');
+    assert.equal((await f.db.query("SELECT count(*)::int n FROM customer_access_sync WHERE status='UNVERIFIED_LINK'")).rows[0].n,4);
+    assert.equal((await f.db.query('SELECT count(*)::int n FROM customers')).rows[0].n,7);
+    assert.deepEqual(await f.counts(),before);
+  }finally{await f.pg.close();}
+});
+
 test('authenticated provider content replaces only its own posts, preserves apps and marks cached DNS stale on failure',async()=>{
   const f=await fixture();try{
     await f.enable();const before=await f.counts(),verifiedAt=new Date().toISOString();

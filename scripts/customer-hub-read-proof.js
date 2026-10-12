@@ -1,0 +1,133 @@
+import { pathToFileURL } from 'node:url';
+import { loadConfig } from '../src/config.js';
+import { createDb } from '../src/db.js';
+import { getRuntimeConfig } from '../src/integrations/runtime-config.js';
+import { testBitPanelConnection, readBitPanelLinkedAccess, readBitPanelCustomerInformation, previewBitPanelRenewal, isGateOneOwner } from '../src/integrations/bitpanel.js';
+import { CustomerAccessSync } from '../src/services/customer-access-sync.js';
+import { expirationForPlan } from '../src/core/renewal-orchestrator.js';
+import { dateOnlyInTimezone } from '../src/domain/billing.js';
+
+const plansToProve = [['monthly',1,3000],['quarterly',3,8500],['semiannual',6,15000],['annual',12,27000]];
+const fail = code => Object.assign(new Error(code), {code});
+const allowedErrors = new Set(['READ_PROOF_PROJECT_MISMATCH','READ_PROOF_ENVIRONMENT_MISMATCH','READ_PROOF_VERSION_MISMATCH',
+  'READ_PROOF_MIGRATION_REQUIRED','READ_PROOF_SESSION_REQUIRED','READ_PROOF_PLANS_MISMATCH','READ_PROOF_CONTENT_UNAVAILABLE','READ_PROOF_NO_VERIFIED_CUSTOMER',
+  'READ_PROOF_UNAVAILABLE','BITPANEL_READ_LINK_UNVERIFIED','BITPANEL_READ_REAUTH_REQUIRED','BITPANEL_READ_UNAVAILABLE',
+  'BITPANEL_READ_TIMEOUT','RENEWAL_PROVIDER_QUOTE_MISMATCH','RENEWAL_PROVIDER_EXPIRATION_MISMATCH',
+  'RENEWAL_PREVIEW_UNAVAILABLE','RENEWAL_PREVIEW_CLOSE_FAILED']);
+const safeCode = error => allowedErrors.has(error?.code) ? error.code : 'READ_PROOF_UNAVAILABLE';
+const retryable = new Set(['BITPANEL_READ_LINK_UNVERIFIED','RENEWAL_PROVIDER_EXPIRATION_MISMATCH','RENEWAL_PROVIDER_QUOTE_MISMATCH']);
+const sameBinding = (left,right) => ['customer_id','subscription_id','list_id','username','owner','whatsapp_e164','expires_on']
+  .every(key => left?.[key] === right?.[key]);
+const validBinding = binding => binding && /^[1-9]\d{0,19}$/.test(String(binding.list_id || '')) &&
+  /^[1-9]\d{7,14}$/.test(String(binding.whatsapp_e164 || '')) && isGateOneOwner(binding.owner) &&
+  typeof binding.username === 'string' && binding.username.trim() === binding.username &&
+  binding.username.length > 0 && binding.username.length <= 120 && !/[\r\n\x00]/.test(binding.username) &&
+  /^\d{4}-\d{2}-\d{2}$/.test(String(binding.expires_on || ''));
+
+export function assertCustomerHubReadProofEnvironment({env=process.env,expectedSha}={}) {
+  if (env.RAILWAY_PROJECT_ID !== 'a0f107fe-acaf-459f-a640-38ef6010d1e5') throw fail('READ_PROOF_PROJECT_MISMATCH');
+  if (env.RAILWAY_ENVIRONMENT_ID !== '697f58fb-5084-4cb3-bd9a-ecdbc921b7bc') throw fail('READ_PROOF_ENVIRONMENT_MISMATCH');
+  if (!/^[a-f0-9]{40}$/.test(expectedSha || '') || env.RAILWAY_GIT_COMMIT_SHA !== expectedSha) throw fail('READ_PROOF_VERSION_MISMATCH');
+}
+
+export async function runCustomerHubReadProof({db,config,runtimeConfig=()=>getRuntimeConfig(db,config),
+  testConnection=testBitPanelConnection,readAccess=readBitPanelLinkedAccess,previewRenewal=previewBitPanelRenewal,
+  readInformation=readBitPanelCustomerInformation,
+  now=()=>new Date()}={}) {
+  const proofs={session:{status:'UNAVAILABLE'},customerAccess:{status:'UNAVAILABLE',attempted:0,cached:0,conflictsSkipped:0},
+    renewalPreview:{status:'UNAVAILABLE',plans:4,validated:0,submitted:0},content:{status:'UNAVAILABLE',posts:0,dns:0,sources:[]}};
+  const failures={};
+  const result=()=>({proved:false,proofs,failures,realTestCharges:0,realTestMessages:0,realTestRenewals:0});
+  const recordFailure=error=>{const code=safeCode(error);failures[code]=(failures[code] || 0)+1;return code;};
+  try {
+    if (!(await db.query("SELECT to_regclass('customer_access_sync') AS access_table")).rows[0]?.access_table)
+      throw fail('READ_PROOF_MIGRATION_REQUIRED');
+    const runtime={...await runtimeConfig(),BITPANEL_READ_TIMEOUT_MS:30_000};
+    if (!runtime.BITPANEL_STORAGE_STATE) throw fail('READ_PROOF_SESSION_REQUIRED');
+    let source;
+    try {source=new URL(runtime.BITPANEL_BASE_URL);} catch {throw fail('BITPANEL_READ_LINK_UNVERIFIED');}
+    if (source.protocol!=='https:' || !['bitpanel.vip','www.bitpanel.vip'].includes(source.hostname) ||
+      source.username || source.password || source.port || source.search || source.hash || source.pathname!=='/')
+      throw fail('BITPANEL_READ_LINK_UNVERIFIED');
+    if ((await testConnection(runtime))?.ok !== true) throw fail('BITPANEL_READ_REAUTH_REQUIRED');
+    proofs.session={status:'READY',protectedSession:true};
+    const information=await readInformation(runtime);
+    const contentSources=new Set([`${source.origin}/notices`,`${source.origin}/news`]);
+    if(information?.source!==`${source.origin}/notices` || !Array.isArray(information.posts) || !information.posts.length ||
+      information.dnsVerified!==true || !Array.isArray(information.dns) || !information.dns.length ||
+      information.posts.some(post=>!contentSources.has(post.url)) ||
+      information.dns.some(dns=>dns.sourceUrl!==`${source.origin}/notices` || dns.status!=='READY'))
+      throw fail('READ_PROOF_CONTENT_UNAVAILABLE');
+    proofs.content={status:'READY',posts:information.posts.length,dns:information.dns.length,
+      sources:[...new Set([...information.posts.map(post=>post.url),...information.dns.map(dns=>dns.sourceUrl)])]};
+    const plans={};
+    for(const [code,months,price] of plansToProve) {
+      const rows=(await db.query('SELECT duration_months,price_cents FROM plans WHERE code=$1 AND active=true',[code])).rows;
+      if(rows.length!==1 || rows[0].duration_months!==months || rows[0].price_cents!==price) throw fail('READ_PROOF_PLANS_MISMATCH');
+      plans[code]={durationMonths:months,priceCents:price,creditCost:months};
+    }
+    // Proposed quote policy stays in memory. This proof cannot activate it.
+    const policy={enabled:true,planLabel:'30',unitPriceCents:3000,maxConnections:1,maxCreditsPerRenewal:12,plans};
+    const previewConfig={...runtime,BITPANEL_AUTOMATIC_RENEWAL_POLICY:policy};
+    const sync=new CustomerAccessSync({db,config:{...config,BITPANEL_BASE_URL:source.origin},now,readInformation:null});
+    const candidates=(await db.query(`SELECT c.id FROM customers c
+      JOIN LATERAL (SELECT bitpanel_list_id FROM subscriptions WHERE customer_id=c.id
+        ORDER BY created_at DESC,id DESC LIMIT 1) s ON true
+      WHERE c.automation_eligible IS TRUE AND c.whatsapp_e164 ~ '^[1-9][0-9]{7,14}$'
+        AND c.bitpanel_reference IS NOT NULL AND trim(c.bitpanel_reference)<>''
+        AND regexp_replace(lower(normalize(c.bitpanel_owner,NFD)),'[^a-z0-9]','','g') IN ('gateoneproserver','gateoneserver')
+        AND s.bitpanel_list_id ~ '^[1-9][0-9]{0,19}$'
+      ORDER BY c.id LIMIT 5`)).rows;
+    for(const candidate of candidates) {
+      if(proofs.customerAccess.attempted>=3) break;
+      const binding=await sync.binding(db,candidate.id);
+      if(!validBinding(binding) || await sync.conflicting(db,binding)) {
+        proofs.customerAccess.conflictsSkipped++;
+        continue;
+      }
+      proofs.customerAccess.attempted++;
+      try {
+        const observed=await readAccess(runtime,{listId:binding.list_id,username:binding.username,owner:binding.owner});
+        await sync.saveSuccess(binding,observed,runtime);
+        const metadata=await sync.metadata(candidate.id);
+        if(metadata.status!=='READY' || metadata.passwordAvailable!==true) throw fail('BITPANEL_READ_LINK_UNVERIFIED');
+        proofs.customerAccess.cached++;
+        proofs.customerAccess.status='READY';
+        let validated=0;
+        for(const [code,months] of plansToProve) {
+          const today=dateOnlyInTimezone(now(),config.TIMEZONE || 'America/Sao_Paulo');
+          const expected=expirationForPlan(binding.expires_on>today?binding.expires_on:today,{durationMonths:months});
+          const preview=await previewRenewal(previewConfig,{bitpanel_list_id:binding.list_id,bitpanel_reference:binding.username,
+            bitpanel_owner:binding.owner,current_expiry:binding.expires_on,expected_expiration:expected,
+            duration_months:months,plan_code:code,expected_credit_cost:months,automatic_renewal:true,charge_stage:'manual'});
+          const quote=preview?.quote;
+          if(preview?.prepared!==true || preview.submitted!==false || preview.sourceUrl!==`${source.origin}/list/view/${binding.list_id}` ||
+            quote?.listId!==binding.list_id || quote.planLabel!==policy.planLabel || quote.months!==months ||
+            quote.connections!==1 || quote.credits!==months || quote.unitPriceCents!==3000 || quote.totalPriceCents!==3000*months)
+            throw fail('RENEWAL_PROVIDER_QUOTE_MISMATCH');
+          validated++;
+        }
+        if(!sameBinding(binding,await sync.binding(db,candidate.id)) || (await sync.metadata(candidate.id)).status!=='READY')
+          throw fail('BITPANEL_READ_LINK_UNVERIFIED');
+        proofs.renewalPreview={status:'READY',plans:4,validated,submitted:0};
+        return {...result(),proved:true};
+      } catch(error) {if(!retryable.has(recordFailure(error))) return result();}
+    }
+    recordFailure(fail('READ_PROOF_NO_VERIFIED_CUSTOMER'));
+  } catch(error) {recordFailure(error);}
+  return result();
+}
+
+if(process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href) {
+  let db;
+  try {
+    const expectedSha=process.argv[2];
+    assertCustomerHubReadProofEnvironment({expectedSha});
+    const config=loadConfig();
+    db=createDb(config.DATABASE_URL,{ssl:config.DATABASE_SSL});
+    const proof=await runCustomerHubReadProof({db,config});
+    console.log(JSON.stringify({sha:expectedSha,...proof}));
+    if(!proof.proved) process.exitCode=1;
+  } catch(error) {console.log(JSON.stringify({proved:false,errorCode:safeCode(error)}));process.exitCode=1;}
+  finally {if(db) await db.close().catch(()=>{process.exitCode=1;});}
+}

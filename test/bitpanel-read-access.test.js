@@ -4,9 +4,16 @@ import { readBitPanelAccessFromPage, readBitPanelLinkedAccess, readBitPanelCusto
 
 const config={BITPANEL_BASE_URL:'https://bitpanel.vip',BITPANEL_LOGIN_URL:'https://bitpanel.vip/login'};
 const binding={listId:'12345',username:'client.one',owner:'Gate One Pro Server'};
-function fixture({rows=[['12345','','Gate One Pro Server','Ativa','client.one','','31/12/2026']],detailUsername='client.one',detailId='12345',next=false}={}) {
-  const calls={passwordReads:0,writes:0,urls:[]};let currentUrl;
+function fixture({rows=[['12345','','Gate One Pro Server','Ativa','client.one','','31/12/2026']],detailUsername='client.one',detailId='12345',next=false,
+  labelFields=1,legacyFields=0,detailRows=1,flatLegacy=false,usernameLabels=1,passwordRows=1}={}) {
+  const calls={passwordReads:0,boldReads:0,writes:0,urls:[],searches:[]};let currentUrl;
   const cells=row=>({count:async()=>row.length,nth:index=>({innerText:async()=>row[index]})});
+  const detailText=pattern=>{
+    if(pattern.source.includes('Usuário'))return`Usuário: ${detailUsername}`;
+    if(pattern.source.includes('Senha')){calls.passwordReads++;return'Senha: synthetic-access';}
+    return'Data de validade: 31/12/2026';
+  };
+  const fields=(count,name)=>({count:async()=>count,nth:()=>({isVisible:async()=>true,fill:async value=>{calls.searches.push({name,value});}})});
   const page={
     url:()=>currentUrl,
     goto:async url=>{calls.urls.push(url);currentUrl=url.includes('/view/')?`https://bitpanel.vip/list/view/${detailId}`:url;},
@@ -15,14 +22,20 @@ function fixture({rows=[['12345','','Gate One Pro Server','Ativa','client.one','
       if(selector==='table tbody')return{waitFor:async()=>{}};
       if(selector==='table thead th')return{allInnerTexts:async()=>['ID','','Proprietário','Estado','Usuário','','Validade']};
       if(selector==='table tbody tr')return{count:async()=>rows.length,nth:i=>({locator:()=>cells(rows[i])})};
-      return{count:async()=>1,nth:()=>({isVisible:async()=>true,fill:async()=>{}})};
+      if(selector==='li')return{filter:({hasText})=>({
+        count:async()=>hasText.source.includes('Senha')?passwordRows:detailRows,
+        innerText:async()=>detailText(hasText)
+      })};
+      assert.equal(selector,"input[placeholder='Buscar' i], input[placeholder='Pesquisar' i], input[placeholder='Buscar por nome' i], input[placeholder='Pesquisar por nome' i], input[type='search']");
+      return fields(legacyFields,'legacy');
     },
+    getByLabel:(label,options)=>{assert.equal(label,'Buscar por nome');assert.deepEqual(options,{exact:true});return fields(labelFields,'Buscar por nome');},
     getByRole:()=>({count:async()=>1,isEnabled:async()=>next,click:async()=>{calls.writes++;}}),
-    getByText:pattern=>({innerText:async()=>{
-      if(pattern.source.includes('Usuário'))return`Usuário: ${detailUsername}`;
-      if(pattern.source.includes('Senha')){calls.passwordReads++;return'Senha: synthetic-access';}
-      return'Data de validade: 31/12/2026';
-    }})
+    getByText:pattern=>({count:async()=>pattern.source.includes('Usuário')?usernameLabels:1,
+      first:()=>({waitFor:async()=>{}}),innerText:async()=>{
+        if(flatLegacy)return detailText(pattern);
+        calls.boldReads++;return pattern.source.includes('Usuário')?'Usuário:':pattern.source.includes('Senha')?'Senha:':'Data de validade:';
+      }})
   };
   return{page,calls};
 }
@@ -31,6 +44,32 @@ test('linked BitPanel reader checks ID, username and owner before reading a pass
   const {page,calls}=fixture();const result=await readBitPanelAccessFromPage(page,config,binding);
   assert.equal(result.password,'synthetic-access');assert.equal(result.listId,'12345');assert.equal(result.sourceUrl,'https://bitpanel.vip/list/view/12345');
   assert.equal(calls.passwordReads,1);assert.equal(calls.writes,0);assert.deepEqual(calls.urls,['https://bitpanel.vip/list','https://bitpanel.vip/list/view/12345']);
+  assert.deepEqual(calls.searches,[{name:'Buscar por nome',value:'client.one'}]);assert.equal(calls.boldReads,0);
+});
+
+test('BitPanel reader uses an exact labelled name search and rejects ambiguous or missing search fields',async()=>{
+  for(const options of [{labelFields:2,legacyFields:1},{labelFields:0,legacyFields:2},{labelFields:0,legacyFields:0}]){
+    const {page,calls}=fixture(options);
+    await assert.rejects(readBitPanelAccessFromPage(page,config,binding),{code:'BITPANEL_READ_UNAVAILABLE'});
+    assert.equal(calls.searches.length,0);assert.equal(calls.passwordReads,0);assert.equal(calls.writes,0);
+  }
+  const {page,calls}=fixture({labelFields:0,legacyFields:1});
+  await readBitPanelAccessFromPage(page,config,binding);
+  assert.deepEqual(calls.searches,[{name:'legacy',value:'client.one'}]);
+});
+
+test('BitPanel detail reads accept a unique flat legacy value and reject duplicate detail labels before secret reads',async()=>{
+  const legacy=fixture({detailRows:0,passwordRows:0,flatLegacy:true});
+  assert.equal((await readBitPanelAccessFromPage(legacy.page,config,binding)).username,'client.one');
+  assert.equal(legacy.calls.passwordReads,1);
+  for(const options of [{detailRows:2},{passwordRows:2},{detailRows:0,usernameLabels:2,flatLegacy:true}]){
+    const {page,calls}=fixture(options);
+    await assert.rejects(readBitPanelAccessFromPage(page,config,binding),{code:'BITPANEL_READ_LINK_UNVERIFIED'});
+    assert.equal(calls.passwordReads,0);assert.equal(calls.writes,0);
+  }
+  const boldOnly=fixture({detailRows:0,passwordRows:0});
+  await assert.rejects(readBitPanelAccessFromPage(boldOnly.page,config,binding),{code:'BITPANEL_READ_UNAVAILABLE'});
+  assert.equal(boldOnly.calls.passwordReads,0);
 });
 
 test('BitPanel reader fails closed on mismatches, duplicates and incomplete pagination without reading passwords',async()=>{
