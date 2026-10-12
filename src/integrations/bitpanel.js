@@ -1,3 +1,4 @@
+import { validateBitPanelRenewalQuote } from '../services/bitpanel-renewal-quote.js';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
@@ -109,6 +110,10 @@ async function openSession(page, config) {
     throw new Error(
       'O BitPanel exige autenticação humana. Gere e importe uma nova sessão; o CAPTCHA não será contornado.'
     );
+  }
+
+  if (!config.BITPANEL_USERNAME || !config.BITPANEL_PASSWORD) {
+    throw new Error('O BitPanel exige autenticação humana. Gere e importe uma nova sessão autenticada.');
   }
 
   await username.fill(config.BITPANEL_USERNAME);
@@ -249,6 +254,12 @@ async function runWithBrowser(config, task) {
     headless: config.BITPANEL_HEADLESS,
     args: ['--no-sandbox', '--disable-dev-shm-usage']
   });
+  // The optional read deadline is never supplied by renewal/provisioning callers.
+  const readDeadline = Number(config.BITPANEL_READ_TIMEOUT_MS);
+  const readTimer = Number.isFinite(readDeadline) && readDeadline > 0
+    ? setTimeout(() => browser.close().catch(() => null), readDeadline)
+    : null;
+  readTimer?.unref?.();
   try {
     let storageState;
     if (config.BITPANEL_STORAGE_STATE) {
@@ -272,7 +283,192 @@ async function runWithBrowser(config, task) {
     }
     return result;
   } finally {
+    if (readTimer) clearTimeout(readTimer);
     await browser.close();
+  }
+}
+
+const readFailure = code => Object.assign(new Error(code), { code });
+const readCodes = new Set(['BITPANEL_READ_LINK_UNVERIFIED','BITPANEL_READ_REAUTH_REQUIRED','BITPANEL_READ_UNAVAILABLE','BITPANEL_READ_TIMEOUT']);
+
+function readBaseUrl(config) {
+  try {
+    const url = new URL(config.BITPANEL_BASE_URL);
+    if (url.protocol !== 'https:' || !['bitpanel.vip','www.bitpanel.vip'].includes(url.hostname) ||
+        url.username || url.password || url.port || url.search || url.hash || url.pathname !== '/') throw new Error();
+    return url.origin;
+  } catch { throw readFailure('BITPANEL_READ_LINK_UNVERIFIED'); }
+}
+
+function readBinding(binding) {
+  const listId = String(binding?.listId || '').trim();
+  const username = String(binding?.username || '').trim();
+  if (!/^\d{1,20}$/.test(listId) || !username || username.length > 120 ||
+      /[\r\n\x00]/.test(username) || !isGateOneOwner(binding?.owner)) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  return { listId, username, owner: binding.owner };
+}
+
+// No buttons that modify the provider are reachable from this reader.
+export async function readBitPanelAccessFromPage(page, config, binding) {
+  const expected = readBinding(binding), baseUrl = readBaseUrl(config);
+  await page.goto(`${baseUrl}/list`, { waitUntil: 'domcontentloaded' });
+  if (new URL(page.url()).origin !== baseUrl) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  if (new URL(page.url()).pathname.includes('/login')) throw readFailure('BITPANEL_READ_REAUTH_REQUIRED');
+  await page.locator('table tbody').waitFor({ state: 'visible' });
+  const search = await firstVisible(page, "input[placeholder*='Buscar' i], input[placeholder*='Pesquisar' i], input[type='search']");
+  if (!search) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+  await search.fill(expected.username);
+  await page.waitForTimeout(700);
+  const columns = await tableColumnMap(page), rows = page.locator('table tbody tr');
+  const matches = [];
+  for (let index = 0; index < await rows.count(); index += 1) {
+    const cells = rows.nth(index).locator('td');
+    if (await cells.count() <= Math.max(...Object.values(columns))) continue;
+    const id = (await cells.nth(columns.id).innerText()).trim().replace(/^#/, '');
+    const username = (await cells.nth(columns.username).innerText()).trim();
+    const owner = (await cells.nth(columns.owner).innerText()).trim();
+    if (id === expected.listId || username === expected.username) matches.push({ id, username, owner });
+  }
+  if (matches.length !== 1 || matches[0].id !== expected.listId || matches[0].username !== expected.username ||
+      !isGateOneOwner(matches[0].owner) || normalizeBitPanelText(matches[0].owner) !== normalizeBitPanelText(expected.owner))
+    throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  // Search must have a single page; incomplete or ambiguous results fail closed.
+  const next = page.getByRole('button', { name: 'Next page', exact: true });
+  if (await next.count() > 1 || (await next.count() === 1 && await next.isEnabled())) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  const sourceUrl = `${baseUrl}/list/view/${expected.listId}`;
+  await page.goto(sourceUrl, { waitUntil: 'domcontentloaded' });
+  if (page.url() !== sourceUrl) throw readFailure(new URL(page.url()).pathname.includes('/login') ? 'BITPANEL_READ_REAUTH_REQUIRED' : 'BITPANEL_READ_LINK_UNVERIFIED');
+  // Check the username before reading the password from the page.
+  const username = stripPrefix(await page.getByText(/^Usuário:/).innerText(), 'Usuário:');
+  if (username !== expected.username) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  const details = await captureListDetails(page);
+  if (details.listId !== expected.listId || details.username !== expected.username || !details.password ||
+      details.password.length > 1000 || /[\r\n\x00]/.test(details.password)) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  return { listId: details.listId, username: details.username, password: details.password,
+    owner: matches[0].owner, sourceUrl, verifiedAt: new Date().toISOString() };
+}
+
+export async function readBitPanelLinkedAccess(config, binding, { withSession = runWithBrowser } = {}) {
+  readBinding(binding);
+  const baseUrl = readBaseUrl(config);
+  try {
+    const login = new URL(resolveBitPanelLoginUrl(baseUrl, config.BITPANEL_LOGIN_URL));
+    if (login.origin !== baseUrl) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+    return await withSession({ ...config, BITPANEL_BASE_URL: baseUrl, BITPANEL_READ_TIMEOUT_MS: 30_000 },
+      page => readBitPanelAccessFromPage(page, config, binding));
+  } catch (error) {
+    if (readCodes.has(error?.code)) throw readFailure(error.code);
+    if (/CAPTCHA|autentica|sessão|credenciais|acesso|login/i.test(String(error?.message))) throw readFailure('BITPANEL_READ_REAUTH_REQUIRED');
+    throw readFailure('BITPANEL_READ_UNAVAILABLE');
+  }
+}
+
+// The source path must be explicitly reviewed after authenticated UI inspection.
+// This function does not discover pages or fetch URLs.
+export function parseBitPanelDnsLinks(candidates, { sourceUrl, reviewedSourcePaths = [] } = {}) {
+  let source;
+  try {
+    source = new URL(sourceUrl);
+    if (readBaseUrl({ BITPANEL_BASE_URL: source.origin }) !== source.origin || source.search || source.hash ||
+        source.username || source.password || !reviewedSourcePaths.includes(source.pathname)) return [];
+  } catch { return []; }
+  const results = new Map();
+  for (const item of (Array.isArray(candidates) ? candidates : []).slice(0, 100)) {
+    const label = String(item?.label || '').trim().slice(0, 100);
+    if (!/^(dns|servidor)(?:\s+\d+)?$/i.test(label)) continue;
+    try {
+      const url = new URL(item.url), host = url.hostname.toLowerCase();
+      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash ||
+          url.pathname !== '/' || !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(host) ||
+          /(?:^|\.)(?:localhost|local|internal|invalid|example|test)$/.test(host) ||
+          !['','80','443','8080','8000'].includes(url.port)) continue;
+      results.set(url.href, { label, url: url.href, sourceUrl: source.href });
+    } catch { /* Untrusted links are omitted. */ }
+  }
+  return [...results.values()].slice(0, 10);
+}
+
+function customerContentLink(value) {
+  try {
+    const url = new URL(value);
+    if (!['http:','https:'].includes(url.protocol) || url.username || url.password ||
+        [...url.searchParams.keys()].some(key => /token|pass|secret|user|auth|key/i.test(key))) return null;
+    if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(url.hostname) || /(?:^|\.)(?:localhost|local|internal|invalid|example|test)$/.test(url.hostname)) return null;
+    return url.href;
+  } catch { return null; }
+}
+
+export function parseBitPanelCustomerNotices(entries, { sourceUrl = 'https://bitpanel.vip/notices', category = 'notices' } = {}) {
+  let source;
+  try { source = new URL(sourceUrl); } catch { throw readFailure('BITPANEL_READ_LINK_UNVERIFIED'); }
+  if (!['notices','news'].includes(category) || readBaseUrl({BITPANEL_BASE_URL:source.origin}) !== source.origin || source.pathname !== `/${category}` ||
+      source.search || source.hash || source.username || source.password) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  const notices = (Array.isArray(entries) ? entries : []).slice(0, 20).map(item => {
+    const title = String(item.title || '').replace(/\s+/g,' ').trim().slice(0,200);
+    const text = String(item.content || '').replace(/\r/g,'').trim()
+      .replace(/https?:\/\/[^\s<>]+/gi, value => customerContentLink(value.replace(/[.,;!)]+$/,'')) ? value : '[link protegido]')
+      .replace(/(?:password|senha|secret|token|api[_-]?key)\s*[:=]\s*[^\s]+/gi,'[dado protegido]');
+    const publishedLabel = String(item.publishedLabel || '').replace(/\s+/g,' ').trim().slice(0,200);
+    const date = publishedLabel.match(/\b(\d{2})\/(\d{2})\/(\d{4})(?:[^\d]{0,10}(\d{2}):(\d{2}))?/);
+    if (!title || !text || !date) return null;
+    const year=Number(date[3]),month=Number(date[2]),day=Number(date[1]);
+    if(year<2010 || year>2100 || month<1 || month>12 || day<1 || day>new Date(Date.UTC(year,month,0)).getUTCDate() ||
+        Number(date[4] || 0)>23 || Number(date[5] || 0)>59) return null;
+    return {category,title,content:text.slice(0,1000),publishedLabel,
+      publishedAt:`${date[3]}-${date[2]}-${date[1]}T${date[4] || '00'}:${date[5] || '00'}:00-03:00`,sourceUrl:source.href,
+      links:[...new Set((Array.isArray(item.links) ? item.links : []).map(customerContentLink).filter(Boolean))].slice(0,12),
+      _fullText:text};
+  }).filter(Boolean);
+  if (!notices.length) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+  notices.sort((a,b) => new Date(b.publishedAt)-new Date(a.publishedAt));
+  // Only the newest notice explicitly designating a NEW DNS may promote a domain.
+  const announcement = category === 'notices' ? notices.find(item => /utilize\s+(?:a\s+)?nova\s+dns/i.test(item._fullText)) : null;
+  const candidate = announcement?._fullText.match(/utilize\s+(?:a\s+)?nova\s+dns\s*:?\s*(https?:\/\/[^\s<>]+)/i)?.[1]?.replace(/[.,;!)]+$/,'');
+  const dns = candidate ? parseBitPanelDnsLinks([{label:'DNS',url:candidate}],{
+    sourceUrl:source.href,reviewedSourcePaths:['/notices']
+  }).map(item => ({...item,publishedAt:announcement.publishedAt})) : [];
+  return {notices:notices.slice(0,5).map(({_fullText,...item}) => item),dns,dnsVerified:Boolean(dns.length)};
+}
+
+export async function readBitPanelCustomerInformation(config, { withSession = runWithBrowser } = {}) {
+  const baseUrl = readBaseUrl(config);
+  try {
+    const login = new URL(resolveBitPanelLoginUrl(baseUrl,config.BITPANEL_LOGIN_URL));
+    if (login.origin !== baseUrl) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+    return await withSession({...config,BITPANEL_BASE_URL:baseUrl,BITPANEL_READ_TIMEOUT_MS:30_000},async page => {
+      const verifiedAt = new Date().toISOString(), sections = [];
+      for (const category of ['notices','news']) {
+        const sourceUrl = `${baseUrl}/${category}`;
+        await page.goto(sourceUrl,{waitUntil:'domcontentloaded'});
+        if (page.url() !== sourceUrl) throw readFailure(new URL(page.url()).pathname.includes('/login') ? 'BITPANEL_READ_REAUTH_REQUIRED' : 'BITPANEL_READ_LINK_UNVERIFIED');
+        const bodies = page.locator('.notices .notice-body');
+        await bodies.first().waitFor({state:'visible'});
+        const entries = await bodies.evaluateAll(nodes => nodes.slice(0,20).map(node => {
+          const title = node.querySelector('h4')?.textContent || '';
+          const publishedLabel = node.querySelector('h6')?.textContent || '';
+          const content = (node.innerText || '').replace(title,'').replace(publishedLabel,'').trim();
+          return {title,publishedLabel,content,links:[...node.querySelectorAll('a[href]')].map(link => link.href)};
+        }));
+        sections.push(parseBitPanelCustomerNotices(entries,{sourceUrl,category}));
+      }
+      await page.goto(`${baseUrl}/`,{waitUntil:'domcontentloaded'});
+      if (page.url() !== `${baseUrl}/`) throw readFailure(new URL(page.url()).pathname.includes('/login') ? 'BITPANEL_READ_REAUTH_REQUIRED' : 'BITPANEL_READ_LINK_UNVERIFIED');
+      const links = page.locator('a[href*="t.me/"]');
+      let telegram = null;
+      if (await links.count() === 1) {
+        const candidate = customerContentLink(await links.first().getAttribute('href'));
+        if (candidate && new URL(candidate).protocol === 'https:' && new URL(candidate).hostname === 't.me')
+          telegram={channelUrl:candidate,verifiedAt,sourceUrl:`${baseUrl}/`};
+      }
+      return {source:`${baseUrl}/notices`,verifiedAt,status:'READY',
+        posts:sections.flatMap(section=>section.notices.map(({sourceUrl,publishedLabel,...post})=>({...post,source:'bitpanel',url:sourceUrl,verifiedAt}))),
+        dns:sections[0].dns.map(item=>({name:'DNS atual',value:item.url.replace(/\/$/,''),status:'READY',verifiedAt,sourceUrl:item.sourceUrl})),
+        dnsVerified:sections[0].dnsVerified,telegram,downloadsUrl:'https://bitplatform.vip/'};
+    });
+  } catch (error) {
+    if (readCodes.has(error?.code)) throw readFailure(error.code);
+    if (/CAPTCHA|autentica|sessão|credenciais|acesso|login/i.test(String(error?.message))) throw readFailure('BITPANEL_READ_REAUTH_REQUIRED');
+    throw readFailure('BITPANEL_READ_UNAVAILABLE');
   }
 }
 
@@ -399,6 +595,8 @@ export async function renewInBitPanel(config, renewal) {
       /^Selecione a validade/,
       optionLabelsForMonths(renewal.duration_months)
     );
+
+    validateBitPanelRenewalQuote(await dialog.innerText(), renewal, config.BITPANEL_AUTOMATIC_RENEWAL_POLICY);
 
     const evidencePath = join(
       config.ARTIFACTS_DIR,

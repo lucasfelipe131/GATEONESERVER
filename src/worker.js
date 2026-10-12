@@ -8,7 +8,8 @@ import { createQueues, createRedis } from './queue.js';
 import { scanBilling } from './services/billing.js';
 import { createBillingAutomation } from './services/live-billing.js';
 import { startLiveOutbox, deliverCoreNotification, sendQrDelivery } from './services/live-outbox.js';
-import { claimRenewalExecution, expectedRenewalExpiration } from './services/renewal-execution.js';
+import { claimRenewalExecution, expectedRenewalExpiration, recoverPolicyRenewals, invalidateCustomerAccessProvenance } from './services/renewal-execution.js';
+import { CustomerAccessSync } from './services/customer-access-sync.js';
 import { createCheckoutPreference, createPixPayment } from './integrations/mercadopago.js';
 import {
   sendAccessCreatedTemplate,
@@ -33,7 +34,6 @@ import { syncTelegramContent } from './services/telegram-content.js';
 import { encryptSecret } from './security.js';
 import { createBusinessEvent } from './core/events.js';
 import { appendOutboxEvent } from './core/outbox.js';
-import { renewalExecutionDecision } from './core/renewal.js';
 import { startStagingOutbox } from './services/staging-outbox.js';
 
 const config = loadConfig();
@@ -339,50 +339,45 @@ async function processRenewal(job) {
       WHERE r.id = $1`,
     [job.data.renewalId]
   );
-  const renewal = result.rows[0];
+  let renewal = result.rows[0];
   if (!renewal) throw new Error('Renovação não encontrada.');
-  const execution = renewalExecutionDecision({
-    coreStatus: renewal.core_status,
-    legacyStatus: renewal.status,
-    paymentStatus: renewal.charge_status,
-    approvedAt: renewal.approved_at,
-    requiresApproval: runtimeConfig.RENEWAL_REQUIRES_APPROVAL
-  });
-  if (execution.duplicate) return { duplicate: true, status: 'COMPLETED' };
-  if (execution.code === 'PAYMENT_NOT_CONFIRMED') {
-    throw new Error('Pagamento não confirmado. Renovação bloqueada.');
-  }
-  if (execution.code === 'HUMAN_ACTION_REQUIRED') {
-    throw new Error('Renovação não aprovada. Execução bloqueada.');
-  }
-  const operation = bitPanelOperationFor(renewal);
   if(runtimeConfig.BITPANEL_MODE==='disabled') throw new Error('Automação BitPanel desativada.');
   const correlationId = renewal.correlation_id || randomUUID();
-  renewal.expected_expiration=expectedRenewalExpiration(renewal.current_expiry,renewal.duration_months,{timezone:config.TIMEZONE});
-  if (
-    operation === 'renew' &&
-    (!renewal.automation_eligible || !isGateOneOwner(renewal.bitpanel_owner))
-  ) {
-    throw new Error('Automação bloqueada: o cliente não pertence ao Gate One Pro Server.');
-  }
-  if (operation === 'provision' && !renewal.bitpanel_reference) {
-    renewal.bitpanel_reference = buildBitPanelUsername(
-      renewal.customer_name,
-      renewal.customer_id
-    );
-    await db.query(
-      `UPDATE customers SET bitpanel_reference = $2, updated_at = now() WHERE id = $1`,
-      [renewal.customer_id, renewal.bitpanel_reference]
-    );
-  }
-
-  const claim=await claimRenewalExecution(db,{renewalId:renewal.id,correlationId,requiresApproval:runtimeConfig.RENEWAL_REQUIRES_APPROVAL});
+  const claim=await claimRenewalExecution(db,{renewalId:renewal.id,correlationId,requiresApproval:runtimeConfig.RENEWAL_REQUIRES_APPROVAL,
+    allowAutomatic:runtimeConfig.BITPANEL_MODE==='live'&&runtimeConfig.PAYMENT_MODE==='live'});
   if(!claim.claimed) return {duplicate:true};
+  renewal=claim.renewal;
+  const operation = bitPanelOperationFor(renewal);
+  if(claim.automatic) {
+    renewal.automatic_renewal=true;
+    renewal.expected_credit_cost=claim.creditCost;
+    runtimeConfig.BITPANEL_EXPECTED_CREDIT_COST=claim.creditCost;
+    runtimeConfig.BITPANEL_AUTOMATIC_RENEWAL_POLICY=claim.policy;
+  }
   try {
+    if(claim.automatic&&(runtimeConfig.BITPANEL_MODE!=='live'||runtimeConfig.PAYMENT_MODE!=='live')) throw new Error('AUTO_RENEWAL_LIVE_MODE_REQUIRED');
+    renewal.expected_expiration=expectedRenewalExpiration(renewal.current_expiry,renewal.duration_months,{timezone:config.TIMEZONE});
+    if (
+      operation === 'renew' &&
+      (!renewal.automation_eligible || !isGateOneOwner(renewal.bitpanel_owner))
+    ) {
+      throw new Error('Automação bloqueada: o cliente não pertence ao Gate One Pro Server.');
+    }
+    if (operation === 'provision' && !renewal.bitpanel_reference) {
+      renewal.bitpanel_reference = buildBitPanelUsername(
+        renewal.customer_name,
+        renewal.customer_id
+      );
+      await db.query(
+        `UPDATE customers SET bitpanel_reference = $2, updated_at = now() WHERE id = $1`,
+        [renewal.customer_id, renewal.bitpanel_reference]
+      );
+    }
     const outcome =
       operation === 'provision'
         ? await provisionInBitPanel(runtimeConfig, renewal)
         : await renewInBitPanel(runtimeConfig, renewal);
+    if(claim.automatic&&outcome.simulated!==false) throw new Error('AUTO_RENEWAL_LIVE_RESULT_REQUIRED');
     if(!outcome.simulated && outcome.afterExpiry!==renewal.expected_expiration) throw new Error('RENEWAL_PROVIDER_EXPIRATION_MISMATCH');
     const renewedUntil = await db.transaction(async (client) => {
       const encryptedAccessPassword = outcome.password
@@ -464,6 +459,7 @@ async function processRenewal(job) {
             renewal.charge_id
           ]
         );
+        await invalidateCustomerAccessProvenance(client,renewal.customer_id);
         const provisioningEvent = createBusinessEvent({
           eventType: 'provisioning.completed',
           correlationId,
@@ -590,44 +586,20 @@ async function recoverAutomaticRenewals() {
   const paused = await getSetting(db, 'global_pause', config.GLOBAL_PAUSE);
   if (
     paused ||
-    runtimeConfig.RENEWAL_REQUIRES_APPROVAL ||
+    runtimeConfig.PAYMENT_MODE !== 'live' ||
     runtimeConfig.BITPANEL_MODE !== 'live'
   ) {
     return { recovered: 0, skipped: true };
   }
-  const pending = await db.query(
-    `SELECT r.id, ch.stage, s.bitpanel_list_id,
-            c.automation_eligible, c.bitpanel_owner
-       FROM renewal_jobs r
-       JOIN charges ch ON ch.id = r.charge_id
-       JOIN subscriptions s ON s.id = ch.subscription_id
-       JOIN customers c ON c.id = s.customer_id
-      WHERE r.status = 'awaiting_approval' AND r.attempts=0 AND (r.core_status IS NULL OR r.core_status='READY')
-        AND ch.status = 'paid'
-      ORDER BY r.created_at
-      LIMIT 100`
-  );
+  const pending = await recoverPolicyRenewals(db);
   let recovered = 0;
-  for (const item of pending.rows) {
-    const provision = item.stage === 'new_sale' || !item.bitpanel_list_id;
-    if (!provision && (!item.automation_eligible || !isGateOneOwner(item.bitpanel_owner))) {
-      continue;
-    }
-    const updated = await db.query(
-      `UPDATE renewal_jobs
-          SET status = 'queued', approved_at = COALESCE(approved_at, now()),
-              error = NULL, updated_at = now()
-        WHERE id = $1 AND status = 'awaiting_approval' AND attempts=0 AND (core_status IS NULL OR core_status='READY')
-        RETURNING id`,
-      [item.id]
-    );
-    if (!updated.rows[0]) continue;
+  for (const renewalId of pending.renewalIds) {
     try {
       await queues.renewals.add(
         'execute-renewal',
-        { renewalId: item.id },
+        { renewalId },
         {
-          jobId: `renewal-recovery-${item.id}`,
+          jobId: `renewal-recovery-${renewalId}`,
           attempts: 5,
           backoff: { type: 'exponential', delay: 60_000 },
           removeOnComplete: 1000,
@@ -637,8 +609,8 @@ async function recoverAutomaticRenewals() {
     } catch (error) {
       await db.query(
         `UPDATE renewal_jobs SET status = 'awaiting_approval', updated_at = now()
-          WHERE id = $1 AND status = 'queued'`,
-        [item.id]
+          WHERE id = $1 AND status = 'queued' AND attempts=0 AND core_status='READY' AND approved_at IS NULL`,
+        [renewalId]
       );
       throw error;
     }
@@ -647,10 +619,11 @@ async function recoverAutomaticRenewals() {
       actorType: 'system',
       action: 'bitpanel.automatic_job_recovered',
       entityType: 'renewal_job',
-      entityId: item.id
+      entityId: renewalId,
+      after: { automatic:true }
     });
   }
-  return { recovered, skipped: false };
+  return { recovered, skipped: pending.skipped };
 }
 
 async function queueAutomaticCharge(chargeId) {
@@ -749,6 +722,11 @@ async function start() {
       );
   };
   const contentCron = new CronJob('30 8 * * *', syncContent, null, true, config.TIMEZONE);
+  const accessSync = new CustomerAccessSync({db,config});
+  const syncCustomerAccess = () => accessSync.sync({limit:5,maxDurationMs:90_000})
+    .then(stats => console.log({stats},'Dados da área do cliente verificados'))
+    .catch(() => console.error({code:'BITPANEL_READ_UNAVAILABLE'},'Não foi possível atualizar os dados da área do cliente'));
+  const accessCron = new CronJob('*/5 * * * *',syncCustomerAccess,null,true,config.TIMEZONE);
   const recoveryCron = new CronJob(
     '*/5 * * * *',
     () => Promise.all([recoverAutomaticRenewals(), recoverAutomaticCharges()]).catch((error) =>
@@ -760,6 +738,7 @@ async function start() {
   );
   await scan();
   await syncContent();
+  await syncCustomerAccess();
   await Promise.all([recoverAutomaticRenewals(), recoverAutomaticCharges()]);
   console.log('Worker Gate One Pro iniciado.');
 
@@ -767,6 +746,7 @@ async function start() {
     await outboxRuntime?.stop();
     cron.stop();
     contentCron.stop();
+    accessCron.stop();
     recoveryCron.stop();
     await Promise.all([messageWorker.close(), renewalWorker.close()]);
     await Promise.all([queues.messages.close(), queues.renewals.close()]);

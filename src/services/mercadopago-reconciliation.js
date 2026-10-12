@@ -29,6 +29,7 @@ export async function reconcileMercadoPagoPayment({ db, config, paymentId,
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(chargeId)) throw fail('INVALID_CHARGE_REFERENCE');
   const account = await getAccount(config);
   if (!payment.collector_id || !account.id || String(payment.collector_id) !== String(account.id)) throw fail('PAYMENT_COLLECTOR_MISMATCH');
+  const observedAt = new Date().toISOString();
   return db.transaction(async client => {
     const result = await client.query(`SELECT ch.*, s.customer_id FROM charges ch
       JOIN subscriptions s ON s.id = ch.subscription_id WHERE ch.id = $1 FOR UPDATE OF ch`, [chargeId]);
@@ -39,8 +40,9 @@ export async function reconcileMercadoPagoPayment({ db, config, paymentId,
     if (['cancelled', 'rejected', 'expired'].includes(charge.status)) throw fail('CHARGE_CLOSED');
     const marked = await markPaymentApproved({ query: (sql, params) => client.query(sql, params),
       transaction: fn => fn(client) }, chargeId, { id: String(payment.id), provider: 'mercadopago',
-      status: 'approved', date_approved: payment.date_approved || null,
-      correlation_id: charge.correlation_id || randomUUID() });
+      status: 'approved',live_mode:true,currency_id:'BRL',date_approved: payment.date_approved || null,
+      correlation_id: charge.correlation_id || randomUUID() },
+    {source:'PROVIDER_RECONCILIATION',providerVerified:true,observedAt});
     return { ...marked, confirmed: true, chargeId };
   });
 }

@@ -103,6 +103,8 @@ export async function verifyWhatsAppPaymentFlow({ db, config, env = process.env 
           assert.equal((await client.query('SELECT status FROM payments WHERE id=$1',[payment.id])).rows[0].status,'PENDING');
           assert.equal((await verify(raw)).confirmed,true);
           assert.equal((await verify(raw)).duplicate,true);
+          const reconciled=(await client.query('SELECT reconciliation_status,provider_observed_at FROM payments WHERE id=$1',[payment.id])).rows[0];
+          assert.equal(reconciled.reconciliation_status,'MATCHED');assert.ok(reconciled.provider_observed_at);
           assert.equal((await client.query('SELECT count(*)::int n FROM payments WHERE customer_id=$1',[customerId])).rows[0].n,1);
           assert.equal((await client.query('SELECT status FROM charges WHERE id=$1',[payment.charge_id])).rows[0].status,'paid');
           const events=(await client.query("SELECT * FROM gate_event_outbox WHERE event_type='payment.confirmed' AND subject->>'id'=$1",[payment.id])).rows;

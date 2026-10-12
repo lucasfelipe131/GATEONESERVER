@@ -37,7 +37,7 @@ test('phase6 PostgreSQL: migrations, repositories, outbox, dedup, human resoluti
   const db = adapter(pg);
   try {
     const first = await migrateDatabase(db);
-    assert.equal(first.executed.length, 9);
+    assert.equal(first.executed.length, 10);
     assert.equal((await migrateDatabase(db)).executed.length, 0);
     assert.equal((await verifyMigrations(db)).ready, true);
     const customers = [randomUUID(), randomUUID()];

@@ -87,7 +87,7 @@ export async function scanBilling(
   return stats;
 }
 
-export async function markPaymentApproved(db, chargeId, payment) {
+export async function markPaymentApproved(db, chargeId, payment, reconciliation = null) {
   return db.transaction(async (client) => {
     const charge = await client.query(
       `SELECT ch.*, s.customer_id, s.bitpanel_list_id, p.duration_months
@@ -118,6 +118,20 @@ export async function markPaymentApproved(db, chargeId, payment) {
     ).toLowerCase();
     const externalPaymentId = String(payment?.id || '').trim();
     if (!externalPaymentId) throw new Error('Pagamento sem identificador externo.');
+    // This metadata is supplied only after the official API response has been
+    // reconciled with the charge and merchant. Admin/manual confirmation does
+    // not constitute an observed provider payment.
+    const observedAt = reconciliation?.observedAt && new Date(reconciliation.observedAt);
+    const providerMatched = provider === 'mercadopago' && /^\d{1,32}$/.test(externalPaymentId) &&
+      payment?.status === 'approved' && payment?.live_mode === true && payment?.currency_id === 'BRL' &&
+      reconciliation?.source === 'PROVIDER_RECONCILIATION' && reconciliation?.providerVerified === true &&
+      observedAt && Number.isFinite(observedAt.getTime()) && observedAt.getTime() <= Date.now();
+    const matchedAt = providerMatched ? observedAt.toISOString() : null;
+    const providerPayload = JSON.stringify({
+      status: payment?.status || 'approved',
+      date_approved: payment?.date_approved || null,
+      ...(providerMatched ? {live_mode:true,source:'PROVIDER_RECONCILIATION'} : {})
+    });
     const correlationId = charge.rows[0].correlation_id || payment?.correlation_id || randomUUID();
     const paymentKey = paymentIdempotencyKey(provider, externalPaymentId);
     const existingPayment = await client.query(`SELECT * FROM payments
@@ -132,15 +146,18 @@ export async function markPaymentApproved(db, chargeId, payment) {
     if (existingPayment.rowCount > 1) throw new Error('AMBIGUOUS_PROVIDER_PAYMENT');
     const persistedPayment = existingPayment.rowCount
       ? await client.query(`UPDATE payments SET external_payment_id=$2, status='CONFIRMED',
-        reconciliation_status='MATCHED', review_reason=NULL, confirmed_at=COALESCE(confirmed_at,now()),
-        provider_observed_at=now(),updated_at=now() WHERE id=$1 RETURNING id`,
-        [existingPayment.rows[0].id,externalPaymentId])
+        reconciliation_status=CASE WHEN $3::boolean THEN 'MATCHED' ELSE reconciliation_status END,
+        review_reason=CASE WHEN $3::boolean THEN NULL ELSE review_reason END, confirmed_at=COALESCE(confirmed_at,now()),
+        provider_observed_at=CASE WHEN $3::boolean THEN $4::timestamptz ELSE provider_observed_at END,
+        provider_payload=CASE WHEN $3::boolean THEN COALESCE(provider_payload,'{}'::jsonb) || $5::jsonb ELSE provider_payload END,
+        updated_at=now() WHERE id=$1 RETURNING id`,
+        [existingPayment.rows[0].id,externalPaymentId,Boolean(providerMatched),matchedAt,providerPayload])
       : await client.query(
       `INSERT INTO payments
         (customer_id, subscription_id, charge_id, provider, external_payment_id,
          amount_cents, currency, status, idempotency_key, correlation_id,
-         provider_payload, confirmed_at)
-       VALUES ($1, $2, $3, $4, $5, $6, 'BRL', 'CONFIRMED', $7, $8, $9::jsonb, now())
+         provider_payload, confirmed_at, reconciliation_status, provider_observed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'BRL', 'CONFIRMED', $7, $8, $9::jsonb, now(), $10, $11::timestamptz)
        ON CONFLICT (idempotency_key) DO UPDATE
          SET updated_at = payments.updated_at
        RETURNING id`,
@@ -153,10 +170,9 @@ export async function markPaymentApproved(db, chargeId, payment) {
         charge.rows[0].amount_cents,
         paymentKey,
         correlationId,
-        JSON.stringify({
-          status: payment?.status || 'approved',
-          date_approved: payment?.date_approved || null
-        })
+        providerPayload,
+        providerMatched ? 'MATCHED' : null,
+        matchedAt
       ]
     );
     const paymentId = persistedPayment.rows[0].id;
