@@ -1034,6 +1034,20 @@ app.post('/api/integrations/whatsapp/registration', async (request, reply) => {
   return processWhatsAppRegistration(db, { phone: body.whatsapp, text: body.text, messageId: body.messageId });
 });
 
+app.post('/api/integrations/whatsapp/human-activity', async (request, reply) => {
+  if (!requireBotSecret(request, reply)) return;
+  const body = parse(z.object({
+    whatsapp: z.string().min(10).max(30),
+    messageId: z.string().min(1).max(250),
+    occurredAt: z.iso.datetime({ offset: true })
+  }), request.body);
+  const phone = normalizePhone(body.whatsapp);
+  const recorded = await new PgConversationAgentRepository(db).recordHumanActivity({
+    conversationId: `whatsapp:${phone.replace(/\D/g, '')}`, messageId: body.messageId, occurredAt: body.occurredAt
+  });
+  return { ok: true, recorded };
+});
+
 app.post('/api/integrations/whatsapp/name', async (request, reply) => {
   if (!requireBotSecret(request, reply)) return;
   const body = parse(
@@ -1063,7 +1077,7 @@ app.post('/api/integrations/whatsapp/session', async (request, reply) => {
   const body = parse(
     z.object({
       whatsapp: z.string().min(10).max(30),
-      state: z.enum(['menu', 'awaiting_name', 'awaiting_login', 'awaiting_plan', 'support']),
+      state: z.enum(['menu', 'awaiting_name', 'awaiting_login', 'awaiting_plan', 'support', 'support_media', 'human_handoff']),
       data: z.record(z.string(), z.unknown()).optional()
     }),
     request.body
