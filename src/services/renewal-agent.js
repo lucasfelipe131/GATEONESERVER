@@ -21,6 +21,15 @@ function renewalFacts(facts, result = {}) {
 }
 
 export class RenewalAgent {
+  async paymentFacts(turn, facts) {
+    try {
+      const options=await turn.execute('getPaymentOptions',{});
+      return mergeResponseFacts(facts,{payment_methods:options.methods});
+    } catch(error) {
+      if (!['PAYMENT_OPTIONS_UNAVAILABLE','TOOL_TIMEOUT','TOOL_HANDLER_UNAVAILABLE'].includes(error.code)) throw error;
+      return mergeResponseFacts(facts,{payment_methods:[]});
+    }
+  }
   async handle({ intentResult, customerId, customer360, turn, facts, context }) {
     const intents = new Set(intentResult.intents.map((item) => item.name));
     if (['HUMAN_REQUEST','COMPLAINT','CANCELLATION_REQUEST'].some(intent => intents.has(intent))) {
@@ -51,7 +60,13 @@ export class RenewalAgent {
       };
     }
 
-    if (intents.has('PLAN_QUERY')) {
+    if (intentResult.primary_intent === 'PAYMENT_METHODS_QUERY') {
+      const options = await turn.execute('getPaymentOptions', {});
+      return { handled: true, proposed_action: 'getPaymentOptions',
+        facts: mergeResponseFacts(facts, { payment_methods: options.methods, simulated: options.simulated === true }) };
+    }
+
+    if (intentResult.primary_intent === 'PLAN_QUERY') {
       const plans = await turn.execute('listPlans', {});
       return {
         handled: true,
@@ -91,17 +106,38 @@ export class RenewalAgent {
         subscription_id: subscription.subscription_id
       });
       let nextFacts = renewalFacts(facts, renewal);
+      if (['PAYMENT_REQUIRED','PAYMENT_PENDING'].includes(renewal.decision)) nextFacts=await this.paymentFacts(turn,nextFacts);
       if (renewal.decision !== 'PAYMENT_REQUIRED') {
         if (renewal.decision === 'PAYMENT_PENDING') {
           const payment = await turn.execute('getPaymentStatus', {
             customer_id: customerId,
             subscription_id: subscription.subscription_id
           });
+          if (context.plan_code && payment.plan_code && context.plan_code !== payment.plan_code) {
+            throw Object.assign(new Error('PENDING_PAYMENT_PLAN_CONFLICT'), { code: 'PENDING_PAYMENT_PLAN_CONFLICT' });
+          }
+          if (!payment.checkout_url && payment.charge_id && ['CREATED', 'PENDING'].includes(payment.status)) {
+            const recovered = await turn.execute('createPaymentRequest', {
+              ...toolInput(customerId, scopedContext, 'payment'),
+              ...(context.plan_code ? { plan_code: context.plan_code } : {})
+            });
+            return { handled: true, proposed_action: 'createPaymentRequest',
+              facts: mergeResponseFacts(nextFacts, { payment_status: recovered.status, checkout_url: recovered.checkout_url,
+                amount_cents: recovered.amount_cents, plan_name: recovered.plan_name, currency: recovered.currency || 'BRL',
+                simulated: recovered.simulated === true, operation_state: 'EXISTING_PAYMENT' }) };
+          }
           nextFacts = mergeResponseFacts(nextFacts, { payment_status: payment.status || 'PENDING',
             checkout_url:payment.checkout_url || null,amount_cents:payment.amount_cents ?? null,
+            plan_name:payment.plan_name || nextFacts.plan_name,
             currency:payment.currency || 'BRL',simulated:payment.simulated === true });
         }
         return { handled: true, proposed_action: 'getRenewalStatus', facts: nextFacts };
+      }
+
+      if (!context.plan_code) {
+        const plans = await turn.execute('listPlans', {});
+        return { handled: true, proposed_action: 'listPlans',
+          facts: mergeResponseFacts(nextFacts,{plans,conversation_state:'awaiting_plan'}) };
       }
 
       const requested = await turn.execute('requestRenewal', toolInput(customerId, {

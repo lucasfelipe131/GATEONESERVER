@@ -1,0 +1,26 @@
+// Entirely local synthetic preview; no production database or provider is loaded.
+import {randomUUID} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
+import {dirname,join} from 'node:path';
+import Fastify from 'fastify';
+import cookie from '@fastify/cookie';
+import staticFiles from '@fastify/static';
+import {PGlite} from '@electric-sql/pglite';
+import {pgcrypto} from '@electric-sql/pglite/contrib/pgcrypto';
+import {migrateDatabase} from '../src/migrations.js';
+import {setSetting} from '../src/db.js';
+import {registerCustomerPortal} from '../src/customer-portal-routes.js';
+const pg=new PGlite({extensions:{pgcrypto}}),adapter=pg=>({query:async(sql,params)=>{const r=!params&&/;\s*\S/.test(sql.trim().replace(/;$/,''))?(await pg.exec(sql)).at(-1):await pg.query(sql,params);return{...r,rowCount:r.rowCount??r.affectedRows??r.rows.length};}});
+const db={...adapter(pg),transaction:fn=>pg.transaction(tx=>fn(adapter(tx)))};
+await migrateDatabase(db);await setSetting(db,'privacy_controller_name','Gate One Pro · demonstração');await setSetting(db,'privacy_contact','privacidade@example.invalid');
+const customer=randomUUID(),subscription=randomUUID();
+await db.query(`INSERT INTO plans(code,name,duration_months,price_cents,sort_order) VALUES('monthly','Mensal',1,3000,1),('quarterly','Trimestral',3,8500,2),('semiannual','Semestral',6,15000,3),('annual','Anual',12,27000,4)`);
+await db.query(`INSERT INTO customers(id,name,email,whatsapp_e164,bitpanel_reference,status,consent_contact,automation_eligible) VALUES($1,'Ana Demonstração','ana@example.invalid','5511999999701','ana.demo','active',false,true)`,[customer]);
+await db.query(`INSERT INTO subscriptions(id,customer_id,plan_id,starts_on,expires_on,status) SELECT $1,$2,id,CURRENT_DATE,CURRENT_DATE+20,'active' FROM plans WHERE code='monthly'`,[subscription,customer]);
+await db.query(`INSERT INTO charges(subscription_id,plan_id,stage,status,amount_cents,due_on,idempotency_key,message_text,paid_at) SELECT $1,id,'manual','paid',3000,CURRENT_DATE,'preview-paid','Histórico sintético de demonstração',now() FROM plans WHERE code='monthly'`,[subscription]);
+const app=Fastify({logger:false});await app.register(cookie);await app.register(staticFiles,{root:join(dirname(fileURLToPath(import.meta.url)),'..','public')});
+const config={NODE_ENV:'test',COOKIE_SECRET:'preview-local-synthetic',PUBLIC_BASE_URL:'',PUBLIC_WHATSAPP_NUMBER:'5511999999700'};
+const portal=registerCustomerPortal(app,{db,config,billingAutomation:null,getPaymentOptions:async()=>({methods:['Pix','Cartão de crédito','Boleto']}),requireBotSecret:(_request,reply)=>{reply.code(401).send({error:'Disabled in preview'});return false;}});
+const address=await app.listen({host:'127.0.0.1',port:0});config.PUBLIC_BASE_URL=address;
+console.log('SYNTHETIC_PORTAL_PREVIEW='+JSON.stringify({url:(await portal.issueLink({customerId:customer,requestKey:'preview'})).portalUrl,address,realCharges:0,realMessages:0}));
+const stop=async()=>{await app.close();await pg.close();process.exit(0);};process.on('SIGINT',stop);process.on('SIGTERM',stop);

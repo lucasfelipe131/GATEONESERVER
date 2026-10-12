@@ -15,6 +15,13 @@ const supportTool = (name, fields, risk = 'LOW', actionClass = 'READ_ONLY') => O
 });
 
 export const CONVERSATION_TOOL_DEFINITIONS = Object.freeze({
+  getPaymentOptions: Object.freeze({
+    name: 'getPaymentOptions', domain: 'BILLING', capability: 'payment.read', risk: 'LOW',
+    purpose: 'Consultar opções do checkout sem criar cobrança ou solicitar dados de cartão.',
+    inputSchema: { type: 'object' }, outputSchema: { required: ['provider', 'methods', 'simulated'] },
+    validateInput: anyObject, requiresCustomer: false, idempotency: 'READ_ONLY',
+    timeoutMs: 8000, retryPolicy: { maxAttempts: 1, safe: true }, audit: 'SUMMARY'
+  }),
   prepareSupportCase:supportTool('prepareSupportCase',['context','text','conversation_id','context_snapshot_id','correlation_id','idempotency_key'],'LOW','LOW_RISK_ACTION'),
   getValidatedSolution:supportTool('getValidatedSolution',['support_case_id']),
   executeSupportAction:supportTool('executeSupportAction',['support_case_id','knowledge_id','idempotency_key'],'MEDIUM','LOW_RISK_ACTION'),

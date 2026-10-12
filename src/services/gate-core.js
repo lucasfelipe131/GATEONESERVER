@@ -264,11 +264,13 @@ export async function paymentOperationStatus(db, { customerId, subscriptionId = 
   const result = await db.query(
     `SELECT p.id AS payment_id, p.customer_id, p.subscription_id, p.status,
             p.amount_cents, p.currency, p.reconciliation_status, p.review_reason,
-            p.confirmed_at, p.updated_at, ch.checkout_url,
+            p.confirmed_at, p.updated_at, ch.checkout_url, ch.id AS charge_id,
+            plan.code AS plan_code, plan.name AS plan_name,
             (p.provider = 'fake') AS simulated
        FROM payments p
        JOIN subscriptions s ON s.id = p.subscription_id
        LEFT JOIN charges ch ON ch.id = p.charge_id AND ch.subscription_id = s.id
+       LEFT JOIN plans plan ON plan.id = COALESCE(ch.plan_id, s.plan_id)
       WHERE p.customer_id = $1
         AND s.customer_id = $1
         AND ($2::uuid IS NULL OR p.subscription_id = $2::uuid)

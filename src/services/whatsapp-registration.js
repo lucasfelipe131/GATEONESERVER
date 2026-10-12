@@ -8,8 +8,8 @@ const normalize = value => String(value || '').normalize('NFD').replace(/[\u0300
 const start = text => /^(6|CADASTRO|AUTO ?CADASTRO|ME CADASTRAR|QUERO ME CADASTRAR|ATUALIZAR( MEUS)? DADOS|COMPLETAR( MEU)? CADASTRO|FAZER( MEU)? CADASTRO|QUERO ASSINAR|QUERO CONTRATAR|AINDA NAO SOU CLIENTE)$/.test(text);
 const skip = text => /^(PULAR|NAO TENHO|NAO SEI|SEM EMAIL|DEPOIS)$/.test(text);
 const planCodes = { MENSAL: 'monthly', TRIMESTRAL: 'quarterly', SEMESTRAL: 'semiannual', ANUAL: 'annual' };
-const interrupts = text => /^(MENU|0|4|ATENDENTE|HUMANO|SUPORTE)$/.test(text) ||
-  /\b(FALAR COM|QUERO FALAR|PRECISO DE UM ATENDENTE|PAGUEI|PIX|RENOVAR|VENCIMENTO|TRAVANDO|SEM SINAL)\b/.test(text);
+const interrupts = text => /^(MENU|0|4|7|ATENDENTE|HUMANO|SUPORTE)$/.test(text) ||
+  /\b(FALAR COM|QUERO FALAR|PRECISO DE UM ATENDENTE|PAGUEI|PIX|BOLETO|CARTAO|PAGAR|FORMAS DE PAGAMENTO|RENOVAR|VENCIMENTO|TRAVANDO|SEM SINAL)\b/.test(text);
 const cleanField = text => String(text).replace(/[\r\n]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
 
 function question(draft, customer, plans) {

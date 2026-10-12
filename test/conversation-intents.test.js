@@ -9,7 +9,7 @@ import { conversationPromptDescriptor } from '../src/core/conversation-prompt.js
 
 test('catálogo formaliza todos os intents mínimos do agente', () => {
   assert.deepEqual(CONVERSATION_INTENTS, [
-    'GREETING', 'RENEWAL_REQUEST', 'PAYMENT_REQUEST', 'PAYMENT_STATUS',
+    'GREETING', 'RENEWAL_REQUEST', 'PAYMENT_REQUEST', 'PAYMENT_METHODS_QUERY', 'PAYMENT_STATUS',
     'PAYMENT_EVIDENCE', 'EXPIRATION_QUERY', 'RENEWAL_STATUS',
     'SUBSCRIPTION_QUERY', 'SUPPORT_REQUEST', 'PLAN_QUERY', 'NEW_CUSTOMER',
     'TRIAL_REQUEST', 'CANCELLATION_REQUEST', 'REFERRAL', 'HUMAN_REQUEST',

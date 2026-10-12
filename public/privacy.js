@@ -1,0 +1,8 @@
+const container=document.querySelector('#privacyDocument');
+const node=(tag,text)=>{const element=document.createElement(tag);element.textContent=text;return element;};
+fetch('/api/portal/privacy').then(async response=>{if(!response.ok)throw new Error();return response.json();}).then(notice=>{
+  container.replaceChildren();container.append(node('p',`Versão ${notice.version}. Responsável: ${notice.controller||'identificação em configuração'}. Contato: ${notice.contact||'contato em configuração'}.`));
+  for(const [title,value] of [['O que coletamos',notice.data],['Para que usamos',notice.purposes],['Fundamento do tratamento',notice.legalBasis],['Serviços envolvidos',notice.providers],['Por quanto tempo',notice.retention],['Seus direitos',notice.rights],['Sem CPF no cadastro',notice.noCpf]]){const section=node('section','');section.append(node('h2',title));if(Array.isArray(value)){const list=node('ul','');for(const item of value)list.append(node('li',item));section.append(list);}else section.append(node('p',value));container.append(section);}
+  container.append(node('p','Avisos opcionais pelo WhatsApp são uma escolha separada. Não autorizar ou retirar essa autorização não impede consultar sua conta ou solicitar atendimento. Dados de cartão são informados somente no checkout do Mercado Pago.'));
+  if(!notice.ready)container.append(node('p','A identificação do responsável e o contato de privacidade precisam ser configurados antes de liberar o envio do cadastro.'));
+}).catch(()=>{container.replaceChildren(node('p','Não foi possível carregar o aviso agora. Tente novamente ou fale com a equipe pelo WhatsApp.'));});

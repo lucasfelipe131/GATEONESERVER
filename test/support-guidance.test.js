@@ -66,7 +66,7 @@ test('human and billing requests interrupt triage; repeated questions retain the
   const bot = runtime({ error: 'PENDING_PAYMENT_PLAN_CONFLICT' });
   await bot.turn('sem sinal');
   let r = await bot.turn('sem sinal'); assert.equal(r.outcome, 'SUPPORT_GUIDANCE'); assert.match(r.response_text, /marca\/modelo/);
-  r = await bot.turn('quero renovar'); assert.equal(r.response_facts.error_code, 'PENDING_PAYMENT_PLAN_CONFLICT');
+  r = await bot.turn('quero renovar mensal'); assert.equal(r.response_facts.error_code, 'PENDING_PAYMENT_PLAN_CONFLICT');
   assert.match(r.response_text, /outro plano.*QUERO RENOVAR.*ATENDENTE/);
   r = await bot.turn('atendente'); assert.equal(r.outcome, 'HANDOFF_CREATED'); assert.ok(r.response_facts.handoff_id);
 });

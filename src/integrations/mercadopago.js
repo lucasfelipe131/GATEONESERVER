@@ -3,6 +3,29 @@ import { hmacSha256, safeEqual } from '../security.js';
 
 const API_URL = 'https://api.mercadopago.com';
 
+// The API lists site methods. The hosted checkout makes the final eligibility
+// decision for each buyer; never promise that a particular card will be accepted.
+export async function getMercadoPagoPaymentOptions(config) {
+  if (config.PAYMENT_MODE === 'simulation') {
+    return { provider: 'Mercado Pago', methods: ['Pix', 'Cartão de crédito', 'Boleto'], simulated: true };
+  }
+  requireLiveConfig(config);
+  const response = await fetch(`${API_URL}/v1/payment_methods`, {
+    signal: AbortSignal.timeout(6000), redirect: 'error',
+    headers: { Authorization: `Bearer ${config.MERCADOPAGO_ACCESS_TOKEN}` }
+  });
+  const body = await response.json();
+  if (!response.ok || !Array.isArray(body)) {
+    throw Object.assign(new Error('PAYMENT_OPTIONS_UNAVAILABLE'), { code: 'PAYMENT_OPTIONS_UNAVAILABLE' });
+  }
+  const active = body.filter(method => method.status === 'active');
+  const methods = [];
+  if (active.some(method => method.id === 'pix')) methods.push('Pix');
+  if (active.some(method => method.payment_type_id === 'credit_card')) methods.push('Cartão de crédito');
+  if (active.some(method => method.id === 'bolbradesco' || method.id === 'boleto')) methods.push('Boleto');
+  return { provider: 'Mercado Pago', methods, simulated: false };
+}
+
 export function getMercadoPagoReadiness(config) {
   const token = String(config.MERCADOPAGO_ACCESS_TOKEN || '').trim();
   const webhookSecret = String(config.MERCADOPAGO_WEBHOOK_SECRET || '').trim();

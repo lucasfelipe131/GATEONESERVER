@@ -2,6 +2,7 @@ export const CONVERSATION_INTENTS = Object.freeze([
   'GREETING',
   'RENEWAL_REQUEST',
   'PAYMENT_REQUEST',
+  'PAYMENT_METHODS_QUERY',
   'PAYMENT_STATUS',
   'PAYMENT_EVIDENCE',
   'EXPIRATION_QUERY',
@@ -30,6 +31,24 @@ function normalize(value) {
     .toUpperCase();
 }
 
+const PLAN_CHOICES = [
+  ['monthly', /\b(MENSAL|1 MES)\b/], ['quarterly', /\b(TRIMESTRAL|3 MESES)\b/],
+  ['semiannual', /\b(SEMESTRAL|6 MESES)\b/], ['annual', /\b(ANUAL|12 MESES)\b/]
+];
+
+export function detectRequestedPlan(value) {
+  const text = normalize(value);
+  if (/\b(NAO|NUNCA|SEM|COMO|QUANTO|QUAL|PRECO|VALOR|CUSTA|SABER|ENTENDER)\b/.test(text)) return null;
+  const exact = { MENSAL: 'monthly', '30': 'monthly', '1 MES': 'monthly', 'PLANO MENSAL': 'monthly',
+    TRIMESTRAL: 'quarterly', '85': 'quarterly', '3 MESES': 'quarterly', 'PLANO TRIMESTRAL': 'quarterly',
+    SEMESTRAL: 'semiannual', '150': 'semiannual', '6 MESES': 'semiannual', 'PLANO SEMESTRAL': 'semiannual',
+    ANUAL: 'annual', '270': 'annual', '12 MESES': 'annual', 'PLANO ANUAL': 'annual' };
+  if (Object.hasOwn(exact, text)) return exact[text];
+  if (!/\b(RENOVAR|RENOVACAO|QUERO|ESCOLHO|PREFIRO|PODE GERAR|ENVIE|MANDA)\b/.test(text)) return null;
+  const choices = PLAN_CHOICES.filter(([, pattern]) => pattern.test(text));
+  return choices.length === 1 ? choices[0][0] : null;
+}
+
 const RULES = Object.freeze([
   ['HUMAN_REQUEST', /^4$|\b(ATENDENTE|HUMANO|PESSOA|FALAR COM (ALGUEM|A EQUIPE|ATENDENTE)|QUERO AJUDA HUMANA)\b/, 'HIGH'],
   ['CANCELLATION_REQUEST', /\b(CANCELAR|CANCELAMENTO|ENCERRAR (O )?PLANO|NAO QUERO MAIS)\b/, 'HIGH'],
@@ -40,10 +59,11 @@ const RULES = Object.freeze([
   ['SUPPORT_REQUEST', /\b(NAO (ESTA|TA) FUNCIONANDO|SEM SINAL|TRAVANDO|TRAVOU|ERRO|PROBLEMA|NAO ABRE|NAO CONECTA|ACESSO VENCEU)\b/, 'HIGH'],
   ['EXPIRATION_QUERY', /\b(QUAL|QUANDO|DATA|VER|CONSULTAR)? ?(E |E O |O )?(MEU )?VENCIMENTO\b|\bQUANDO VENCE\b|\bVALIDADE\b/, 'HIGH'],
   ['PAYMENT_EVIDENCE', /\b(PAGUEI|FIZ O PIX|ENVIEI O COMPROVANTE|SEGUE O COMPROVANTE|COMPROVANTE)\b/, 'HIGH'],
-  ['PAYMENT_STATUS', /\b(PAGAMENTO|PIX)\b.*\b(CAIU|CONFIRMADO|APROVADO|IDENTIFICADO|STATUS)\b|\bJA CAIU\b/, 'HIGH'],
+  ['PAYMENT_STATUS', /\b(PAGAMENTO|PIX|BOLETO|CARTAO)\b.*\b(CAIU|CONFIRMADO|APROVADO|IDENTIFICADO|STATUS)\b|\bJA CAIU\b/, 'HIGH'],
   ['RENEWAL_STATUS', /\b(JA RENOVOU|FOI RENOVAD[OA]|STATUS DA RENOVACAO|RENOVACAO.*(STATUS|CONCLUIDA|PROCESSANDO))\b/, 'HIGH'],
-  ['PAYMENT_REQUEST', /\b(MANDA|ENVIA|GERA|QUERO|PRECISO)\b.*\b(PIX|LINK|COBRANCA|PAGAMENTO)\b|\bPIX\b/, 'HIGH'],
-  ['RENEWAL_REQUEST', /^3$|\b(QUERO|PRECISO|VOU|PODE|GOSTARIA DE)? ?RENOVAR\b|\bRENOVACAO\b/, 'HIGH'],
+  ['PAYMENT_METHODS_QUERY', /^7$|\b(FORMAS|MEIOS|METODOS|OPCOES) (DE )?PAGAMENTO\b|\b(COMO (POSSO |FACO PARA )?PAGAR|ACEITA[MR]?|POSSO PAGAR|DA PARA PAGAR|PODE PAGAR|PARCELA[MR]?|PARCELAMENTO)\b|\b(TEM|PODE SER|E POSSIVEL)\b.*\b(PIX|BOLETO|CARTAO)\b|\b(PIX|BOLETO|CARTAO) OU (PIX|BOLETO|CARTAO)\b/, 'HIGH'],
+  ['PAYMENT_REQUEST', /\b(MANDA|MANDE|ENVIA|ENVIE|GERA|GERE|QUERO|PRECISO|VOU|DESEJO)\b.*\b(PIX|LINK|COBRANCA|PAGAMENTO|PAGAR|BOLETO|CARTAO)\b|^(PIX|BOLETO|CARTAO|PAGAMENTO)$|^PAGAR\b/, 'HIGH'],
+  ['RENEWAL_REQUEST', /^(3|MENSAL|TRIMESTRAL|SEMESTRAL|ANUAL|30|85|150|270)$|\b(QUERO|PRECISO|VOU|PODE|GOSTARIA DE)? ?RENOVAR\b|\bRENOVACAO\b/, 'HIGH'],
   ['PLAN_QUERY', /^1$|\b(PLANOS|VALORES?|PRECOS?|QUANTO CUSTA|MUDAR MEU PLANO|MENSAL|TRIMESTRAL|SEMESTRAL|ANUAL)\b/, 'HIGH'],
   ['SUBSCRIPTION_QUERY', /^2$|\b(MINHA CONTA|MINHA ASSINATURA|MEU PLANO|STATUS DO PLANO|MEU ACESSO)\b/, 'HIGH'],
   ['GREETING', /^(OI|OLA|OPA|E AI|BOM DIA|BOA TARDE|BOA NOITE|TUDO BEM|BLZ)$/, 'HIGH']
@@ -118,13 +138,17 @@ export function understandRequest(value, { conversationState = null, contentType
   }
 
   const found = [];
-  const financialRefusal = /\b(NAO|NUNCA|SEM)\b.{0,35}\b(MANDE|MANDA|ENVIE|ENVIA|GERE|GERA|QUERO|RENOVAR|RENOVACAO|COBRANCA|PIX|PAGAMENTO)\b/.test(text);
-  const financialExplanation = /\b(COMO FUNCIONA|O QUE E|SO (QUERO )?(SABER|ENTENDER)|EXPLIQUE|EXPLICAR)\b/.test(text);
+  const financialRefusal = /\b(NAO|NUNCA|SEM)\b.{0,35}\b(MANDE|MANDA|ENVIE|ENVIA|GERE|GERA|QUERO|RENOVAR|RENOVACAO|COBRANCA|PIX|PAGAMENTO|PAGAR|BOLETO|CARTAO)\b/.test(text);
+  const financialExplanation = /\b(COMO FUNCIONA|O QUE E|SO (QUERO )?(SABER|ENTENDER)|EXPLIQUE|EXPLICAR|QUANTO CUSTA|QUAL (O )?(VALOR|PRECO))\b/.test(text) || RULES.find(([name]) => name === 'PAYMENT_METHODS_QUERY')[1].test(text) || PLAN_CHOICES.filter(([, pattern]) => pattern.test(text)).length > 1;
   for (const [name, rule, confidence] of RULES) {
     if (['PAYMENT_REQUEST', 'RENEWAL_REQUEST'].includes(name) && (financialRefusal || financialExplanation)) continue;
     if (rule.test(text) && !found.some((item) => item.name === name)) {
       found.push({ name, confidence });
     }
+  }
+
+  if (detectRequestedPlan(text) && !financialExplanation && !financialRefusal && (!found.length || found[0].name === 'PLAN_QUERY')) {
+    found.unshift({ name: 'RENEWAL_REQUEST', confidence: 'HIGH' });
   }
 
   // "Paguei e já renovou?" precisa consultar os dois estados, sem transformar
