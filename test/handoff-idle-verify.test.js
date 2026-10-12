@@ -4,6 +4,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 import { migrateDatabase } from '../src/migrations.js';
 import { verifyHandoffIdle } from '../scripts/handoff-idle-verify.js';
+import { registerQrInbound } from '../src/services/customer-memory.js';
 
 test('one-hour handoff recovery preserves tickets and rolls back all synthetic verification data', async () => {
   const pg = new PGlite({ extensions: { pgcrypto } });
@@ -25,5 +26,30 @@ test('one-hour handoff recovery preserves tickets and rolls back all synthetic v
     assert.equal(report.customerMessagesSent, 0);
     await assert.rejects(verifyHandoffIdle({ db: {}, config, env: { ...env,
       RAILWAY_ENVIRONMENT_ID: '697f58fb-5084-4cb3-bd9a-ecdbc921b7bc' } }), assert.AssertionError);
+
+    const existingPhone='5511999999707';
+    const existing=await registerQrInbound(db,{phone:existingPhone,text:'Cadastro sintético preservado.',providerId:'existing-synthetic-contact'});
+    const snapshot = async () => ({
+      customer:(await db.query('SELECT * FROM customers WHERE id=$1',[existing.customer.id])).rows[0],
+      counts:(await db.query(`SELECT (SELECT count(*)::int FROM customers) customers,
+        (SELECT count(*)::int FROM conversation_sessions) sessions,
+        (SELECT count(*)::int FROM message_logs) messages,
+        (SELECT count(*)::int FROM conversation_handoffs) handoffs,
+        (SELECT count(*)::int FROM gate_event_outbox) events`)).rows[0]
+    });
+    const beforeDigits=await snapshot();
+    await assert.rejects(verifyHandoffIdle({db,config,env,phoneFactory:()=>existingPhone}),assert.AssertionError);
+    assert.deepEqual(await snapshot(),beforeDigits);
+
+    await db.query('UPDATE customers SET whatsapp_e164=$1 WHERE id=$2',[`+${existingPhone}`,existing.customer.id]);
+    const beforePlus=await snapshot(),phones=['5511999999708',existingPhone];
+    await assert.rejects(verifyHandoffIdle({db,config,env,phoneFactory:()=>phones.shift()}),assert.AssertionError);
+    assert.equal(phones.length,0);
+    assert.deepEqual(await snapshot(),beforePlus);
+
+    await db.query('UPDATE customers SET whatsapp_e164=$1 WHERE id=$2',[existingPhone.slice(0,4)+existingPhone.slice(5),existing.customer.id]);
+    const beforeLegacy=await snapshot();
+    await assert.rejects(verifyHandoffIdle({db,config,env,phoneFactory:()=>existingPhone}),assert.AssertionError);
+    assert.deepEqual(await snapshot(),beforeLegacy);
   } finally { await pg.close(); }
 });
