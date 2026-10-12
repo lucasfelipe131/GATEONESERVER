@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildCustomerHelp } from '../src/services/customer-help-content.js';
+import { CLIENT_HELP_VERIFIED_AT, getClientHelpApps } from '../src/services/client-help-catalog.js';
 
 const now = '2026-10-12T12:00:00.000Z';
 const verifiedAt = '2026-10-12T10:00:00.000Z';
@@ -28,9 +29,11 @@ test('aplicativos precisam de fonte, data e compatibilidade do aparelho, sem fal
     app('Samsung', { sourceUrl: 'https://unverified.app/' }), app('Samsung', { device: 'android' }),
     app('Roku', { name: 'Canal aprovado', url: 'https://channelstore.roku.com/details/channel', sourceUrl: 'https://support.roku.com/pt-br/article/add-an-app' })] };
   const result = buildCustomerHelp({ catalog, now });
-  assert.deepEqual(result.guides[0].apps, [{ name: 'SmartOne IPTV', url: 'https://smartone-iptv.com/' }]);
+  assert.deepEqual(result.guides[0].apps.map(({name,url})=>({name,url})), [{ name: 'SmartOne IPTV', url: 'https://smartone-iptv.com/' }]);
+  assert.equal(result.guides[0].apps[0].sourceUrl,catalog.sugestedApps[0].sourceUrl);
+  assert.equal(result.guides[0].apps[0].verifiedAt,verifiedAt);
   assert.equal(result.guides[1].apps.length, 1);
-  assert.deepEqual(result.guides[2].apps, [{ name: 'Canal aprovado', url: 'https://channelstore.roku.com/details/channel' }]);
+  assert.deepEqual(result.guides[2].apps.map(({name,url})=>({name,url})), [{ name: 'Canal aprovado', url: 'https://channelstore.roku.com/details/channel' }]);
   assert.equal(buildCustomerHelp({ catalog: { suggestedApps: [app('Samsung')] }, now }).guides[0].apps.length, 1);
 });
 
@@ -147,4 +150,72 @@ test('função é pura, limita conteúdo e não retorna objetos secretos forneci
   assert.equal(JSON.stringify(result).includes('private-'), false);
   assert.equal(buildCustomerHelp({ now }).guides[0].steps.includes('Alteração na cópia'), false);
   assert.throws(() => buildCustomerHelp({ now: 'invalid date' }), /CUSTOMER_HELP_INVALID_DATE/);
+});
+
+test('catálogo conferido por aplicativo distingue lista M3U, Xtream, dados de aparelho e disponibilidade atual', () => {
+  const result=buildCustomerHelp({now:'2026-10-12T22:00:00.000Z'});
+  const samsung=result.guides.find(item=>item.device==='Samsung').apps;
+  const lg=result.guides.find(item=>item.device==='LG').apps;
+  assert.equal(samsung.length,4);assert.equal(lg.length,3);
+  assert.equal(result.guides.find(item=>item.device==='Roku').apps.length,0);
+  const ss=lg.find(item=>item.name==='SS IPTV');
+  assert.deepEqual(ss.requiredFields,['playlistUrl']);assert.deepEqual(ss.protocols,['m3u']);
+  assert.match(ss.requirements.join(' '),/DNS sozinho não é uma lista/);
+  assert.match(ss.stepsSupport.join(' '),/nova URL M3U.*outra lista/s);
+  assert.match(ss.requirements.join(' '),/24 horas/);
+  assert.equal(samsung.find(item=>item.name==='SS IPTV').availability,'model_check_required');
+  assert.match(samsung.find(item=>item.name==='SS IPTV').requirements.join(' '),/fora do Smart Hub.*2012 a 2019/);
+  const smarters=samsung.find(item=>item.id==='iptv-smarters-pro-samsung');
+  assert.deepEqual(smarters.requiredFields,['username','password','dns','playlistUrl']);
+  assert.match(smarters.requirements.join(' '),/TECH SMARTERS PRIVATE LIMITED.*Coming Soon/);
+  assert.match(smarters.stepsSupport.join(' '),/outro perfil com a DNS atual/);
+  assert.equal(lg.some(item=>/smarters/i.test(item.name)),false);
+  const ibo=lg.find(item=>item.name==='IBO Player');
+  assert.deepEqual(ibo.requiredFields,['mac','deviceKey','playlistUrl']);
+  assert.match(ibo.requirements.join(' '),/site exibido na própria tela/);
+  assert.ok([...samsung,...lg].every(item=>item.verifiedAt===CLIENT_HELP_VERIFIED_AT&&item.sourceUrl.startsWith('https:')&&item.stepsSupport.length>0));
+  assert.deepEqual(result.dns,[]);
+  for(const item of [...samsung,...lg]) {
+    assert.ok(item.requiredFields.includes('playlistUrl'));
+    assert.match(item.requirements.join(' '),/Mostrar lista/);
+    assert.match(item.requirements.join(' '),/contém sua senha.*60 segundos/);
+    assert.equal(item.requirements.join(' ').includes('fornecida pela equipe'),false);
+  }
+});
+
+test('metadados dos guias não guardam URLs privadas, campos livres, credenciais, identificação ou scripts', () => {
+  const input=app('Samsung',{name:'Aplicativo validado',id:'validated-app',protocols:['xtream','secret-value','m3u'],
+    requiredFields:['username','password','dns','customer_whatsapp','private-value'],
+    requirements:['Informe os dados do seu próprio acesso.','MAC: 11:AA:CC:EE:00:11','Senha: synthetic-secret',
+      'https://stream.example/get.php?username=someone&password=secret'],
+    stepsSupport:['Abra as configurações.','<img src=x onerror=alert(1)>','javascript:alert(1)',
+      'https://stream.example/get.php?username%3Dsomeone','Contato cliente@private.com','Token: hidden-key'],
+    password:'never-return',playlistUrl:'https://stream.example/get.php?username=someone&password=secret'});
+  const help=buildCustomerHelp({catalog:{suggestedApps:[input]},now});
+  const actual=help.guides[0].apps[0];
+  assert.deepEqual(actual.protocols,['xtream','m3u']);assert.deepEqual(actual.requiredFields,['username','password','dns']);
+  assert.deepEqual(actual.requirements,['Informe os dados do seu próprio acesso.']);
+  assert.deepEqual(actual.stepsSupport,['Abra as configurações.']);
+  for(const value of ['synthetic-secret','11:AA:CC','never-return','hidden-key','stream.example','private.com','secret-value','customer_whatsapp','onerror'])
+    assert.equal(JSON.stringify(help).includes(value),false);
+});
+
+test('catálogo antigo não antecipa verificação nova, não duplica SmartOne e não promove Smarters LG nem apps conhecidos no Roku', () => {
+  assert.equal(buildCustomerHelp({now:new Date(new Date(CLIENT_HELP_VERIFIED_AT).getTime()-1)}).guides[0].apps.length,0);
+  const catalog={suggestedApps:[app('Samsung'),app('LG',{name:'IPTV Smarters Pro',url:'https://smarterspro.com/',sourceUrl:'https://smarterspro.com/'}),
+    app('Roku',{name:'SS IPTV',url:'https://channelstore.roku.com/details/unknown',sourceUrl:'https://support.roku.com/'}),
+    app('Samsung',{name:'Fake app',url:'https://ss-iptv.com.evil.test/',sourceUrl:'https://ss-iptv.com/'})]};
+  const help=buildCustomerHelp({catalog,now:'2026-10-12T22:00:00.000Z'});
+  assert.equal(help.guides[0].apps.filter(item=>item.name==='SmartOne IPTV').length,1);
+  assert.equal(help.guides[1].apps.some(item=>/smarters/i.test(item.name)),false);
+  assert.deepEqual(help.guides[2].apps,[]);
+  assert.equal(JSON.stringify(help).includes('evil.test'),false);
+});
+
+test('cópias do catálogo e dos guias não compartilham arrays mutáveis ou dados de cliente', () => {
+  const apps=getClientHelpApps();apps[0].stepsSupport.push('private-change');apps[0].requiredFields.push('unexpected');
+  const help=buildCustomerHelp({now:'2026-10-12T22:00:00.000Z'});help.guides[0].apps[0].requirements.push('another-change');
+  assert.equal(JSON.stringify(getClientHelpApps()).includes('private-change'),false);
+  assert.equal(JSON.stringify(buildCustomerHelp({now:'2026-10-12T22:00:00.000Z'})).includes('another-change'),false);
+  assert.equal(JSON.stringify(getClientHelpApps()).includes('unexpected'),false);
 });

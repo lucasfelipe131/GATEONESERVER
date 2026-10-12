@@ -1,6 +1,11 @@
+import { getClientHelpApps } from './client-help-catalog.js';
+
 const VERIFIED_AT = '2026-10-12T03:00:00.000Z';
 const HOUR = 3_600_000;
-const OFFICIAL_HOSTS = ['samsung.com', 'lg.com', 'roku.com', 'smartone-iptv.com', 'bitplatform.vip'];
+const OFFICIAL_HOSTS = ['samsung.com', 'lg.com', 'roku.com', 'smartone-iptv.com', 'bitplatform.vip',
+  'ss-iptv.com', 'smarterspro.com', 'iboplayer.com'];
+const APP_PROTOCOLS = new Set(['xtream', 'm3u']);
+const APP_FIELDS = new Set(['username', 'password', 'dns', 'playlistUrl', 'activationCode', 'mac', 'deviceKey', 'profileName', 'port']);
 const RESERVED_TELEGRAM_NAMES = new Set(['s', 'joinchat', 'share', 'proxy', 'login', 'addstickers', 'addemoji', 'iv', 'c']);
 const PERSONAL_OR_SECRET = /(?:\b(?:senha|password|passwd|token|api[ _-]?key|access[ _-]?key|usu[aá]rio|username|login)\b\s*[:=]\s*\S+)|(?:\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b)|(?:\b\d{3}[. -]\d{3}[. -]\d{3}[- ]\d{2}\b)|(?:\b\d{10,13}\b)|(?:\b(?:55[ .()-]*)?\(?\d{2}\)?[ .-]*\d{4,5}[ .-]*\d{4}\b)/i;
 
@@ -143,11 +148,27 @@ function compatibleApp(item, device, now) {
   if (!name || !date || !url || !source) return null;
   const appHost = new URL(url).hostname;
   if (/\b(?:android|apk)\b/i.test(name) || /\.(?:apk|exe|zip|ipk)(?:\/|$)/i.test(new URL(url).pathname)) return null;
-  // Source research only confirms SmartOne on Samsung/LG, never Roku.
-  if (device === 'Roku' && (!hostWithin(appHost, 'roku.com') || /smart\s*one/i.test(name))) return null;
+  // A generic TV claim or a Samsung/LG app does not prove Roku compatibility.
+  if (device === 'Roku' && (!hostWithin(appHost, 'roku.com') || /smart\s*one|ss\s*iptv|smarters|ibo\s*player/i.test(name))) return null;
   if (device !== 'Roku' && hostWithin(appHost, 'roku.com')) return null;
   if (device === 'Samsung' && hostWithin(appHost, 'lg.com') || device === 'LG' && hostWithin(appHost, 'samsung.com')) return null;
-  return { name, url };
+  // The current developer download page lists LG Smarters as Coming Soon.
+  if (hostWithin(appHost, 'smarterspro.com') && device !== 'Samsung') return null;
+  const values = (list, allowed) => [...new Set((Array.isArray(list) ? list : []).filter(value => allowed.has(value)))].slice(0, 9);
+  const instructions = list => (Array.isArray(list) ? list : []).slice(0, 12).flatMap(value => {
+    const text = cleanText(value, 500);
+    if (!text || /(?:https?:\/\/|(?:javascript|data):|%[0-9a-f]{2})/i.test(text) ||
+        /\b(?:mac|device\s*key|chave(?:\s+do\s+dispositivo)?|c[oó]digo(?:\s+de\s+conex[aã]o)?)\s*[:=]\s*\S+/i.test(text)) return [];
+    return [text];
+  });
+  const rawId = typeof item.id === 'string' ? item.id : `${device}-${name}`.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  const id = /^[a-z0-9][a-z0-9-]{0,79}$/.test(rawId) ? rawId : null;
+  if (!id) return null;
+  const conditional = device === 'Samsung' && hostWithin(appHost, 'ss-iptv.com');
+  return { id, name, url, sourceUrl: source, verifiedAt: date.toISOString(),
+    protocols: values(item.protocols, APP_PROTOCOLS), requiredFields: values(item.requiredFields, APP_FIELDS),
+    requirements: instructions(item.requirements), stepsSupport: instructions(item.stepsSupport),
+    availability: !conditional && item.availability === 'supported' ? 'supported' : 'model_check_required' };
 }
 
 function postCategory(item, content) {
@@ -179,8 +200,15 @@ export function buildCustomerHelp({ catalog = {}, telegramSync = {}, posts = [],
   const today = instant(now);
   if (!today) throw new TypeError('CUSTOMER_HELP_INVALID_DATE');
   const suggested = Array.isArray(catalog?.sugestedApps) ? catalog.sugestedApps : Array.isArray(catalog?.suggestedApps) ? catalog.suggestedApps : [];
-  const guides = GUIDE_CONTENT.map(guide => ({ ...guide, steps: [...guide.steps], videos: guide.videos.map(video => ({ ...video })),
-    apps: suggested.slice(0, 50).map(item => compatibleApp(item, guide.device, today)).filter(Boolean).slice(0, 6), verifiedAt: VERIFIED_AT }));
+  const appCatalogue = [...getClientHelpApps(), ...suggested.slice(0, 50)];
+  const guides = GUIDE_CONTENT.map(guide => {
+    const seen = new Set();
+    const apps = appCatalogue.map(item => compatibleApp(item, guide.device, today)).filter(item => {
+      if (!item || seen.has(item.name.toLowerCase())) return false;
+      seen.add(item.name.toLowerCase());return true;
+    }).slice(0, 6);
+    return { ...guide, steps: [...guide.steps], videos: guide.videos.map(video => ({ ...video })), apps, verifiedAt: VERIFIED_AT };
+  });
   const explicitlyUnavailable = status => status !== undefined && !['READY', 'current'].includes(status);
   const dnsSourceUnavailable = [catalog?.bitpanelSync?.status, catalog?.bitpanelSync?.dnsStatus,
     catalog?.bitpanel?.status, catalog?.bitpanel?.dnsStatus].some(explicitlyUnavailable);

@@ -70,7 +70,7 @@ test('portal access routes require the owner session and CSRF, reveal only verif
     assert.equal((await f.app.inject({method:'POST',url:'/api/portal/me/access/reveal',headers,payload:{username:two.username}})).statusCode,400);
     assert.equal((await f.app.inject({method:'GET',url:'/api/portal/me/access/reveal',headers})).statusCode,404);
     const revealed=await f.app.inject({method:'POST',url:'/api/portal/me/access/reveal',headers,payload:{}});
-    assert.equal(revealed.statusCode,200,revealed.body);assert.deepEqual(revealed.json(),{username:one.username,password:one.password,expiresInSeconds:60});
+    assert.equal(revealed.statusCode,200,revealed.body);assert.deepEqual(revealed.json(),{username:one.username,password:one.password,expiresInSeconds:60,playlistUrl:null});
     assert.match(revealed.headers['cache-control'],/no-store/);assert.equal(revealed.body.includes(two.password),false);
     const other=await f.app.inject({method:'POST',url:'/api/portal/me/access/reveal',headers:otherHeaders,payload:{}});assert.equal(other.json().password,two.password);
     const audit=(await f.db.query("SELECT actor_type,actor_id,action,entity_id,before_data,after_data FROM audit_logs WHERE action='customer.access_revealed' ORDER BY id")).rows;
@@ -101,6 +101,43 @@ test('access reveal is limited to six per hour per session and another customer 
   }finally{await f.close();}
 });
 
+test('the private M3U reveal uses only the authenticated own credentials and a fresh unambiguous provider DNS',async()=>{
+  const originalFetch=globalThis.fetch;let network=0;globalThis.fetch=async()=>{network++;throw Error('NO_NETWORK_IN_PRIVATE_PLAYLIST_REVEAL');};
+  const f=await fixture();try{
+    const [one,two]=f.customers,[headers,otherHeaders]=f.sessions,before=await f.financial(),path='/api/portal/me/access/reveal';
+    const dns={name:'DNS atual sintético',value:'http://current.gatecustomer.com',status:'READY',
+      verifiedAt:new Date(Date.now()-60000).toISOString(),sourceUrl:'https://bitpanel.vip/notices'};
+    const catalog=items=>setSetting(f.db,'customer_help_catalog',{bitpanelSync:{status:'READY'},dns:items});
+    await catalog([dns]);
+    assert.equal((await f.app.inject({method:'POST',url:path,payload:{}})).statusCode,401);
+    assert.equal((await f.app.inject({method:'POST',url:path,headers:{cookie:headers.cookie,origin:headers.origin},payload:{}})).statusCode,403);
+    assert.equal((await f.app.inject({method:'POST',url:path,headers,payload:{customerId:two.id}})).statusCode,400);
+    const revealed=await f.app.inject({method:'POST',url:`${path}?customerId=${two.id}`,headers,payload:{}});
+    assert.equal(revealed.statusCode,200,revealed.body);assert.match(revealed.headers['cache-control'],/no-store/);
+    assert.equal(revealed.headers['referrer-policy'],'no-referrer');assert.equal(revealed.json().expiresInSeconds,60);
+    const ownUrl=new URL(revealed.json().playlistUrl);assert.equal(ownUrl.origin,dns.value);assert.equal(ownUrl.pathname,'/get.php');
+    assert.deepEqual(Object.fromEntries(ownUrl.searchParams),{username:one.username,password:one.password,type:'m3u_plus',output:'ts'});
+    assert.equal(revealed.body.includes(two.username),false);assert.equal(revealed.body.includes(two.password),false);
+    const other=await f.app.inject({method:'POST',url:path,headers:otherHeaders,payload:{}}),otherUrl=new URL(other.json().playlistUrl);
+    assert.equal(otherUrl.searchParams.get('username'),two.username);assert.equal(otherUrl.searchParams.get('password'),two.password);
+    for(const safePath of ['/api/portal/me/access','/api/portal/me/help','/api/portal/me','/api/portal/me/export']){
+      const response=await f.app.inject({url:safePath,headers});assert.equal(response.statusCode,200,response.body);
+      for(const privateValue of [one.password,two.password,'/get.php','playlistUrl":'])assert.equal(response.body.includes(privateValue),false);
+    }
+    for(const unavailable of [[{...dns,verifiedAt:new Date(Date.now()-25*3600000).toISOString()}],
+      [{...dns,sourceUrl:'https://bitpanel.vip/'}],[{...dns,value:'current.gatecustomer.com'}],
+      [dns,{...dns,value:'http://conflicting.gatecustomer.com'}]]){
+      await catalog(unavailable);const response=await f.app.inject({method:'POST',url:path,headers,payload:{}});
+      assert.equal(response.statusCode,200,response.body);assert.equal(response.json().playlistUrl,null);
+    }
+    await catalog([dns]);await f.db.query("UPDATE customer_access_sync SET verified_at=now()-interval '25 hours' WHERE customer_id=$1",[one.id]);
+    const stale=await f.app.inject({method:'POST',url:path,headers,payload:{}});assert.equal(stale.statusCode,409);assert.equal(stale.body.includes(one.password),false);
+    const audits=(await f.db.query("SELECT before_data,after_data FROM audit_logs WHERE action='customer.access_revealed'")).rows;
+    for(const privateValue of [one.username,two.username,one.password,two.password,'/get.php'])assert.equal(JSON.stringify(audits).includes(privateValue),false);
+    assert.deepEqual(await f.financial(),before);assert.equal(network,0);
+  }finally{await f.close();globalThis.fetch=originalFetch;}
+});
+
 test('stale or unverified access returns a safe update request without revealing legacy passwords',async()=>{
   const f=await fixture();
   try {
@@ -123,7 +160,7 @@ test('authenticated help joins verified catalog and existing Telegram posts whil
     await setSetting(f.db,'telegram_content_sync',{previewUrl:'https://t.me/s/canalgate',lastSuccessAt:verifiedAt});
     for(const [id,content] of [['100','Aviso: manutenção programada.'],['101','Novidade no serviço.'],['102','Senha: synthetic-two-secret']])await f.db.query(`INSERT INTO content_updates(source,source_post_id,content,url,published_at) VALUES('telegram',$1,$2,$3,$4)`,[`canalgate/${id}`,content,`https://t.me/canalgate/${id}`,verifiedAt]);
     const response=await f.app.inject({url:'/api/portal/me/help',headers:f.sessions[0]});assert.equal(response.statusCode,200,response.body);assert.match(response.headers['cache-control'],/no-store/);
-    const help=response.json();assert.deepEqual(help.guides.map(guide=>guide.device),['Samsung','LG','Roku']);assert.equal(help.guides[0].apps[0].name,'SmartOne IPTV');assert.equal(help.dns[0].status,'current');
+    const help=response.json();assert.deepEqual(help.guides.map(guide=>guide.device),['Samsung','LG','Roku']);assert.ok(help.guides[0].apps.some(app=>app.name==='SmartOne IPTV'));assert.equal(help.dns[0].status,'current');
     assert.equal(help.telegram.channelUrl,'https://t.me/canalgate');assert.equal(help.telegram.posts.length,2);assert.deepEqual(help.telegram.posts.map(post=>post.category).sort(),['news','notices']);
     assert.equal(response.body.includes('catalog-secret-must-not-leak'),false);assert.equal(response.body.includes('synthetic-two-secret'),false);assert.equal(response.body.includes(f.customers[1].username),false);
     assert.deepEqual(await f.financial(),before);

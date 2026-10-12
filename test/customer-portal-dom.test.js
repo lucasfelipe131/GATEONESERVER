@@ -124,3 +124,93 @@ test('provider publications identify their source and only link to the public no
   const p=await portal({help});
   try{assert.match(p.$('#noticesPosts').textContent,/BitPanel · Publicado/);assert.equal(p.$('#noticesPosts a').href,'https://bitpanel.vip/notices');assert.equal(p.window.document.querySelectorAll('#noticesPosts a').length,1);assert.equal(p.$('#newsPosts a'),null);assert.equal(p.requests.some(r=>String(r.url).includes('bitpanel.vip')),false);}finally{p.close();}
 });
+
+test('app-specific guides use only own access and current DNS; passwords remain explicit and temporary',async()=>{
+  const help=baseHelp();help.guides=[{id:'samsung',device:'Samsung',title:'Instalar na Samsung',steps:['Abra Apps.'],apps:[
+    {id:'ss-iptv',name:'SS IPTV',url:'https://ss-iptv.com/',protocols:['m3u'],requirements:['Confira o modelo da TV.'],stepsSupport:['Abra Conteúdo para trocar a lista.'],requiredFields:['playlistUrl'],availability:'model_check_required',sourceUrl:'https://ss-iptv.com/en/users/documents/how-to-upload-playlist',verifiedAt:'2026-10-12'},
+    {id:'smarters',name:'Smarters Pro',url:'https://smarterspro.com/?token=nao-expor',protocols:['xtream'],requirements:['<img src=x onerror=alert(1)>'],stepsSupport:['Edite o endereço e salve.','<script>nao-executar</script>'],requiredFields:['username','password','dns'],username:'catalog-user-nao-mostrar',password:'catalog-secret-nao-mostrar',sourceUrl:'https://smarterspro.com/',verifiedAt:'2026-10-12'}
+  ]}];help.dns=[{name:'Atual',value:'http://service.example.invalid',status:'current',verifiedAt:'2026-10-12',sourceUrl:'https://bitpanel.vip/notices'},
+    {name:'Anterior',value:'NAO-MOSTRAR-DNS-ANTIGO',status:'stale',verifiedAt:'2026-10-01'}];
+  const p=await portal({url:'https://portal.example.invalid/cliente?aba=guias',help}),{$,window,requests,timers}=p;
+  try{
+    const apps=[...window.document.querySelectorAll('.app-guide')];assert.equal(apps.length,2);assert.match(apps[0].textContent,/Antes de instalar/);assert.match(apps[0].textContent,/Solicite à equipe o link/);assert.equal(apps[0].querySelector('[data-reveal-password]'),null);
+    assert.match(apps[1].textContent,/ana-servico/);assert.match(apps[1].textContent,/http:\/\/service.example.invalid/);assert.match(apps[1].textContent,/Edite o endereço/);
+    assert.equal($('#installationGuides img'),null);assert.equal($('#installationGuides script'),null);assert.equal($('#installationGuides a[href*="token="]'),null);
+    assert.equal(window.document.body.textContent.includes('catalog-secret-nao-mostrar'),false);assert.equal(window.document.body.textContent.includes('catalog-user-nao-mostrar'),false);assert.equal(window.document.body.textContent.includes('NAO-MOSTRAR-DNS-ANTIGO'),false);
+    assert.equal(requests.some(r=>r.url.endsWith('/reveal')||r.url.endsWith('/support/chat')||r.url.endsWith('/payments')),false);
+    apps[1].open=true;await settle();apps[1].querySelector('[data-reveal-password]').click();await settle();assert.equal(apps[1].querySelector('[data-password-value]').textContent,'senha-sintetica');assert.equal($('#accessPassword').textContent,'••••••••');
+    const send=()=>$('#supportForm').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));$('#supportQuestion').value='Apareceu senha-sintetica no aplicativo';send();await settle();assert.equal(requests.some(r=>r.url.endsWith('/support/chat')),false);assert.match($('#supportStatus').textContent,/Retire os dados/);
+    const timer=[...timers.values()].find(t=>t.delay===60000);assert.ok(timer);timer.callback();assert.equal(apps[1].querySelector('[data-password-value]').textContent,'••••••••');
+    apps[1].querySelector('[data-reveal-password]').click();await settle();apps[1].open=false;await settle();assert.equal(apps[1].querySelector('[data-password-value]').textContent,'••••••••');
+    apps[0].querySelector('.app-guide-body > button').click();assert.match($('#supportQuestion').value,/SS IPTV/);assert.equal(requests.some(r=>r.url.endsWith('/support/chat')),false);
+    assert.equal(window.localStorage.length,0);assert.equal(window.sessionStorage.length,0);assert.equal($('#installationGuides a[href*="username="]'),null);
+  }finally{p.close();}
+});
+
+test('support chat sends only an explicit question with CSRF and renders answers as safe text',async()=>{
+  const p=await portal({url:'https://portal.example.invalid/cliente?aba=guias',respond:async path=>path.endsWith('/support/chat')?{body:{reply:'<img src=x onerror=alert(1)> Abra Apps e procure o aplicativo.',readOnly:true,sources:[{title:'Guia oficial',url:'https://ss-iptv.com/en/users/documents/how-to-upload-playlist'},{title:'Inseguro',url:'javascript:alert(1)'}]}}:null}),{$,window,requests}=p;
+  try{
+    assert.equal(requests.some(r=>r.url.endsWith('/support/chat')),false);const message='<script>nao-executar</script> Como troco o endereço?';$('#supportQuestion').value=message;
+    $('#supportForm').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));await settle();const request=requests.find(r=>r.url.endsWith('/support/chat'));
+    assert.equal(request.method,'POST');assert.equal(request.headers['X-Portal-CSRF'],'synthetic-csrf');assert.deepEqual(JSON.parse(request.body),{message});assert.equal(JSON.parse(request.body).history,undefined);
+    assert.match($('#supportMessages').textContent,/<script>/);assert.match($('#supportMessages').textContent,/<img/);assert.equal($('#supportMessages script'),null);assert.equal($('#supportMessages img'),null);assert.equal($('#supportMessages a[href^="javascript:"]'),null);assert.equal($('#supportMessages a').rel,'noopener noreferrer');
+    assert.equal(requests.some(r=>r.url.endsWith('/payments')||r.url.endsWith('/reveal')),false);$('#clearSupport').click();assert.equal($('#supportMessages').childElementCount,0);assert.equal($('#supportQuestion').value,'');assert.equal(window.localStorage.length,0);assert.equal(window.sessionStorage.length,0);
+  }finally{p.close();}
+});
+
+test('support chat blocks private data and oversize questions before making any request',async()=>{
+  const p=await portal({url:'https://portal.example.invalid/cliente?aba=guias'}),{$,window,requests}=p;
+  try{
+    for(const message of ['senha: segredo-exemplo','token=segredo-exemplo','Meu CPF é 123.456.789-00','Meu telefone é 5511999999999','Contato cliente@example.invalid','https://service.example.invalid/get.php?username=ana&password=segredo']){
+      $('#supportQuestion').value=message;$('#supportForm').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));await settle();assert.match($('#supportStatus').textContent,/Retire os dados/);
+    }
+    $('#supportQuestion').value='a'.repeat(501);$('#supportForm').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));await settle();assert.match($('#supportStatus').textContent,/até 500/);assert.equal(requests.some(r=>r.url.endsWith('/support/chat')),false);
+  }finally{p.close();}
+});
+
+test('a delayed support answer is discarded after tab change, hidden page or logout',async()=>{
+  for(const leave of ['tab','hidden','logout']){
+    let finish;const p=await portal({url:'https://portal.example.invalid/cliente?aba=guias',respond:async path=>path.endsWith('/support/chat')?new Promise(resolve=>{finish=resolve;}):null}),{$,window,requests}=p;
+    try{
+      $('#supportQuestion').value='Como instalo na TV Samsung?';const send=()=>$('#supportForm').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));send();send();await settle();assert.equal(requests.filter(r=>r.url.endsWith('/support/chat')).length,1);
+      if(leave==='tab')$('[data-tab="news"]').click();else if(leave==='hidden'){Object.defineProperty(window.document,'visibilityState',{value:'hidden',configurable:true});window.document.dispatchEvent(new window.Event('visibilitychange'));}else $('#logout').click();
+      await settle();finish({body:{reply:'RESPOSTA-TARDIA-NAO-EXIBIR'}});await settle();assert.equal($('#supportMessages').childElementCount,0);assert.equal(window.document.body.textContent.includes('RESPOSTA-TARDIA-NAO-EXIBIR'),false);assert.equal($('#supportQuestion').value,'');
+    }finally{p.close();}
+  }
+});
+
+function playlistHelp() {
+  const help=baseHelp();help.guides=[{device:'LG',title:'Instalar na LG',apps:[{id:'ss-iptv-lg',name:'SS IPTV',requiredFields:['playlistUrl'],url:'https://ss-iptv.com/',stepsSupport:['Abra o guia e toque em Mostrar lista.']}]}];
+  help.dns=[{name:'DNS atual',value:'http://service.example.invalid',status:'current',verifiedAt:new Date().toISOString(),sourceUrl:'https://bitpanel.vip/notices'}];return help;
+}
+const playlist='http://service.example.invalid/get.php?username=ana-servico&password=senha-sintetica&type=m3u_plus&output=ts';
+
+test('own protected playlist appears and copies only after explicit reveal, without links, provider requests, storage or AI',async()=>{
+  const p=await portal({url:'https://portal.example.invalid/cliente?aba=guias',help:playlistHelp(),respond:async path=>path.endsWith('/reveal')?{body:{username:'ana-servico',password:'senha-sintetica',expiresInSeconds:60,playlistUrl:playlist}}:null}),{$,window,requests,timers}=p;
+  try{
+    const app=$('.app-guide');app.open=true;await settle();assert.equal(requests.some(r=>r.url.endsWith('/reveal')),false);assert.equal($('[data-playlist-value]').textContent,'Lista protegida');assert.equal($('[data-copy-playlist]').hidden,true);
+    $('[data-reveal-playlist]').click();await settle();assert.equal($('[data-playlist-value]').textContent,playlist);assert.equal($('[data-password-value]').textContent,'••••••••');assert.equal($('[data-copy-playlist]').disabled,false);assert.match($('[data-playlist-note]').textContent,/contém sua senha/);
+    const request=requests.find(r=>r.url.endsWith('/reveal'));assert.equal(request.method,'POST');assert.equal(request.headers['X-Portal-CSRF'],'synthetic-csrf');assert.equal(request.body,'{}');assert.equal(window.document.querySelector('a[href*="get.php"]'),null);
+    $('[data-copy-playlist]').click();await settle();assert.deepEqual(p.copied,[playlist]);assert.equal(requests.some(r=>String(r.url).includes('service.example.invalid')||r.url.endsWith('/payments')),false);
+    $('#supportQuestion').value=playlist;$('#supportForm').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));await settle();assert.equal(requests.some(r=>r.url.endsWith('/support/chat')),false);
+    assert.equal(window.localStorage.length,0);assert.equal(window.sessionStorage.length,0);[...timers.values()].find(t=>t.delay===60000).callback();assert.equal($('[data-playlist-value]').textContent,'Lista protegida');assert.equal($('[data-copy-playlist]').hidden,true);
+    $('[data-reveal-playlist]').click();await settle();app.open=false;await settle();assert.equal($('[data-playlist-value]').textContent,'Lista protegida');assert.equal(window.document.body.textContent.includes(playlist),false);
+  }finally{p.close();}
+});
+
+test('playlist reveal rejects mismatched ownership, endpoints, query fields and stale or ambiguous DNS',async()=>{
+  const invalidUrls=[playlist.replace('service.example.invalid','outside.example.invalid'),playlist.replace('username=ana-servico','username=another-user'),playlist.replace('password=senha-sintetica','password=wrong-secret'),playlist.replace('/get.php','/list.php'),playlist.replace('m3u_plus','m3u'),playlist.replace('output=ts','output=hls'),playlist+'&token=extra',playlist+'&username=ana-servico',playlist+'#secret'];
+  const options=invalidUrls.map(url=>({url}));options.push({url:playlist,dns:{verifiedAt:new Date(Date.now()-86400001).toISOString()}},{url:playlist,dns:{status:'stale'}},{url:playlist,dns:{sourceUrl:'https://bitpanel.vip/news'}},{url:playlist,secondDns:true},{url:null});
+  for(const option of options){
+    const help=playlistHelp();if(option.dns)Object.assign(help.dns[0],option.dns);if(option.secondDns)help.dns.push({...help.dns[0],value:'https://second.example.invalid'});
+    const p=await portal({url:'https://portal.example.invalid/cliente?aba=guias',help,respond:async path=>path.endsWith('/reveal')?{body:{username:'ana-servico',password:'senha-sintetica',expiresInSeconds:60,playlistUrl:option.url}}:null});
+    try{p.$('.app-guide').open=true;await settle();p.$('[data-reveal-playlist]').click();await settle();assert.equal(p.$('[data-playlist-value]').textContent,'Lista protegida');assert.equal(p.$('[data-copy-playlist]').disabled,true);assert.equal(p.window.document.body.textContent.includes('senha-sintetica'),false);assert.match(p.$('#message').textContent,/endereço atual conferido/);}finally{p.close();}
+  }
+});
+
+test('a delayed playlist reveal cannot restore the secret after closing the app, changing tabs or leaving the session',async()=>{
+  for(const leave of ['card','tab','hidden','logout']){
+    let finish;const p=await portal({url:'https://portal.example.invalid/cliente?aba=guias',help:playlistHelp(),respond:async path=>path.endsWith('/reveal')?new Promise(resolve=>{finish=resolve;}):null});
+    try{p.$('.app-guide').open=true;await settle();p.$('[data-reveal-playlist]').click();await settle();if(leave==='card')p.$('.app-guide').open=false;else if(leave==='tab')p.$('[data-tab="payments"]').click();else if(leave==='hidden'){Object.defineProperty(p.window.document,'visibilityState',{value:'hidden',configurable:true});p.window.document.dispatchEvent(new p.window.Event('visibilitychange'));}else p.$('#logout').click();await settle();finish({body:{username:'ana-servico',password:'senha-sintetica',expiresInSeconds:60,playlistUrl:playlist}});await settle();assert.equal(p.window.document.body.textContent.includes(playlist),false);assert.equal(p.window.document.body.textContent.includes('senha-sintetica'),false);}finally{p.close();}
+  }
+});

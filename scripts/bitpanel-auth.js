@@ -17,10 +17,16 @@ const context = await chromium.launchPersistentContext(profilePath, {
 const page = context.pages()[0] || await context.newPage();
 await page.goto(`${baseUrl.replace(/\/$/, '')}/list`, { waitUntil: 'domcontentloaded' });
 
-const terminal = createInterface({ input, output });
 output.write('\nFaça o login e resolva o CAPTCHA no navegador aberto.\n');
-await terminal.question('Quando a lista de clientes estiver visível, pressione ENTER aqui... ');
-terminal.close();
+if (process.argv.includes('--auto')) {
+  output.write('A sessão será salva automaticamente quando a lista de clientes estiver visível.\n');
+  await page.waitForURL(url => url.origin === new URL(baseUrl).origin && url.pathname === '/list', { timeout: 600_000 });
+  await page.locator('table tbody').waitFor({ state: 'visible', timeout: 600_000 });
+} else {
+  const terminal = createInterface({ input, output });
+  await terminal.question('Quando a lista de clientes estiver visível, pressione ENTER aqui... ');
+  terminal.close();
+}
 
 if (new URL(page.url()).pathname.includes('/login')) {
   await context.close();

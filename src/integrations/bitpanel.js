@@ -132,11 +132,36 @@ async function listDetailValue(page, label) {
   return value;
 }
 
-async function openSession(page, config) {
+export async function openBitPanelSession(page, config, { storedSession = Boolean(config.BITPANEL_STORAGE_STATE) } = {}) {
   const loginUrl = resolveBitPanelLoginUrl(
     config.BITPANEL_BASE_URL,
     config.BITPANEL_LOGIN_URL
   );
+  if (storedSession) {
+    const baseUrl = readBaseUrl(config);
+    if (new URL(loginUrl).origin !== baseUrl) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+    const listUrl = `${baseUrl}/list`;
+    await page.goto(listUrl, { waitUntil: 'domcontentloaded' });
+    const loginRequired = async () => {
+      if (new URL(page.url()).origin !== baseUrl) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+      if (new URL(page.url()).pathname.includes('/login')) return true;
+      const username = await firstVisible(page, BITPANEL_LOGIN_SELECTORS.username);
+      const password = await firstVisible(page, BITPANEL_LOGIN_SELECTORS.password);
+      const submit = await firstVisible(page, BITPANEL_LOGIN_SELECTORS.submit);
+      return Boolean(username && password && submit);
+    };
+    if (!await loginRequired()) {
+      if (page.url() !== listUrl) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+      let tableReady = false;
+      try { await page.locator('table tbody').waitFor({ state: 'visible' }); tableReady = true; }
+      catch { /* A delayed authentication redirect is checked below. */ }
+      if (!await loginRequired()) {
+        if (!tableReady || page.url() !== listUrl) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+        return;
+      }
+    }
+    // Only an actual login redirect/form allows falling back to configured credentials.
+  }
   await page.goto(loginUrl, { waitUntil: 'domcontentloaded' });
 
   const username = await firstVisible(page, BITPANEL_LOGIN_SELECTORS.username);
@@ -307,6 +332,7 @@ async function runWithBrowser(config, task) {
     if (config.BITPANEL_STORAGE_STATE) {
       try {
         storageState = JSON.parse(config.BITPANEL_STORAGE_STATE);
+        if (!storageState || !Array.isArray(storageState.cookies) || !Array.isArray(storageState.origins)) throw new Error();
       } catch {
         throw new Error('A sessão salva do BitPanel está corrompida. Importe uma nova sessão.');
       }
@@ -318,7 +344,7 @@ async function runWithBrowser(config, task) {
     });
     const page = await context.newPage();
     page.setDefaultTimeout(20_000);
-    await openSession(page, config);
+    await openBitPanelSession(page, config, { storedSession: Boolean(storageState) });
     const result = await task(page);
     if (typeof config.saveBitPanelStorageState === 'function') {
       await config.saveBitPanelStorageState(await context.storageState());
