@@ -8,7 +8,7 @@ import { createQueues, createRedis } from './queue.js';
 import { scanBilling } from './services/billing.js';
 import { createBillingAutomation } from './services/live-billing.js';
 import { startLiveOutbox, deliverCoreNotification, sendQrDelivery } from './services/live-outbox.js';
-import { claimRenewalExecution, expectedRenewalExpiration, recoverPolicyRenewals, invalidateCustomerAccessProvenance } from './services/renewal-execution.js';
+import { claimRenewalExecution, expectedRenewalExpiration, recoverPolicyRenewals, invalidateCustomerAccessProvenance, verifyRenewalExecutionBinding } from './services/renewal-execution.js';
 import { CustomerAccessSync } from './services/customer-access-sync.js';
 import { createCheckoutPreference, createPixPayment } from './integrations/mercadopago.js';
 import {
@@ -348,6 +348,9 @@ async function processRenewal(job) {
   if(!claim.claimed) return {duplicate:true};
   renewal=claim.renewal;
   const operation = bitPanelOperationFor(renewal);
+  const bindingProof={renewalId:renewal.id,correlationId,customerId:renewal.customer_id,subscriptionId:renewal.subscription_id,
+    listId:renewal.bitpanel_list_id,username:renewal.bitpanel_reference,owner:renewal.bitpanel_owner,currentExpiry:renewal.current_expiry};
+  if(operation==='renew')runtimeConfig.BITPANEL_BEFORE_RENEWAL_SUBMIT=()=>verifyRenewalExecutionBinding(db,bindingProof);
   if(claim.automatic) {
     renewal.automatic_renewal=true;
     renewal.expected_credit_cost=claim.creditCost;
@@ -373,6 +376,7 @@ async function processRenewal(job) {
         [renewal.customer_id, renewal.bitpanel_reference]
       );
     }
+    if(operation==='renew')await verifyRenewalExecutionBinding(db,bindingProof);
     const outcome =
       operation === 'provision'
         ? await provisionInBitPanel(runtimeConfig, renewal)
@@ -380,6 +384,7 @@ async function processRenewal(job) {
     if(claim.automatic&&outcome.simulated!==false) throw new Error('AUTO_RENEWAL_LIVE_RESULT_REQUIRED');
     if(!outcome.simulated && outcome.afterExpiry!==renewal.expected_expiration) throw new Error('RENEWAL_PROVIDER_EXPIRATION_MISMATCH');
     const renewedUntil = await db.transaction(async (client) => {
+      if(operation==='renew')await verifyRenewalExecutionBinding(db,bindingProof,{client});
       const encryptedAccessPassword = outcome.password
         ? encryptSecret(outcome.password, config.COOKIE_SECRET)
         : null;

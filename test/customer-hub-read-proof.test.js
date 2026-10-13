@@ -31,8 +31,13 @@ test('read proof caches only verified access and previews four calendars without
     (SELECT count(*) FROM notification_requests)::int notices`)).rows[0],
     dates:(await db.query('SELECT id,expires_on::text FROM subscriptions ORDER BY id')).rows,
     settings:(await db.query('SELECT key,value FROM system_settings ORDER BY key')).rows});
-  const information=()=>({source:'https://bitpanel.vip/notices',posts:[{url:'https://bitpanel.vip/notices'},{url:'https://bitpanel.vip/news'}],
-    dnsVerified:true,dns:[{value:'http://auth.urlcld.com',status:'READY',sourceUrl:'https://bitpanel.vip/notices'}]});
+  const information=()=>({source:'https://bitpanel.vip/notices',status:'READY',verifiedAt:now().toISOString(),posts:[
+    {source:'bitpanel',title:'Aviso de demonstração',content:'Aviso sintético.',url:'https://bitpanel.vip/notices',
+      publishedAt:'2026-10-08T03:13:00.000Z',verifiedAt:now().toISOString()},
+    {source:'bitpanel',title:'Novidade de demonstração',content:'Novidade sintética.',url:'https://bitpanel.vip/news',
+      publishedAt:'2026-10-05T01:39:00.000Z',verifiedAt:now().toISOString()}],
+    dnsVerified:true,dns:[{name:'DNS de demonstração',value:'http://auth.urlcld.com',status:'READY',
+      sourceUrl:'https://bitpanel.vip/notices',verifiedAt:now().toISOString()}]});
   const provider=({mismatch=[],readError}={})=>{
     const calls={connection:0,access:[],previews:[]};
     return{calls,testConnection:async()=>{calls.connection++;return{ok:true};},readInformation:async()=>information(),
@@ -45,7 +50,7 @@ test('read proof caches only verified access and previews four calendars without
         assert.equal(runtime.BITPANEL_AUTOMATIC_RENEWAL_POLICY.planLabel,'30');
         if(mismatch.includes(renewal.bitpanel_list_id))throw Object.assign(Error('Sensitive provider response'),{code:'RENEWAL_PROVIDER_EXPIRATION_MISMATCH'});
         const months=renewal.duration_months;
-        return{prepared:true,submitted:false,quote:{listId:renewal.bitpanel_list_id,planLabel:'30',months,connections:1,
+        return{prepared:true,submitted:false,balance:{status:'verified',availableCredits:90,sufficient:true},quote:{listId:renewal.bitpanel_list_id,planLabel:'30',months,connections:1,
           credits:months,unitPriceCents:3000,totalPriceCents:3000*months},sourceUrl:`https://bitpanel.vip/list/view/${renewal.bitpanel_list_id}`};
       }};
   };

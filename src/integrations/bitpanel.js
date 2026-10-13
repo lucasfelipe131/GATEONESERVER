@@ -1,4 +1,4 @@
-import { validateBitPanelRenewalQuote } from '../services/bitpanel-renewal-quote.js';
+import { parseBitPanelRenewalQuote, validateBitPanelRenewalQuote } from '../services/bitpanel-renewal-quote.js';
 import { parseBitPanelPublishedDate } from './bitpanel-date.js';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -632,6 +632,71 @@ async function captureBoundRenewalDetails(page, detailsUrl, binding, includePass
     expectedUsername: binding.username, includePassword });
 }
 
+const CREDIT_BALANCE_TEXT = /^\s*(?:Saldo (?:em|de) cr[eé]ditos|Cr[eé]ditos dispon[ií]veis)\s*:\s*(?:0|[1-9]\d*)\s*$/i;
+
+// An icon and an unlabelled number do not establish what the number means.
+// Only an explicit, complete available-credit label can authorize expenditure.
+export function parseBitPanelCreditBalance(text) {
+  if (typeof text !== 'string' || text.length > 120 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/.test(text)) return null;
+  const clean = text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\u00a0/g, ' ').trim();
+  const match = /^(?:saldo (?:em|de) creditos|creditos disponiveis)\s*:\s*(0|[1-9]\d*)$/i.exec(clean);
+  const available = match ? Number(match[1]) : null;
+  return Number.isSafeInteger(available) ? available : null;
+}
+
+export async function readBitPanelCreditBalance(page, baseUrl) {
+  const assertSource = () => {
+    let current;
+    try { current = new URL(page.url()); } catch { throw readFailure('BITPANEL_READ_LINK_UNVERIFIED'); }
+    if (current.origin !== baseUrl || current.pathname !== '/list' || current.search || current.hash)
+      throw readFailure(current.pathname.includes('/login') && current.origin === baseUrl ?
+        'BITPANEL_READ_REAUTH_REQUIRED' : 'BITPANEL_READ_LINK_UNVERIFIED');
+  };
+  assertSource();
+  let available = null, visible = 0;
+  try {
+    const candidates = page.getByText(CREDIT_BALANCE_TEXT);
+    for (let index = 0; index < await candidates.count(); index += 1) {
+      const candidate = candidates.nth(index);
+      if (!await candidate.isVisible()) continue;
+      visible += 1;
+      available = parseBitPanelCreditBalance(await candidate.innerText());
+    }
+  } catch { available = null; visible = 0; }
+  assertSource();
+  return visible === 1 ? available : null;
+}
+
+function creditQuote(text, config, renewal) {
+  let validated;
+  try { validated = validateBitPanelRenewalQuote(text, renewal, config.BITPANEL_AUTOMATIC_RENEWAL_POLICY); }
+  catch { throw readFailure('RENEWAL_PROVIDER_QUOTE_MISMATCH'); }
+  if (validated) return validated;
+  // A human-approved operation also needs an intact provider quote for its
+  // available-credit check, even when the automatic policy does not apply.
+  const quote = parseBitPanelRenewalQuote(text);
+  const positive = value => Number.isSafeInteger(value) && value > 0;
+  const selectedPlan = String(config.BITPANEL_PLAN_LABEL || '').split(',')[0].trim();
+  if (quote.listId !== String(renewal.bitpanel_list_id || '') || quote.months !== renewal.duration_months ||
+      !selectedPlan || quote.planLabel !== selectedPlan || !positive(quote.credits) ||
+      !positive(quote.connections) || !positive(quote.unitPriceCents) || !positive(quote.totalPriceCents) ||
+      !positive(quote.unitPriceCents * quote.months * quote.connections) ||
+      quote.totalPriceCents !== quote.unitPriceCents * quote.months * quote.connections)
+    throw readFailure('RENEWAL_PROVIDER_QUOTE_MISMATCH');
+  return quote;
+}
+
+function creditCapacity(availableCredits, quote) {
+  return { status: availableCredits === null ? 'unverified' : 'verified', availableCredits,
+    sufficient: availableCredits === null ? null : availableCredits >= quote.credits };
+}
+
+function requireCreditCapacity(availableCredits, quote) {
+  if (!Number.isSafeInteger(availableCredits) || availableCredits < 0)
+    throw readFailure('RENEWAL_PROVIDER_BALANCE_UNVERIFIED');
+  if (availableCredits < quote.credits) throw readFailure('RENEWAL_PROVIDER_INSUFFICIENT_CREDITS');
+}
+
 // Preparation only opens and reads the form. The final actuator is deliberately
 // outside this function so the administrator preview follows the same path.
 async function prepareBitPanelRenewalFromPage(page, config, renewal, { allowAlreadyRenewed = false } = {}) {
@@ -657,8 +722,9 @@ async function prepareBitPanelRenewalFromPage(page, config, renewal, { allowAlre
   await dialog.waitFor({ state: 'visible' });
   await selectVuetifyOption(page, dialog, /^Selecione o plano/, config.BITPANEL_PLAN_LABEL);
   await selectVuetifyOption(page, dialog, /^Selecione a validade/, optionLabelsForMonths(renewal.duration_months));
-  const quote = validateBitPanelRenewalQuote(await dialog.innerText(), renewal, config.BITPANEL_AUTOMATIC_RENEWAL_POLICY);
-  return { before, binding, listId, detailsUrl, dialog, quote };
+  const quote = creditQuote(await dialog.innerText(), config, renewal);
+  const availableCredits = await readBitPanelCreditBalance(page, baseUrl);
+  return { before, binding, listId, detailsUrl, dialog, quote, availableCredits };
 }
 
 async function closeRenewalPreview(page) {
@@ -689,6 +755,7 @@ export async function previewBitPanelRenewal(config, renewal, { withSession = ru
       try {
         const prepared = await prepareBitPanelRenewalFromPage(page, config, previewRenewal);
         return { prepared: true, submitted: false, quote: prepared.quote,
+          balance: creditCapacity(prepared.availableCredits, prepared.quote),
           sourceUrl: prepared.detailsUrl, verifiedAt: new Date().toISOString() };
       } finally { await closeRenewalPreview(page); }
     });
@@ -714,22 +781,36 @@ export async function renewInBitPanel(config, renewal, { withSession = runWithBr
   if (!renewal.bitpanel_list_id) throw new Error('ID da lista BitPanel não informado.');
 
   return withSession(config, async (page) => {
-    const { before, binding, listId, detailsUrl, dialog, alreadyRenewed } =
+    const { before, binding, listId, detailsUrl, dialog, quote, availableCredits, alreadyRenewed } =
       await prepareBitPanelRenewalFromPage(page, config, renewal, { allowAlreadyRenewed: true });
     if (alreadyRenewed) {
       return {operation:'renew',simulated:false,alreadyRenewed:true,beforeExpiry:renewal.current_expiry,
         afterExpiry:before.expiryDate,evidencePath:null,listId,username:before.username};
     }
 
-    const evidencePath = join(
-      config.ARTIFACTS_DIR,
-      `${Date.now()}-${safeName(renewal.id)}-renovacao.png`
-    );
-    await page.screenshot({ path: evidencePath, fullPage: true });
-    const renewButton = dialog.getByRole('button', { name: 'Renovar', exact: true });
-    if ((await renewButton.count()) !== 1) throw new Error('Botão final de renovação não encontrado.');
-    await renewButton.click();
-    await dialog.waitFor({ state: 'hidden' });
+    const evidencePath = join(config.ARTIFACTS_DIR, `${Date.now()}-${safeName(renewal.id)}-renovacao.png`);
+    let submitted = false;
+    try {
+      requireCreditCapacity(availableCredits, quote);
+      if (renewal.automatic_renewal === true && typeof config.BITPANEL_BEFORE_RENEWAL_SUBMIT !== 'function')
+        throw readFailure('RENEWAL_BINDING_UNVERIFIED');
+      await page.screenshot({ path: evidencePath, fullPage: true });
+      const renewButton = dialog.getByRole('button', { name: 'Renovar', exact: true });
+      if ((await renewButton.count()) !== 1) throw new Error('Botão final de renovação não encontrado.');
+      const currentQuote = creditQuote(await dialog.innerText(), config, renewal);
+      requireCreditCapacity(await readBitPanelCreditBalance(page, readBaseUrl(config)), currentQuote);
+      if (typeof config.BITPANEL_BEFORE_RENEWAL_SUBMIT === 'function') {
+        let result;
+        try { result = await config.BITPANEL_BEFORE_RENEWAL_SUBMIT(); }
+        catch { throw readFailure('RENEWAL_BINDING_UNVERIFIED'); }
+        if (result?.verified !== true) throw readFailure('RENEWAL_BINDING_UNVERIFIED');
+      }
+      await renewButton.click();
+      submitted = true;
+      await dialog.waitFor({ state: 'hidden' });
+    } finally {
+      if (!submitted) await closeRenewalPreview(page);
+    }
 
     await page.goto(detailsUrl, { waitUntil: 'domcontentloaded' });
     const after = await captureBoundRenewalDetails(page, detailsUrl, binding, true);

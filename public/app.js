@@ -524,17 +524,45 @@ function renderConversations(search = '') {
     : '<div class="empty">Nenhum atendimento corresponde à busca.</div>';
 }
 
+const identityLinkReasons = Object.freeze({
+  login_already_has_phone: 'Este login já está associado a outro telefone.',
+  portal_identity_claim: 'O cliente informou um login na área do cliente; confira o vínculo.',
+  self_registration_unverified: 'O cliente informou um login durante o cadastro; a identidade precisa ser conferida.',
+  historical_scan_source_binding_unverified: 'Não foi possível confirmar a quem pertence o telefone no histórico.',
+  historical_scan_duplicate_login: 'Há mais de um cadastro com este login.',
+  historical_scan_target_not_found: 'O login do histórico não foi encontrado entre os cadastros.',
+  historical_scan_target_access_unverified: 'Os dados deste acesso precisam ser conferidos.',
+  historical_scan_duplicate_provider_list: 'O mesmo acesso do fornecedor aparece em mais de um cadastro.',
+  historical_scan_target_has_other_phone: 'O histórico aponta para um login que já possui outro telefone.',
+  historical_scan_historical_recipient_unverified: 'O histórico não comprova o telefone que recebeu os dados de acesso.',
+  historical_scan_contact_permission_conflict: 'O vínculo pode afetar uma recusa de contato ou uma autorização existente.',
+  historical_scan_source_has_protected_history: 'O cadastro de origem possui registros que precisam ser preservados.',
+  historical_scan_phone_identity_conflict: 'Há identidades de telefone conflitantes entre os cadastros.',
+  historical_scan_confirmed_identity_conflict: 'Este vínculo entra em conflito com uma associação já confirmada.',
+  historical_scan_existing_pending_review: 'Já existe uma revisão pendente relacionada a este vínculo.',
+  historical_scan_stored_access_unreadable: 'Não foi possível conferir os dados de acesso salvos.',
+  historical_scan_stored_password_mismatch: 'Os dados de acesso do histórico não conferem com os dados salvos.',
+  historical_scan_provider_access_mismatch: 'A consulta ao fornecedor não confirmou os dados do histórico.',
+  historical_scan_multiple_accesses_for_phone: 'O histórico associa este telefone a mais de um login.',
+  historical_scan_multiple_phones_for_access: 'O histórico associa este login a mais de um telefone.',
+  historical_scan_fresh_verification_required: 'O vínculo encontrado no histórico precisa de uma confirmação atual.'
+});
+
+function identityLinkReason(reason) {
+  return Object.hasOwn(identityLinkReasons, reason) ? identityLinkReasons[reason] : 'O vínculo precisa ser conferido pela equipe.';
+}
+
 function renderIdentityLinks() {
   const links = state.identityLinks || [];
   $('#identityReviewCount').textContent = `${links.length} ${links.length === 1 ? 'pendente' : 'pendentes'}`;
   $('#identityReviewList').innerHTML = links.length
     ? links.map((item) => `
         <div class="identity-review-item">
-          <div><strong>${escapeHtml(item.claimed_login)}</strong><small>${escapeHtml(item.whatsapp_masked)} solicitou o vínculo</small></div>
-          <div><strong>${escapeHtml(item.candidate_name || 'Cliente sem nome')}</strong><small>O login já possui outro telefone; nenhum dado foi sobrescrito.</small></div>
+          <div><strong>${escapeHtml(item.claimed_login)}</strong><small>Telefone: ${escapeHtml(item.whatsapp_masked || 'não informado')}</small></div>
+          <div><strong>${escapeHtml(item.candidate_name || 'Cadastro a conferir')}</strong><small>${escapeHtml(identityLinkReason(item.reason))}</small></div>
           <button class="btn btn-secondary btn-small" data-reject-identity="${escapeHtml(item.id)}">Arquivar</button>
         </div>`).join('')
-    : '<div class="empty">Nenhum conflito de associação. Vínculos exatos e seguros são concluídos automaticamente.</div>';
+    : '<div class="empty">Nenhum vínculo pendente para revisão.</div>';
 }
 
 async function loadConversations() {

@@ -22,6 +22,22 @@ test('support input scrubs credentials, account values, email, phone, tax number
     assert.equal(cleaned.includes(forbidden),false,forbidden);
   assert.equal(scrubPortalHelpText('Ajuda TV ｐｗ senha a',{privateValues:['ｐｗ','a']}).includes('pw'),false);
   assert.equal(scrubPortalHelpText('Ajuda TV ｐｗ senha a',{privateValues:['ｐｗ','a']}).includes('senha a'),false);
+  for(const message of ['Ajuda TV senha e foreign-value','Ajuda TV usuário e foreign-login','Ajuda TV token eh foreign-token'])
+    assert.match(scrubPortalHelpText(message),/\[dado removido\]/);
+  assert.match(scrubPortalHelpText('Ajuda TV senha e foreign-value',{grammar:'unknown'}),/\[dado removido\]/);
+});
+
+test('guidance grammar keeps conjunctions while rejecting explicit credential values and all known private values',()=>{
+  const options={grammar:'guidance',stripUrls:false};
+  for(const instruction of ['A lista contém login e senha.','Preencha usuário e senha com os dados de Meu acesso.',
+    'Não compartilhe sua URL, pois contém sua senha e fica visível por tempo limitado.',
+    'Copie a senha e o usuário somente no aplicativo oficial.'])assert.equal(scrubPortalHelpText(instruction,options),instruction);
+  for(const disclosure of ['Senha: foreign-value','token=foreign-token','Seu login é foreign-login','A senha eh foreign-value',
+    'Usuário e senha são foreign-login foreign-value','password is foreign-value','API key: foreign-token',
+    'Use http://host.test/get.php?username=foreign-login&password=foreign-value',
+    'Bearer foreign-token','sk-unknownsecret123456789'])assert.notEqual(scrubPortalHelpText(disclosure,options),disclosure);
+  for(const disclosure of ['Copie synthetic-password.','Use synthetic.username e senha.'])
+    assert.notEqual(scrubPortalHelpText(disclosure,{...options,privateValues:['synthetic-password','synthetic.username']}),disclosure);
 });
 
 async function fixture({limits=false}={}) {
@@ -113,6 +129,8 @@ test('own portal AI requires session/CSRF and only shares scrubbed stateless hel
       assert.match(ss.stepsSupport.join(' '),/nova URL M3U/);assert.equal(ss.availability,'model_check_required');
       assert.deepEqual(smarters.protocols,['xtream','m3u']);assert.deepEqual(smarters.requiredFields,['username','password','dns','playlistUrl']);
       assert.match(smarters.stepsSupport.join(' '),/edição do perfil/);
+      assert.match(samsung.apps.find(app=>app.name==='SmartOne IPTV').stepsSupport.join(' '),/usuário e senha com os dados atuais de Meu acesso/);
+      assert.match(smarters.requirements.join(' '),/senha de acesso e fica visível por 60 segundos/);
       assert.equal(samsung.apps.some(app=>app.name==='Aplicativo sintético'),false);
       const allowedSources=request.body.text.format.schema.properties.sourceIds.items.enum;
       assert.ok(allowedSources.includes(ss.sourceId));assert.ok(allowedSources.includes(smarters.sourceId));
@@ -129,8 +147,24 @@ test('own portal AI requires session/CSRF and only shares scrubbed stateless hel
         assert.equal(JSON.stringify(request.body).includes(value),false,value);
       assert.deepEqual(await f.snapshot(),before);
     });
+    await t.test('normal manual instructions about login and password reach the client unchanged',async()=>{
+      for(const reply of ['A lista contém login e senha. Copie a URL pelo botão protegido de Meu acesso e use somente no aplicativo oficial.',
+        'No SS IPTV, abra Configurações, Conteúdo e Listas externas. Não compartilhe sua URL, pois contém sua senha e fica visível por tempo limitado.',
+        'No aplicativo, preencha usuário e senha com os dados atuais de Meu acesso.']){
+        f.setReply({reply,sourceIds:['guide-samsung']});
+        const response=await f.app.inject({method:'POST',url:path,headers:f.sessions[0],payload:{message:'Como trocar a URL no SS IPTV Samsung?'}});
+        assert.equal(response.statusCode,200,response.body);assert.equal(response.json().reply,reply);
+        assert.equal(response.json().readOnly,true);assert.equal(response.json().sources.length,1);
+      }
+      assert.deepEqual(await f.snapshot(),before);
+    });
     await t.test('invented actuation, payments, foreign URLs, prices and secrets are replaced by safe guidance',async()=>{
       for(const reply of ['Renovei sua assinatura.','Seu pagamento foi aprovado.','Vou ativar seu plano.',`Use ${f.one.password}.`,
+        `Use ${f.one.login}.`,`O usuário é ${f.two.login}.`,`A senha é ${f.two.password}.`,
+        `Copie o usuário e ${f.one.password}.`,`A senha e ${f.one.password} devem ser usados na TV.`,
+        'Sua senha: foreign-value','Seu login eh foreign-login','Usuário e senha são foreign-login foreign-password',
+        'token=foreign-token','Bearer foreign-token','sk-unknownsecret123456789',
+        'Use http://current.gatecustomer.com/get.php?username=foreign-login&password=foreign-value',
         'Abra https://foreign.test/login.','Use o DNS http://old.gatecustomer.com.','O plano custa R$ 99,00.']) {
         f.setReply({reply,sourceIds:[]});
         const response=await f.app.inject({method:'POST',url:path,headers:f.sessions[0],payload:{message:'Ajuda com minha assinatura Samsung'}});

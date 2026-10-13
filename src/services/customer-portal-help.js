@@ -16,8 +16,10 @@ const urlPattern=/\b(?:https?:\/\/|www\.)[^\s<>"']+/gi;
 const domains=/\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?::\d{1,5})?(?:\/[^\s<>"']*)?/gi;
 const quoteMoney=/R\$\s*((?:\d{1,3}(?:\.\d{3})+|\d+),\d{2})/g;
 const escape=value=>value.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+const inputSecretAssignment=/\b(?:senha|password|passwd|token|api[ _-]?key|access[ _-]?token|cpf|cnpj|login|username|usu[aá]rio)\b\s*(?:[:=]|(?:[eé]|eh)\s+)\s*[^\s,;]+/gi;
+const guidanceSecretAssignment=/\b(?:senha|password|passwd|token|api[ _-]?key|access[ _-]?token|cpf|cnpj|login|username|usu[aá]rio)\b\s*(?:[:=]|(?:é|eh|s[aã]o|is|are)\s+)\s*[^\s,;]+/gi;
 
-export function scrubPortalHelpText(value,{privateValues=[],stripUrls=true}={}) {
+export function scrubPortalHelpText(value,{privateValues=[],stripUrls=true,grammar='input'}={}) {
   let text=String(value || '').normalize('NFKC').replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g,'')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g,'');
   for(const secret of privateValues.filter(value=>typeof value==='string').map(value=>value.normalize('NFKC')
@@ -26,7 +28,10 @@ export function scrubPortalHelpText(value,{privateValues=[],stripUrls=true}={}) 
   text=text.replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,'[dado removido]')
     .replace(/\b\d{2}[. -]?\d{3}[. -]?\d{3}[\/]?\d{4}[- ]?\d{2}\b/g,'[dado removido]');
   if(stripUrls) text=text.replace(urlPattern,'[link removido]').replace(domains,'[link removido]');
-  text=text.replace(/\b(?:senha|password|passwd|token|api[ _-]?key|access[ _-]?token|cpf|cnpj|login|username|usu[aá]rio)\b\s*(?:[:=]|(?:[eé]|eh)\s+)\s*[^\s,;]+/gi,'[dado removido]')
+  // Input stays conservative about unaccented "e". Public instructions and
+  // model output use explicit assignment grammar so "usuário e senha" remains
+  // an instruction; known private values and all other redactions still apply.
+  text=text.replace(grammar==='guidance'?guidanceSecretAssignment:inputSecretAssignment,'[dado removido]')
     .replace(/\bBearer\s+\S+/gi,'[dado removido]').replace(/\bsk-[a-z0-9_-]{8,}\b/gi,'[dado removido]')
     .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,'[dado removido]')
     .replace(/\b\d{3}[. -]?\d{3}[. -]?\d{3}[- ]?\d{2}\b/g,'[dado removido]')
@@ -50,14 +55,15 @@ function responseContext(help,own,plans,privateValues) {
   const publicApps=getClientHelpApps();
   const sources=[],guides=help.guides.map(guide=>{
     const id=`guide-${guide.id}`;sources.push({id,title:guide.title,url:guide.sourceUrl});
-    return{device:guide.device,title:guide.title,steps:guide.steps.map(step=>scrubPortalHelpText(step,{privateValues})),
+    const scrubGuidance=value=>scrubPortalHelpText(value,{privateValues,grammar:'guidance'});
+    return{device:guide.device,title:guide.title,steps:guide.steps.map(scrubGuidance),
       apps:guide.apps.filter(app=>publicApps.some(known=>known.id===app.id && known.device===guide.device &&
         known.name===app.name && known.url===app.url && known.sourceUrl===app.sourceUrl)).map((app,index)=>{
         const sourceId=`app-${guide.id}-${index+1}`;
         sources.push({id:sourceId,title:app.name,url:app.sourceUrl});
-        return{name:scrubPortalHelpText(app.name,{privateValues}),protocols:app.protocols,requiredFields:app.requiredFields,
-          availability:app.availability,requirements:app.requirements.map(value=>scrubPortalHelpText(value,{privateValues})),
-          stepsSupport:app.stepsSupport.map(value=>scrubPortalHelpText(value,{privateValues})),sourceId};
+        return{name:scrubGuidance(app.name),protocols:app.protocols,requiredFields:app.requiredFields,
+          availability:app.availability,requirements:app.requirements.map(scrubGuidance),
+          stepsSupport:app.stepsSupport.map(scrubGuidance),sourceId};
       }),sourceId:id};
   });
   const dns=help.dns.filter(item=>item.status==='current').map((item,index)=>{
@@ -71,7 +77,7 @@ function responseContext(help,own,plans,privateValues) {
 }
 
 function safeReply(reply,{privateValues,dns,plans}) {
-  if(/[<>]/.test(reply) || /\b(?:\d{1,3}\.){3}\d{1,3}\b/.test(reply) || actionClaim.test(reply) || scrubPortalHelpText(reply,{privateValues,stripUrls:false})!==reply) return false;
+  if(/[<>]/.test(reply) || /\b(?:\d{1,3}\.){3}\d{1,3}\b/.test(reply) || actionClaim.test(reply) || scrubPortalHelpText(reply,{privateValues,stripUrls:false,grammar:'guidance'})!==reply) return false;
   const allowed=new Set(dns.map(item=>item.value)),allowedHosts=new Set(dns.map(item=>{
     try{return new URL(item.value.includes('://')?item.value:`http://${item.value}`).hostname;}catch{return '';}
   }));
