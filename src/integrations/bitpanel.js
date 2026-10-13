@@ -631,79 +631,103 @@ async function assertLookupProtectedPage(page, expectedUrl, baseUrl) {
 
 /** Private observations only: JSON serialization exposes status/counts, never account data. */
 export async function readBitPanelExactMissingAccesses(config, usernames,
-  { withSession = runWithReadOnlyBrowser, maxPages = 100, now = () => new Date(), onSaveStorageState } = {}) {
+  { withSession = runWithReadOnlyBrowser, maxPages = 100, now = () => new Date(), onSaveStorageState, onProgress } = {}) {
   if (!Array.isArray(usernames) || usernames.length < 1 || usernames.length > 13 ||
       usernames.some(value => !lookupCredential(value, 120)) ||
       new Set(usernames.map(value => value.toLowerCase())).size !== usernames.length ||
       !Number.isSafeInteger(maxPages) || maxPages < 1 || maxPages > 100 ||
-      onSaveStorageState !== undefined && typeof onSaveStorageState !== 'function')
+      onSaveStorageState !== undefined && typeof onSaveStorageState !== 'function' ||
+      onProgress !== undefined && typeof onProgress !== 'function')
     throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
-  const baseUrl = readBaseUrl(config), listUrl = `${baseUrl}/list`;
+  const baseUrl = readBaseUrl(config), listUrl = `${baseUrl}/list`, requestedNames = Object.freeze([...usernames]);
+  const started = Date.now(), deadline = Math.min(120_000, Math.max(1000, Number(config.BITPANEL_READ_TIMEOUT_MS) || 120_000));
+  const observationStarts = new Map();
+  let progress = { phase: 'STARTING_SESSION', scannedPages: 0, scannedRows: 0, verified: 0, notFound: 0, rejected: 0 };
+  const reportProgress = async (phase, counts = {}) => {
+    progress = { phase, scannedPages: counts.scannedPages ?? progress.scannedPages, scannedRows: counts.scannedRows ?? progress.scannedRows,
+      verified: counts.verified ?? progress.verified, notFound: counts.notFound ?? progress.notFound, rejected: counts.rejected ?? progress.rejected };
+    if (onProgress) await onProgress(Object.freeze({ ...progress }));
+  };
   try {
     if (new URL(resolveBitPanelLoginUrl(baseUrl, config.BITPANEL_LOGIN_URL)).origin !== baseUrl)
       throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
-    const deadline = Math.min(120_000, Math.max(1000, Number(config.BITPANEL_READ_TIMEOUT_MS) || 120_000));
-    return await withSession({ ...config, BITPANEL_BASE_URL: baseUrl, BITPANEL_USERNAME: '', BITPANEL_PASSWORD: '',
+    await reportProgress('STARTING_SESSION');
+    const result = await withSession({ ...config, BITPANEL_BASE_URL: baseUrl, BITPANEL_USERNAME: '', BITPANEL_PASSWORD: '',
       BITPANEL_READ_TIMEOUT_MS: deadline, ...(onSaveStorageState ? { saveBitPanelStorageState: onSaveStorageState } : {}) }, async page => {
+      await reportProgress('OPENING_LIST');
       await page.goto(listUrl, { waitUntil: 'domcontentloaded' });
       await assertLookupProtectedPage(page, listUrl, baseUrl);
       await waitForBitPanelListData(page, baseUrl);
       const firstHeaders = await lookupColumnMap(page), { columns } = firstHeaders;
-      const wanted = new Set(usernames), candidates = [], ids = new Set(), logins = new Set(),
+      const wanted = new Set(requestedNames), candidates = [], ids = new Set(), logins = new Set(),
         duplicateIds = new Set(), duplicateLogins = new Set(), pageSignatures = new Set();
       let scannedPages = 0, scannedRows = 0, complete = false;
       for (; scannedPages < maxPages;) {
+        await reportProgress('READING_PAGE', { scannedPages, scannedRows });
         await assertLookupProtectedPage(page, listUrl, baseUrl);
         if ((await lookupColumnMap(page)).headerSignature !== firstHeaders.headerSignature)
           throw readFailure('BITPANEL_READ_UNAVAILABLE');
-        const rows = page.locator('table tbody tr'), count = await rows.count(), signatureRows = [];
-        if (count < 1 || count > 500) throw readFailure('BITPANEL_READ_UNAVAILABLE');
-        for (let index = 0; index < count; index++) {
-          const cells = rows.nth(index).locator('td');
-          if (await cells.count() <= Math.max(...Object.values(columns))) throw readFailure('BITPANEL_READ_UNAVAILABLE');
-          const id = (await cells.nth(columns.id).innerText()).trim().replace(/^#/, ''),
-            username = (await cells.nth(columns.username).innerText()).trim();
+        // One browser RPC per page. Non-target rows expose only the two fields
+        // needed for global uniqueness; private detail fields stay on the page.
+        const observedAt = now();
+        const batch = await page.locator('table tbody tr').evaluateAll((rows, { columns, requested }) => {
+          const wanted = new Set(requested), text = cell => { const value = cell?.innerText;return typeof value === 'string' ? value.trim() : null; };
+          return rows.map(row => {
+            const cells = [...row.querySelectorAll('td')], id = text(cells[columns.id])?.replace(/^#/, ''), username = text(cells[columns.username]);
+            return { cellCount: cells.length, id, username, ...(wanted.has(username) ? {
+              owner: text(cells[columns.owner]), state: text(cells[columns.state]), expiry: text(cells[columns.expiry]) } : {}) };
+          });
+        }, { columns, requested: requestedNames });
+        await assertLookupProtectedPage(page, listUrl, baseUrl);
+        const signatureRows = [];
+        if (!Array.isArray(batch) || batch.length < 1 || batch.some(row => !row || !Number.isSafeInteger(row.cellCount) || row.cellCount <= Math.max(...Object.values(columns))))
+          throw readFailure('BITPANEL_READ_PAGE_NOT_READY');
+        if (batch.length > 500) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+        for (const row of batch) {
+          const { id, username } = row;
           if (!/^[1-9]\d{0,19}$/.test(id) || !lookupCredential(username, 120)) throw readFailure('BITPANEL_READ_UNAVAILABLE');
           signatureRows.push([id, username]);scannedRows++;
           if (ids.has(id)) duplicateIds.add(id);ids.add(id);
           const loginKey = username.toLowerCase();
           if (logins.has(loginKey)) duplicateLogins.add(loginKey);logins.add(loginKey);
-          if (wanted.has(username)) candidates.push({ id, username,
-            owner: (await cells.nth(columns.owner).innerText()).trim(),
-            state: (await cells.nth(columns.state).innerText()).trim(),
-            expiry: (await cells.nth(columns.expiry).innerText()).trim(), observedAt: now() });
+          if (wanted.has(username)) candidates.push({ id, username, owner: row.owner, state: row.state, expiry: row.expiry, observedAt });
         }
         const signature = JSON.stringify(signatureRows);
         if (pageSignatures.has(signature)) throw readFailure('BITPANEL_READ_UNAVAILABLE');
         pageSignatures.add(signature);scannedPages++;
+        await reportProgress('PAGE_SCANNED', { scannedPages, scannedRows });
         const next = page.getByRole('button', { name: 'Next page', exact: true });
         if (await next.count() !== 1) throw readFailure('BITPANEL_READ_UNAVAILABLE');
         if (!await next.isEnabled()) { complete = true;break; }
         if (scannedPages >= maxPages) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+        await reportProgress('PAGINATING', { scannedPages, scannedRows });
         await next.click();
         await assertLookupProtectedPage(page, listUrl, baseUrl);
         await waitForBitPanelListData(page, baseUrl);
         await assertLookupProtectedPage(page, listUrl, baseUrl);
         try {
-          await page.waitForFunction(({ previous, idColumn, usernameColumn }) => {
+          await page.waitForFunction(({ previous, idColumn, usernameColumn, minimumColumns }) => {
+            const text = cell => { const value = cell?.innerText;return typeof value === 'string' ? value.trim() : null; };
             const rows = [...document.querySelectorAll('table tbody tr')].map(row => [...row.querySelectorAll('td')])
-              .filter(cells => cells.length > Math.max(idColumn, usernameColumn));
-            const current = JSON.stringify(rows.map(cells => [cells[idColumn].textContent.trim().replace(/^#/, ''), cells[usernameColumn].textContent.trim()]));
+              .filter(cells => cells.length > minimumColumns);
+            const current = JSON.stringify(rows.map(cells => [text(cells[idColumn])?.replace(/^#/, ''), text(cells[usernameColumn])]));
             return rows.length > 0 && current !== previous;
-          }, { previous: signature, idColumn: columns.id, usernameColumn: columns.username }, { timeout: 20_000 });
+          }, { previous: signature, idColumn: columns.id, usernameColumn: columns.username,
+            minimumColumns: Math.max(...Object.values(columns)) }, { timeout: 20_000 });
         } catch {
           assertLookupPage(page, listUrl, baseUrl);throw readFailure('BITPANEL_READ_TIMEOUT');
         }
         await waitForBitPanelListData(page, baseUrl);
       }
       if (!complete) throw readFailure('BITPANEL_READ_UNAVAILABLE');
-      const observations = [], counts = { requested: usernames.length, scannedPages, scannedRows, verified: 0, notFound: 0,
+      const observations = [], counts = { requested: requestedNames.length, scannedPages, scannedRows, verified: 0, notFound: 0,
         rejected: 0, rejectionReasons: {} };
       const reject = (requestIndex, reason) => {
         counts.rejected++;counts.rejectionReasons[reason] = (counts.rejectionReasons[reason] || 0) + 1;
         observations.push({ requestIndex, status: 'REJECTED', reason });
       };
-      for (const [requestIndex, username] of usernames.entries()) {
+      for (const [requestIndex, username] of requestedNames.entries()) {
+        await reportProgress('CHECKING_CANDIDATES', counts);
         const matches = candidates.filter(row => row.username === username), candidate = matches[0];
         if (duplicateLogins.has(username.toLowerCase())) { reject(requestIndex, 'DUPLICATE_LOGIN');continue; }
         if (!candidate) { counts.notFound++;observations.push({ requestIndex, status: 'NOT_FOUND' });continue; }
@@ -717,6 +741,7 @@ export async function readBitPanelExactMissingAccesses(config, usernames,
           reject(requestIndex, 'STALE_OBSERVATION');continue;
         }
         const sourceUrl = `${baseUrl}/list/view/${candidate.id}`;
+        await reportProgress('READING_DETAIL', counts);
         await page.goto(sourceUrl, { waitUntil: 'domcontentloaded' });await assertLookupProtectedPage(page, sourceUrl, baseUrl);
         try { await page.waitForLoadState('networkidle', { timeout: 20_000 }); }
         catch { await assertLookupProtectedPage(page, sourceUrl, baseUrl);throw readFailure('BITPANEL_READ_TIMEOUT'); }
@@ -736,15 +761,35 @@ export async function readBitPanelExactMissingAccesses(config, usernames,
         observations.push({ requestIndex, status: 'VERIFIED', listId: candidate.id, username, owner: candidate.owner, password,
           expiresOn, subscriptionStatus: ['expirada', 'expirado', 'expired'].includes(state) || expiresOn < today ? 'late' : 'active',
           sourceUrl, verifiedAt: verifiedAt.toISOString() });counts.verified++;
+        observationStarts.set(requestIndex, observedAt.getTime());
       }
       const result = { status: 'READY', counts };
       Object.defineProperty(result, 'observations', { value: observations, enumerable: false });
       return result;
     });
+    const discardStale = () => {
+      const finishedAt = new Date(now()).getTime();
+      for (let index = 0; index < result.observations.length; index++) {
+        const observation = result.observations[index];
+        if (observation.status !== 'VERIFIED') continue;
+        const sourceAt = observationStarts.get(observation.requestIndex), verifiedAt = new Date(observation.verifiedAt).getTime();
+        if (Number.isFinite(finishedAt) && Number.isFinite(sourceAt) && Number.isFinite(verifiedAt) &&
+            finishedAt >= sourceAt && finishedAt >= verifiedAt && finishedAt - sourceAt <= 60_000 && finishedAt - verifiedAt <= 60_000) continue;
+        result.observations[index] = { requestIndex: observation.requestIndex, status: 'REJECTED', reason: 'STALE_OBSERVATION' };
+        result.counts.verified--;result.counts.rejected++;
+        result.counts.rejectionReasons.STALE_OBSERVATION = (result.counts.rejectionReasons.STALE_OBSERVATION || 0) + 1;
+      }
+    };
+    // Saving refreshed auth or checking later candidates must not extend the
+    // first row's lease. A delayed diagnostics callback cannot extend it either.
+    discardStale();await reportProgress('COMPLETE', result.counts);discardStale();
+    progress = { ...progress, verified: result.counts.verified, notFound: result.counts.notFound, rejected: result.counts.rejected };
+    return result;
   } catch (error) {
-    if (readCodes.has(error?.code)) throw readFailure(error.code);
-    if (/CAPTCHA|autentica|sessão|credenciais|acesso|login/i.test(String(error?.message))) throw readFailure('BITPANEL_READ_REAUTH_REQUIRED');
-    throw readFailure('BITPANEL_READ_UNAVAILABLE');
+    const code = readCodes.has(error?.code) || error?.code === 'BITPANEL_READ_PAGE_NOT_READY' ? error.code :
+      error?.name === 'TimeoutError' || Date.now() - started >= deadline ? 'BITPANEL_READ_TIMEOUT' :
+      /CAPTCHA|autentica|sessão|credenciais|acesso|login/i.test(String(error?.message)) ? 'BITPANEL_READ_REAUTH_REQUIRED' : 'BITPANEL_READ_UNAVAILABLE';
+    throw Object.assign(readFailure(code), { lookupProgress: Object.freeze({ ...progress }) });
   }
 }
 

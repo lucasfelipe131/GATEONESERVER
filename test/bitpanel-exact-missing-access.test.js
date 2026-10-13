@@ -9,16 +9,25 @@ const row=(id,username,patch={})=>({id,username,owner:'Gate One Pro Server',stat
 
 function fixture({pages=[[row('12345','synthetic.one')]],headers=['ID','Proprietário','Estado','Usuário','Validade'],
   details={},loadingMs=0,nextCount=1,staleNext=false,redirect='',detailRedirect='',loginForm=false,captcha=false,
-  detailLoginForm=false,networkTimeout=false,headersAfterPage,clock=()=>new Date(NOW)}={}){
+  detailLoginForm=false,networkTimeout=false,headersAfterPage,clock=()=>new Date(NOW),forbidNonTargetMetadata=false,
+  afterBatch,hiddenRowText=false}={}){
   const calls={sessions:0,passwordReads:0,expiryReads:0,earlyReads:0,networkWaits:0,paginationWaits:0,navigationClicks:0,
-    financialClicks:0,searchFills:0,loginFills:0,urls:[],detailIds:[]};
+    financialClicks:0,searchFills:0,loginFills:0,pageBatches:0,rowRPCs:0,nonTargetMetadataReads:0,urls:[],detailIds:[]};
   let currentUrl='',pageIndex=0,ready=true,pending,sessionConfig;
   const hydrate=index=>{
     if(!loadingMs){pageIndex=index;ready=true;return;}
     ready=false;pending=new Promise(resolve=>setTimeout(()=>{pageIndex=index;ready=true;resolve();},loadingMs));
   };
   const sourceRows=()=>pages[pageIndex]||[];
-  const rendered=row=>[row.id,row.owner,row.state,row.username,row.expiry];
+  const rendered=row=>row.cells||[row.id,row.owner,row.state,row.username,row.expiry];
+  const domRows=()=>sourceRows().map(item=>({querySelectorAll:selector=>{
+    assert.equal(selector,'td');return rendered(item).map((value,index)=>({textContent:hiddenRowText?`${value}hidden`:value,get innerText(){
+      if([1,2,4].includes(index)&&item.username!=='synthetic.one'&&item.username!=='synthetic.two'){
+        calls.nonTargetMetadataReads++;if(forbidNonTargetMetadata)throw Error('Non-target private metadata must remain in the browser');
+      }
+      return value;
+    }}));
+  }}));
   const visibleForm=()=>currentUrl.includes('/view/')?detailLoginForm:loginForm;
   const detail=()=>{
     const id=currentUrl.split('/').at(-1),original=pages.flat().find(item=>item.id===id)||row(id,'synthetic.one');
@@ -44,9 +53,7 @@ function fixture({pages=[[row('12345','synthetic.one')]],headers=['ID','Propriet
       calls.paginationWaits++;await pending;
       const previousDocument=globalThis.document;
       globalThis.document={querySelectorAll:selector=>{
-        assert.equal(selector,'table tbody tr');return sourceRows().map(item=>({querySelectorAll:cellSelector=>{
-          assert.equal(cellSelector,'td');return rendered(item).map(text=>({textContent:text}));
-        }}));
+        assert.equal(selector,'table tbody tr');return domRows();
       }};
       try{if(!fn(args))throw Error('synthetic stale pagination');}finally{globalThis.document=previousDocument;}
     },
@@ -62,7 +69,10 @@ function fixture({pages=[[row('12345','synthetic.one')]],headers=['ID','Propriet
       if(selector==='table thead th')return{first:()=>({waitFor:async()=>{}}),allInnerTexts:async()=>{
         if(!ready)calls.earlyReads++;return pageIndex&&headersAfterPage?headersAfterPage:headers;
       }};
-      if(selector==='table tbody tr')return{count:async()=>{if(!ready)calls.earlyReads++;return sourceRows().length;},nth:index=>({locator:cellSelector=>{
+      if(selector==='table tbody tr')return{evaluateAll:async(fn,args)=>{
+        calls.pageBatches++;if(!ready)calls.earlyReads++;const result=fn(domRows(),args);await afterBatch?.();return result;
+      },count:async()=>{calls.rowRPCs++;if(!ready)calls.earlyReads++;return sourceRows().length;},nth:index=>({locator:cellSelector=>{
+        calls.rowRPCs++;
         assert.equal(cellSelector,'td');const cells=rendered(sourceRows()[index]);return{count:async()=>cells.length,nth:i=>({innerText:async()=>cells[i]})};
       }})};
       if(selector==='li')return{filter:({hasText})=>({count:async()=>1,innerText:async()=>detailText(hasText)})};
@@ -91,6 +101,7 @@ test('exact missing-access lookup scans hydrated pages and only returns private 
   assert.equal(result.observations[1].username,'synthetic.two');assert.deepEqual(result.observations[2],{requestIndex:2,status:'NOT_FOUND'});
   assert.deepEqual(f.calls.detailIds,['12345','23456']);assert.equal(f.calls.passwordReads,2);assert.equal(f.calls.earlyReads,0);
   assert.equal(f.calls.navigationClicks,1);assert.equal(f.calls.paginationWaits,1);assert.ok(f.calls.networkWaits>=3);
+  assert.equal(f.calls.pageBatches,2);assert.equal(f.calls.rowRPCs,0);assert.equal(f.calls.nonTargetMetadataReads,0);
   assert.equal(f.sessionConfig.BITPANEL_USERNAME,'');assert.equal(f.sessionConfig.BITPANEL_PASSWORD,'');
   noExportedSecrets(result);noFinancialActions(f);
 });
@@ -114,6 +125,9 @@ test('a unique legacy Status header accepts only subscription states, while expl
   assert.equal(result.counts.verified,1);assert.equal(result.observations[0].subscriptionStatus,'active');noFinancialActions(legacy);
   const presence=fixture({headers:['ID','Proprietário','Status','Usuário','Validade'],pages:[[row('12345','synthetic.one',{state:'Online'})]]}),blocked=await read(presence);
   assert.deepEqual(blocked.counts.rejectionReasons,{PROVIDER_STATE_UNVERIFIED:1});assert.equal(presence.calls.passwordReads,0);
+  const current=fixture({headers:['ID','Proprietário','Status','Estado','Usuário','Validade'],
+    pages:[[row('12345','synthetic.one',{cells:['12345','Gate One Pro Server','Online','Ativa','synthetic.one','31/12/2026']})]]}),currentResult=await read(current);
+  assert.equal(currentResult.counts.verified,1);assert.equal(currentResult.observations[0].subscriptionStatus,'active');
 });
 
 test('foreign ownership, unsupported states and invalid calendar dates are rejected before passwords or detail navigation',async()=>{
@@ -147,7 +161,7 @@ test('pagination completeness, stable header identity and asynchronous readiness
     [{headers:['ID','Proprietário','Presença','Usuário','Validade']},{},'BITPANEL_READ_UNAVAILABLE'],
     [{headers:['ID','Proprietário','Estado','Usuário','Usuário','Validade']},{},'BITPANEL_READ_UNAVAILABLE'],
     [{pages:[[row('12345','synthetic.one')],[row('23456','other')]],headersAfterPage:['ID','Proprietário','Estado','Login','Validade']},{},'BITPANEL_READ_UNAVAILABLE'],
-    [{networkTimeout:true},{},'BITPANEL_READ_TIMEOUT'],[{pages:[[]]},{},'BITPANEL_READ_UNAVAILABLE']]){
+    [{networkTimeout:true},{},'BITPANEL_READ_TIMEOUT'],[{pages:[[]]},{},'BITPANEL_READ_PAGE_NOT_READY']]){
     const f=fixture(options);await assert.rejects(read(f,['synthetic.one'],readOptions),{code});assert.equal(f.calls.passwordReads,0);noFinancialActions(f);
   }
 });
@@ -184,4 +198,100 @@ test('stale snapshot and invalid passwords stay private; saving refreshed storag
   assert.deepEqual(bad.counts.rejectionReasons,{PASSWORD_UNVERIFIED:1});assert.equal(bad.observations[0].password,undefined);noExportedSecrets(bad);
   const save=()=>{},f=fixture();await read(f,['synthetic.one'],{onSaveStorageState:save});
   assert.equal(f.sessionConfig.saveBitPanelStorageState,save);noFinancialActions(f);
+});
+
+test('hundreds of rows use one batch RPC, keep non-target metadata inside the page and emit only immutable aggregate progress',async()=>{
+  const rows=Array.from({length:300},(_,index)=>row(String(20000+index),index===227?'synthetic.one':`foreign.${index}`));
+  const f=fixture({pages:[rows],forbidNonTargetMetadata:true}),frames=[];
+  const result=await read(f,['synthetic.one'],{onProgress:frame=>{assert.equal(Object.isFrozen(frame),true);frames.push(frame);}});
+  assert.equal(result.counts.scannedRows,300);assert.equal(result.counts.verified,1);assert.equal(f.calls.pageBatches,1);
+  assert.equal(f.calls.rowRPCs,0);assert.equal(f.calls.nonTargetMetadataReads,0);assert.equal(f.calls.passwordReads,1);
+  assert.deepEqual(frames.at(-1),{phase:'COMPLETE',scannedPages:1,scannedRows:300,verified:1,notFound:0,rejected:0});
+  const phases=new Set(['STARTING_SESSION','OPENING_LIST','READING_PAGE','PAGE_SCANNED','PAGINATING','CHECKING_CANDIDATES','READING_DETAIL','COMPLETE']);
+  for(const frame of frames){
+    assert.deepEqual(Object.keys(frame),['phase','scannedPages','scannedRows','verified','notFound','rejected']);assert.ok(phases.has(frame.phase));
+    for(const [key,value] of Object.entries(frame))if(key!=='phase')assert.ok(Number.isSafeInteger(value)&&value>=0);
+  }
+  for(const privateValue of ['synthetic.one','foreign.','synthetic-own-password','synthetic-provider-password','https://bitpanel.vip','20227'])
+    assert.equal(JSON.stringify(frames).includes(privateValue),false);
+  noExportedSecrets(result);noFinancialActions(f);
+});
+
+test('empty and incomplete DOM batches report PAGE_NOT_READY rather than declaring an absent customer',async()=>{
+  for(const pages of [[[]],[[row('12345','synthetic.one',{cells:['12345','Gate One Pro Server','Ativa']})]]]){
+    const f=fixture({pages}),frames=[];
+    await assert.rejects(read(f,['synthetic.one'],{onProgress:frame=>frames.push(frame)}),error=>{
+      assert.equal(error.code,'BITPANEL_READ_PAGE_NOT_READY');assert.equal(error.lookupProgress.phase,'READING_PAGE');
+      assert.equal(error.lookupProgress.scannedPages,0);assert.equal(error.lookupProgress.scannedRows,0);assert.equal(error.lookupProgress.notFound,0);
+      assert.equal(JSON.stringify(error).includes('synthetic'),false);return true;
+    });
+    assert.equal(frames.at(-1).phase,'READING_PAGE');assert.equal(f.calls.passwordReads,0);noFinancialActions(f);
+  }
+});
+
+test('failed pagination and global deadlines retain only the safe last phase and counters',async()=>{
+  const f=fixture({pages:[[row('12345','synthetic.one')],[row('23456','other')]],staleNext:true});
+  await assert.rejects(read(f),error=>{
+    assert.equal(error.code,'BITPANEL_READ_TIMEOUT');assert.deepEqual(error.lookupProgress,
+      {phase:'PAGINATING',scannedPages:1,scannedRows:1,verified:0,notFound:0,rejected:0});
+    assert.equal(JSON.stringify(error).includes('synthetic'),false);assert.equal(JSON.stringify(error).includes('12345'),false);return true;
+  });
+  const originalNow=Date.now;let elapsed=0;Date.now=()=>elapsed;
+  try{
+    await assert.rejects(readBitPanelExactMissingAccesses(config,['synthetic.one'],{withSession:async()=>{
+      elapsed=120_001;throw Error('synthetic.one synthetic-provider-password Target closed');
+    }}),error=>{
+      assert.equal(error.code,'BITPANEL_READ_TIMEOUT');assert.equal(error.lookupProgress.phase,'STARTING_SESSION');
+      assert.equal(JSON.stringify(error).includes('synthetic'),false);assert.equal(error.message,'BITPANEL_READ_TIMEOUT');return true;
+    });
+  }finally{Date.now=originalNow;}
+  noFinancialActions(f);
+});
+
+test('batched IDs and usernames are validated and progress callbacks cannot expand the original input scope',async()=>{
+  for(const item of [row('invalid-id','synthetic.one'),row('12345',''),row('12345','synthetic\none')]){
+    const f=fixture({pages:[[item]]});await assert.rejects(read(f),{code:'BITPANEL_READ_UNAVAILABLE'});assert.equal(f.calls.passwordReads,0);
+  }
+  const names=['synthetic.one'],f=fixture({pages:[[row('12345','synthetic.one'),row('23456','synthetic.two')]]});
+  const result=await read(f,names,{onProgress:()=>{names.push('synthetic.two');}});
+  assert.equal(result.counts.requested,1);assert.equal(result.counts.verified,1);assert.deepEqual(f.calls.detailIds,['12345']);
+  assert.equal(result.observations.length,1);noExportedSecrets(result);noFinancialActions(f);
+  await assert.rejects(read(f,['synthetic.one'],{onProgress:123}),{code:'BITPANEL_READ_LINK_UNVERIFIED'});
+});
+
+test('a delayed batch RPC cannot assign a fresh timestamp to an old browser snapshot',async()=>{
+  let elapsed=0;const f=fixture({clock:()=>new Date(NOW.getTime()+elapsed),afterBatch:()=>{elapsed=61_000;}});
+  const result=await read(f);
+  assert.equal(result.counts.verified,0);assert.deepEqual(result.counts.rejectionReasons,{STALE_OBSERVATION:1});
+  assert.equal(f.calls.passwordReads,0);assert.deepEqual(result.observations,[{requestIndex:0,status:'REJECTED',reason:'STALE_OBSERVATION'}]);
+  noExportedSecrets(result);noFinancialActions(f);
+});
+
+test('finishing later candidates invalidates an earlier verified row and removes its password from the return value',async()=>{
+  let clockReads=0;const f=fixture({pages:[[row('12345','synthetic.one'),row('23456','synthetic.two')]],
+    clock:()=>new Date(NOW.getTime()+(++clockReads>=4?61_000:0))});
+  const result=await read(f,['synthetic.one','synthetic.two']);
+  assert.equal(f.calls.passwordReads,1);assert.equal(result.counts.verified,0);assert.equal(result.counts.rejected,2);
+  assert.deepEqual(result.counts.rejectionReasons,{STALE_OBSERVATION:2});
+  assert.ok(result.observations.every(item=>item.status==='REJECTED'&&item.reason==='STALE_OBSERVATION'&&item.password===undefined));
+  assert.deepEqual(Object.keys(result.observations[0]),['requestIndex','status','reason']);noExportedSecrets(result);noFinancialActions(f);
+});
+
+test('saving or closing the read session and an asynchronous COMPLETE callback cannot extend any observation lease',async()=>{
+  for(const delayedStep of ['session','progress']){
+    let elapsed=0;const f=fixture({clock:()=>new Date(NOW.getTime()+elapsed)});
+    const result=await read(f,['synthetic.one'],delayedStep==='session'?{
+      withSession:async(cfg,task)=>{const result=await f.withSession(cfg,task);elapsed=61_000;return result;}
+    }:{onProgress:async frame=>{if(frame.phase==='COMPLETE')elapsed=61_000;}});
+    assert.equal(result.counts.verified,0);assert.deepEqual(result.counts.rejectionReasons,{STALE_OBSERVATION:1});
+    assert.equal(result.observations[0].password,undefined);noExportedSecrets(result);noFinancialActions(f);
+  }
+});
+
+test('pagination readiness uses the same visible cell text as the batch even when hidden text differs',async()=>{
+  const f=fixture({pages:[[row('12345','synthetic.one')],[row('23456','other')]],hiddenRowText:true}),result=await read(f);
+  assert.equal(result.counts.scannedPages,2);assert.equal(result.counts.verified,1);assert.equal(f.calls.earlyReads,0);
+  const stuck=fixture({pages:[[row('12345','synthetic.one')],[row('23456','other')]],hiddenRowText:true,staleNext:true});
+  await assert.rejects(read(stuck),{code:'BITPANEL_READ_TIMEOUT'});assert.equal(stuck.calls.passwordReads,0);
+  noExportedSecrets(result);noFinancialActions(f);noFinancialActions(stuck);
 });
