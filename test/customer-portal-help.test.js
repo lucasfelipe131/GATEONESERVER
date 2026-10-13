@@ -158,6 +158,38 @@ test('own portal AI requires session/CSRF and only shares scrubbed stateless hel
       }
       assert.deepEqual(await f.snapshot(),before);
     });
+    await t.test('plain verified menu paths normalize their separators without allowing HTML, attributes or unrelated comparisons',async()=>{
+      for(const [reply,expected] of [
+        ['No SS IPTV, abra Configurações > Conteúdo > Listas externas e confira a lista.',
+          'No SS IPTV, abra Configurações → Conteúdo → Listas externas e confira a lista.'],
+        ['Na TV Samsung, abra Home > Apps. Depois, consulte o guia.',
+          'Na TV Samsung, abra Home → Apps. Depois, consulte o guia.'],
+        ['Abra Sistema > Atualização do sistema > Verificar agora.',
+          'Abra Sistema → Atualização do sistema → Verificar agora.']
+      ]) {
+        f.setReply({reply,sourceIds:['guide-samsung']});
+        const response=await f.app.inject({method:'POST',url:path,headers:f.sessions[0],payload:{message:'Como configurar o SS IPTV na TV Samsung?'}});
+        assert.equal(response.statusCode,200,response.body);assert.equal(response.json().reply,expected);
+        assert.equal(response.json().readOnly,true);assert.equal(response.json().sources.length,1);
+      }
+      assert.match(f.captured.at(-1).input.instructions,/vírgulas ou a seta →/);
+      for(const reply of ['Configurações > Conteúdo <script>alert(1)</script>',
+        '<b>Configurações > Conteúdo</b>','Configurações > Conteúdo <img src=x onerror=alert(1)>',
+        'Configurações > Conteúdo onerror="alert(1)"','Configurações > Conteúdo href="javascript:alert(1)"',
+        'Configurações > Conteúdo &lt;script&gt;alert(1)&lt;/script&gt;',
+        'Configurações > Conteúdo javascript:alert(1)','Configurações > Conteúdo data:text/html,script',
+        'Configurações > Conteúdo > Opção desconhecida','O saldo é 12 > 9.',
+        `Configurações > Conteúdo. Use ${f.one.password}.`,
+        'Configurações > Conteúdo. Abra https://foreign.test/login.',
+        'Configurações > Conteúdo. Seu pagamento foi aprovado.',
+        'Configurações > Conteúdo. O plano custa R$ 99,00.']) {
+        f.setReply({reply,sourceIds:['guide-samsung']});
+        const response=await f.app.inject({method:'POST',url:path,headers:f.sessions[0],payload:{message:'Como configurar o SS IPTV na TV Samsung?'}});
+        assert.equal(response.statusCode,200,response.body);assert.match(response.json().reply,/Não consegui conferir/);
+        assert.deepEqual(response.json().sources,[]);assert.equal(response.body.includes(f.one.password),false);
+      }
+      assert.deepEqual(await f.snapshot(),before);assert.equal(network,0);
+    });
     await t.test('invented actuation, payments, foreign URLs, prices and secrets are replaced by safe guidance',async()=>{
       for(const reply of ['Renovei sua assinatura.','Seu pagamento foi aprovado.','Vou ativar seu plano.',`Use ${f.one.password}.`,
         `Use ${f.one.login}.`,`O usuário é ${f.two.login}.`,`A senha é ${f.two.password}.`,

@@ -52,11 +52,36 @@ export async function readCustomerHubProofPlans(db,{lock=false}={}) {
   return plans;
 }
 
+export function normalizeCustomerHubReadProofContent(information, source, date) {
+  const raw=Array.isArray(information?.posts) ? information.posts : [];
+  const noticesUrl=`${source.origin}/notices`,newsUrl=`${source.origin}/news`;
+  const fresh=value=>{
+    const age=date.getTime()-new Date(value).getTime();
+    return Number.isFinite(age) && age>=0 && age<=60_000;
+  };
+  const eligible=raw.slice(0,80).filter(post=>post?.source==='bitpanel' &&
+    [noticesUrl,newsUrl].includes(post.url) && fresh(post.verifiedAt));
+  const help=buildCustomerHelp({catalog:{posts:eligible,bitpanelSync:{status:'READY'}},now:date});
+  // The public boundary owns text/link/date filtering. Reuse only its accepted
+  // records; never cache a blocked raw post or loosen that boundary for proof.
+  const posts=help.telegram.posts.map(post=>({...post,source:'bitpanel'}));
+  const acceptedNotices=posts.filter(post=>post.url===noticesUrl).length;
+  const acceptedNews=posts.filter(post=>post.url===newsUrl).length;
+  const rawNotices=raw.filter(post=>post?.url===noticesUrl).length;
+  const rawNews=raw.filter(post=>post?.url===newsUrl).length;
+  return {information:{...information,posts},metadata:{rawPosts:raw.length,acceptedPosts:posts.length,
+    rejectedPosts:raw.length-posts.length,acceptedNotices,acceptedNews,
+    rejectedNotices:rawNotices-acceptedNotices,rejectedNews:rawNews-acceptedNews}};
+}
+
 function assertFreshContent(information, source, date) {
   const help=buildCustomerHelp({catalog:{posts:information.posts,dns:information.dns,bitpanelSync:{status:'READY'}},now:date});
   const age=value => date.getTime()-new Date(value).getTime();
   if(information.status!=='READY' || !Number.isFinite(age(information.verifiedAt)) || age(information.verifiedAt)<0 ||
-    age(information.verifiedAt)>60_000 || help.telegram.posts.length!==information.posts.length || help.dns.length!==information.dns.length ||
+    age(information.verifiedAt)>60_000 ||
+    !information.posts.some(post=>post.url===`${source.origin}/notices`) ||
+    !information.posts.some(post=>post.url===`${source.origin}/news`) ||
+    help.telegram.posts.length!==information.posts.length || help.dns.length!==information.dns.length ||
     help.telegram.posts.some(post=>!Number.isFinite(age(post.verifiedAt)) || age(post.verifiedAt)<0 || age(post.verifiedAt)>60_000) ||
     help.dns.some(item=>item.status!=='current' || item.sourceUrl!==`${source.origin}/notices` ||
       !Number.isFinite(age(item.verifiedAt)) || age(item.verifiedAt)<0 || age(item.verifiedAt)>60_000))
@@ -132,16 +157,20 @@ export async function runCustomerHubReadProof({db,config,runtimeConfig=()=>getRu
       throw fail('BITPANEL_READ_LINK_UNVERIFIED');
     if ((await testConnection(runtime))?.ok !== true) throw fail('BITPANEL_READ_REAUTH_REQUIRED');
     proofs.session={status:'READY',protectedSession:true};
-    const information=await readInformation(runtime);
+    const rawInformation=await readInformation(runtime);
+    const normalized=normalizeCustomerHubReadProofContent(rawInformation,source,now());
+    const information=normalized.information;
+    proofs.content={...proofs.content,...normalized.metadata};
     const contentSources=new Set([`${source.origin}/notices`,`${source.origin}/news`]);
     if(information?.source!==`${source.origin}/notices` || !Array.isArray(information.posts) || !information.posts.length ||
       information.dnsVerified!==true || !Array.isArray(information.dns) || !information.dns.length ||
       information.posts.some(post=>!contentSources.has(post.url)) ||
       information.dns.some(dns=>dns.sourceUrl!==`${source.origin}/notices` || dns.status!=='READY'))
       throw fail('READ_PROOF_CONTENT_UNAVAILABLE');
-    proofs.content={status:'READY',posts:information.posts.length,dns:information.dns.length,
+    proofs.content={status:'UNAVAILABLE',...normalized.metadata,posts:information.posts.length,dns:information.dns.length,
       sources:[...new Set([...information.posts.map(post=>post.url),...information.dns.map(dns=>dns.sourceUrl)])]};
     assertFreshContent(information,source,now());
+    proofs.content.status='READY';
     const plans=await readCustomerHubProofPlans(db);
     // Proposed quote policy stays in memory. This proof cannot activate it.
     const policy={enabled:true,planLabel:'30',unitPriceCents:3000,maxConnections:1,maxCreditsPerRenewal:12,plans};

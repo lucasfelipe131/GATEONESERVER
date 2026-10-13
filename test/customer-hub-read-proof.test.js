@@ -92,6 +92,45 @@ test('read proof caches only verified access and previews four calendars without
       assert.equal(proof.proved,false);assert.equal(proof.failures.READ_PROOF_CONTENT_UNAVAILABLE,1);assert.equal(broken.calls.access.length,0);
       assert.deepEqual(await counts(),before);
     });
+    await t.test('only the eight safe posts from a ten-post read are proved and cached; blocked text never reaches output or cache',async()=>{
+      const raw=information(),notice=raw.posts[0],news=raw.posts[1],secret='synthetic-private-content-never-cache';
+      raw.posts.push(...Array.from({length:6},(_,index)=>({...(index<2?notice:news),
+        title:`Atualização pública ${index+1}`,content:index<2?'Aviso público de manutenção programada.':'Novidade pública de aplicativos.'})),
+        {...notice,title:'Aviso protegido',content:`<script>${secret}</script>`},
+        {...notice,title:'Outro aviso protegido',content:`Senha: ${secret}`});
+      const expectedSha='a'.repeat(40),env={RAILWAY_PROJECT_ID:'a0f107fe-acaf-459f-a640-38ef6010d1e5',
+        RAILWAY_ENVIRONMENT_ID:'697f58fb-5084-4cb3-bd9a-ecdbc921b7bc',RAILWAY_GIT_COMMIT_SHA:expectedSha};
+      const previous=(await db.query("SELECT value FROM system_settings WHERE key='customer_help_catalog'")).rows[0];
+      try {
+        const injected=provider(),proof=await run({...injected,readInformation:async()=>raw,cacheContent:true,expectedSha,env});
+        assert.equal(proof.proved,true);assert.equal(proof.proofs.content.cacheStatus,'READY');
+        for(const [key,value] of Object.entries({rawPosts:10,acceptedPosts:8,rejectedPosts:2,acceptedNotices:3,acceptedNews:5,rejectedNotices:2,rejectedNews:0,posts:8,dns:1}))
+          assert.equal(proof.proofs.content[key],value);
+        const catalog=(await db.query("SELECT value FROM system_settings WHERE key='customer_help_catalog'")).rows[0].value;
+        assert.equal(catalog.posts.length,8);assert.ok(catalog.posts.every(post=>post.source==='bitpanel'));
+        assert.deepEqual(catalog.dns,raw.dns);assert.equal(JSON.stringify(catalog).includes(secret),false);
+        assert.equal(JSON.stringify(proof).includes(secret),false);assert.equal(JSON.stringify(proof).includes('<script>'),false);
+        assert.equal(proof.proofs.renewalPreview.submitted,0);assert.equal(proof.realTestCharges,0);assert.equal(proof.realTestMessages,0);assert.equal(proof.realTestRenewals,0);
+      } finally {
+        if(previous)await db.query("UPDATE system_settings SET value=$1::jsonb WHERE key='customer_help_catalog'",[JSON.stringify(previous.value)]);
+        else await db.query("DELETE FROM system_settings WHERE key='customer_help_catalog'");
+      }
+      assert.deepEqual(await counts(),before);
+    });
+    await t.test('a missing safe source, stale post or partially rejected DNS remains blocked before any customer read',async()=>{
+      const patches=[info=>({...info,posts:info.posts.filter(post=>post.url.endsWith('/notices'))}),
+        info=>({...info,posts:info.posts.filter(post=>post.url.endsWith('/news'))}),
+        info=>({...info,posts:info.posts.map(post=>post.url.endsWith('/news')?{...post,content:'senha: private'}:post)}),
+        info=>({...info,posts:info.posts.map(post=>post.url.endsWith('/news')?{...post,verifiedAt:new Date(now().getTime()-60_001).toISOString()}:post)}),
+        info=>({...info,dns:[...info.dns,{...info.dns[0],value:'http://localhost'}]}),
+        info=>({...info,dns:info.dns.map(dns=>({...dns,verifiedAt:new Date(now().getTime()-60_001).toISOString()}))})];
+      for(const patch of patches) {
+        const injected=provider(),proof=await run({...injected,readInformation:async()=>patch(information())});
+        assert.equal(proof.proved,false);assert.equal(proof.proofs.content.status,'UNAVAILABLE');
+        assert.equal(proof.failures.READ_PROOF_CONTENT_UNAVAILABLE,1);assert.equal(injected.calls.access.length,0);assert.equal(injected.calls.previews.length,0);
+        assert.equal(JSON.stringify(proof).includes('senha: private'),false);assert.deepEqual(await counts(),before);
+      }
+    });
     await t.test('three mismatching customers exhaust the bound and dynamic errors are replaced by fixed codes',async()=>{
       const injected=provider({mismatch:['9002','9003','9004','9005']}),proof=await run(injected);
       assert.equal(proof.proved,false);assert.deepEqual(injected.calls.access,['9002','9003','9004']);

@@ -4,6 +4,7 @@ artifacts/
 data/bitpanel-logins-*.json
 bitpanel-session.json
 data/bitpanel-auth/
+data/bitpanel-auth-*.err
 coverage/
 *.log
 .DS_Store
