@@ -176,14 +176,22 @@ export async function runCustomerHubReadProof({db,config,runtimeConfig=()=>getRu
     const policy={enabled:true,planLabel:'30',unitPriceCents:3000,maxConnections:1,maxCreditsPerRenewal:12,plans};
     const previewConfig={...runtime,BITPANEL_AUTOMATIC_RENEWAL_POLICY:policy};
     const sync=new CustomerAccessSync({db,config:{...config,BITPANEL_BASE_URL:source.origin},now,readInformation:null});
+    // A matching recent cache only chooses which account to try first. The
+    // live read and all four provider quotes below remain mandatory.
     const candidates=(await db.query(`SELECT c.id FROM customers c
-      JOIN LATERAL (SELECT bitpanel_list_id FROM subscriptions WHERE customer_id=c.id
+      JOIN LATERAL (SELECT id,bitpanel_list_id FROM subscriptions WHERE customer_id=c.id
         ORDER BY created_at DESC,id DESC LIMIT 1) s ON true
+      LEFT JOIN customer_access_sync a ON a.customer_id=c.id
       WHERE c.automation_eligible IS TRUE AND c.whatsapp_e164 ~ '^[1-9][0-9]{7,14}$'
         AND c.bitpanel_reference IS NOT NULL AND trim(c.bitpanel_reference)<>''
         AND regexp_replace(lower(normalize(c.bitpanel_owner,NFD)),'[^a-z0-9]','','g') IN ('gateoneproserver','gateoneserver')
         AND s.bitpanel_list_id ~ '^[1-9][0-9]{0,19}$'
-      ORDER BY c.id LIMIT 5`)).rows;
+      ORDER BY CASE WHEN a.status='READY' AND a.subscription_id=s.id AND a.list_id=s.bitpanel_list_id
+        AND a.username=c.bitpanel_reference AND a.owner=c.bitpanel_owner AND a.verified_whatsapp_e164=c.whatsapp_e164
+        AND a.source_url=$2 || '/list/view/' || s.bitpanel_list_id
+        AND a.verified_at IS NOT NULL AND a.verified_at <= $1::timestamptz
+        AND a.verified_at >= $1::timestamptz - interval '24 hours'
+        THEN 0 ELSE 1 END,c.id LIMIT 5`,[now().toISOString(),source.origin])).rows;
     for(const candidate of candidates) {
       if(proofs.customerAccess.attempted>=3) break;
       const binding=await sync.binding(db,candidate.id);

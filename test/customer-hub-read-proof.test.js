@@ -139,6 +139,66 @@ test('read proof caches only verified access and previews four calendars without
       assert.equal(unavailable.proved,false);assert.equal(unavailable.failures.READ_PROOF_UNAVAILABLE,1);
       assert.equal(JSON.stringify(unavailable).includes('private username'),false);assert.deepEqual(await counts(),before);
     });
+    await t.test('a matching recent READY cache prioritizes a later account but cannot replace its new read or four quotes',async()=>{
+      const customer='00000000-0000-4000-8000-000000000005';
+      await db.query("UPDATE customer_access_sync SET status='STALE'");
+      const markReady=()=>db.query(`INSERT INTO customer_access_sync(customer_id,subscription_id,list_id,username,owner,
+        verified_whatsapp_e164,source_url,verified_at,attempted_at,status)
+        SELECT c.id,s.id,s.bitpanel_list_id,c.bitpanel_reference,c.bitpanel_owner,c.whatsapp_e164,
+          'https://bitpanel.vip/list/view/9005',$2::timestamptz,$2::timestamptz,'READY'
+        FROM customers c JOIN LATERAL (SELECT id,bitpanel_list_id FROM subscriptions WHERE customer_id=c.id
+          ORDER BY created_at DESC,id DESC LIMIT 1) s ON true WHERE c.id=$1
+        ON CONFLICT(customer_id) DO UPDATE SET subscription_id=EXCLUDED.subscription_id,list_id=EXCLUDED.list_id,
+          username=EXCLUDED.username,owner=EXCLUDED.owner,verified_whatsapp_e164=EXCLUDED.verified_whatsapp_e164,
+          source_url=EXCLUDED.source_url,verified_at=EXCLUDED.verified_at,attempted_at=EXCLUDED.attempted_at,status='READY'`,[customer,now().toISOString()]);
+      const staleFirstProvider=()=>{
+        const injected=provider(),read=injected.readAccess;
+        injected.readAccess=async(runtime,binding)=>{
+          if(binding.listId==='9002') {
+            injected.calls.access.push(binding.listId);throw Object.assign(Error('synthetic unavailable account'),{code:'BITPANEL_READ_UNAVAILABLE'});
+          }
+          return read(runtime,binding);
+        };
+        return injected;
+      };
+      await markReady();
+      const selected=staleFirstProvider(),proof=await run(selected);
+      assert.equal(proof.proved,true);assert.deepEqual(selected.calls.access,['9005']);
+      assert.deepEqual(selected.calls.previews.map(item=>item.duration_months),[1,3,6,12]);
+      assert.equal(proof.proofs.customerAccess.attempted,1);assert.equal(proof.proofs.renewalPreview.validated,4);
+      const otherSubscription=(await db.query('SELECT id FROM subscriptions WHERE customer_id=$1',[`00000000-0000-4000-8000-000000000004`])).rows[0].id;
+      for(const [field,value] of [['status','STALE'],['subscription_id',otherSubscription],['list_id','9006'],['username','another.exact.user'],
+        ['owner','Other reseller'],['verified_whatsapp_e164','5511999999598'],['source_url','https://outside.invalid/list/view/9005'],
+        ['verified_at',new Date(now().getTime()+1).toISOString()],['verified_at',new Date(now().getTime()-24*60*60_000-1).toISOString()],
+        ['verified_at',null],['verified_at','infinity'],['verified_at','-infinity']]) {
+        await markReady();
+        await db.query(`UPDATE customer_access_sync SET ${field}=$2 WHERE customer_id=$1`,[customer,value]);
+        const notPreferred=staleFirstProvider(),failed=await run(notPreferred);
+        assert.equal(failed.proved,false);assert.deepEqual(notPreferred.calls.access,['9002']);
+        assert.equal(failed.failures.BITPANEL_READ_UNAVAILABLE,1);assert.equal(notPreferred.calls.previews.length,0);
+      }
+      await markReady();
+      const staleLive=staleFirstProvider();
+      staleLive.readAccess=async(_runtime,binding)=>{staleLive.calls.access.push(binding.listId);
+        throw Object.assign(Error('synthetic changed provider binding'),{code:'BITPANEL_READ_LINK_UNVERIFIED'});};
+      const noLiveProof=await run(staleLive);
+      assert.equal(noLiveProof.proved,false);assert.equal(staleLive.calls.access[0],'9005');
+      assert.equal(staleLive.calls.access.length,3);assert.equal(staleLive.calls.previews.length,0);
+      await markReady();
+      const incomplete=staleFirstProvider(),preview=incomplete.previewRenewal;
+      incomplete.previewRenewal=async(runtime,renewal)=>{
+        if(renewal.duration_months===12){incomplete.calls.previews.push(renewal);
+          throw Object.assign(Error('synthetic annual form unavailable'),{code:'RENEWAL_PREVIEW_UNAVAILABLE'});}
+        return preview(runtime,renewal);
+      };
+      const noFourQuotes=await run(incomplete);
+      assert.equal(noFourQuotes.proved,false);assert.equal(noFourQuotes.failures.RENEWAL_PREVIEW_UNAVAILABLE,1);
+      assert.deepEqual(incomplete.calls.access,['9005']);assert.deepEqual(incomplete.calls.previews.map(item=>item.duration_months),[1,3,6,12]);
+      assert.equal(noFourQuotes.proofs.renewalPreview.validated,0);
+      const output=JSON.stringify([proof,noLiveProof,noFourQuotes]);
+      for(const secret of [customer,'synthetic.user','synthetic-password','55119999995','/list/view/'])assert.equal(output.includes(secret),false);
+      assert.deepEqual(await counts(),before);
+    });
     assert.equal(networkCalls,0);
   }finally{globalThis.fetch=fetchBefore;await pg.close();}
 });

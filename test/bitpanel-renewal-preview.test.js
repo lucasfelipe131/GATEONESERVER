@@ -15,21 +15,34 @@ const subject = (code='monthly',months=1) => ({id:'synthetic-job',bitpanel_list_
 // This page models the current labelled search and <li><b>Label:</b> value
 // markup. Every final click is a local counter; no browser or provider runs.
 function fixture(options={}) {
-  const calls={finalLookups:0,finalClicks:0,passwordReads:0,closes:0,screenshots:0,menus:0,balanceReads:0,urls:[]};
-  let currentUrl,dialogVisible=false,dropdown,selectedMonths=1,selectedPlan='30';
+  const calls={finalLookups:0,finalClicks:0,passwordReads:0,closes:0,screenshots:0,menus:0,balanceReads:0,urls:[],waitMs:0,optionClicks:0,
+    optionBatches:0,optionReads:0,optionVisibilityReads:0,optionCountReads:0,fieldVisibilityReads:0,
+    fieldClickAttempts:0,fieldClickTimeouts:[],optionClickAttempts:0,optionClickTimeouts:[]};
+  let currentUrl,dialogVisible=Boolean(options.preexistingDialog),dropdown,selectedMonths=1,selectedPlan='30',openedAt=0,optionOpenedAt=0,planSelectedAt=null;
+  const loading=()=>dialogVisible && (options.permanentLoading || calls.waitMs-openedAt<(options.loadingMs || 0));
+  const unavailable=()=>Boolean(options.unknownDialog || loading());
   const beforeExpiry=options.beforeExpiry || '31/12/2026';
   const rows=options.rows || [['client.one',beforeExpiry,'Gate One Pro Server','12345','Ativa']];
   const one = text => ({count:async()=>1,first(){return this;},waitFor:async()=>{},innerText:async()=>text});
   const search={isVisible:async()=>true,fill:async value=>assert.equal(value,'client.one')};
   const empty={count:async()=>0};
   const dialog={
-    count:async()=>dialogVisible?1:0,isVisible:async()=>dialogVisible,
-    waitFor:async({state})=>assert.equal(dialogVisible,state==='visible'),
-    innerText:async()=>typeof options.quote==='function'?options.quote(calls):options.quote || `Renovar lista #12345.\nValor da unidade: R$ 30,00\nPlano: ${selectedPlan}\nTotal de conexões: 1\nQuantidade de meses: ${selectedMonths}\nTotal em créditos: ${selectedMonths}\nValor total: R$ ${30*selectedMonths},00\nSAIR\nRENOVAR`,
-    getByRole:(_role,{name})=>{
-      if(name instanceof RegExp && name.test('Selecione o plano'))return{count:async()=>1,click:async()=>{dropdown='plan';}};
-      if(name instanceof RegExp && name.test('Selecione a validade'))return{count:async()=>1,click:async()=>{dropdown='months';}};
-      if(name instanceof RegExp && name.test('SAIR'))return{count:async()=>options.missingExit?0:1,click:async()=>{calls.closes++;dialogVisible=false;}};
+    count:async()=>{options.onDialogCount?.(calls);return dialogVisible?(options.duplicateDialogs && calls.menus?2:1):0;},
+    isVisible:async()=>{options.onDialogVisible?.(calls);return dialogVisible;},
+    waitFor:async({state,timeout})=>{calls.closeWaitTimeout=timeout;assert.equal(dialogVisible,state==='visible');},
+    innerText:async()=>options.unknownDialog?'Provider private unexpected notice\nFechar':loading()?'Aguarde...\nFechar':typeof options.quote==='function'?options.quote(calls):options.quote || `Renovar lista #12345.\nValor da unidade: R$ 30,00\nPlano: ${selectedPlan}\nTotal de conexões: 1\nQuantidade de meses: ${selectedMonths}\nTotal em créditos: ${selectedMonths}\nValor total: R$ ${30*selectedMonths},00\nSAIR\nRENOVAR`,
+    locator:()=>({count:async()=>unavailable()?(options.loadingFields || 0):2}),
+    getByRole:(_role,{name}={})=>{
+      if(name===undefined)return{count:async()=>unavailable()?1:4};
+      const field = kind => ({count:async()=>kind==='plan'?(unavailable()?0:options.duplicatePlan?2:1):
+        unavailable() || (options.validityDelayMs && (planSelectedAt===null || calls.waitMs-planSelectedAt<options.validityDelayMs))?0:1,
+        isVisible:async()=>{calls.fieldVisibilityReads++;options.onFieldVisible?.(calls);return!unavailable();},
+        click:async args=>{calls.fieldClickAttempts++;calls.fieldClickTimeouts.push(args?.timeout);options.onFieldClick?.(calls);
+          if(options.fieldClickThrows)throw Error('private obstructed field');dropdown=kind;optionOpenedAt=calls.waitMs;}});
+      if(name instanceof RegExp && name.test('Selecione o plano'))return field('plan');
+      if(name instanceof RegExp && name.test('Selecione a validade'))return field('months');
+      if(name instanceof RegExp && name.test('Fechar'))return{count:async()=>unavailable() || options.extraClose?1:0,isVisible:async()=>true,click:async args=>{calls.closes++;calls.closeClickTimeout=args?.timeout;dialogVisible=false;options.onCloseClick?.();if(options.closeThrows)throw Error('private close error');}};
+      if(name instanceof RegExp && name.test('SAIR'))return{count:async()=>unavailable() || options.missingExit?0:1,isVisible:async()=>true,click:async args=>{calls.closes++;calls.closeClickTimeout=args?.timeout;dialogVisible=false;options.onCloseClick?.();if(options.closeThrows)throw Error('private close error');}};
       assert.equal(name,'Renovar');calls.finalLookups++;
       return{count:async()=>1,click:async()=>{calls.finalClicks++;dialogVisible=false;}};
     }
@@ -43,7 +56,7 @@ function fixture(options={}) {
         if(id)currentUrl=`https://bitpanel.vip/list/view/${id}`;
       }
     },
-    waitForTimeout:async()=>{},waitForLoadState:async(state,options)=>{assert.equal(state,'networkidle');assert.deepEqual(options,{timeout:20000});},screenshot:async()=>{calls.screenshots++;},
+    waitForTimeout:async ms=>{calls.waitMs+=ms;if(options.redirectOnWait && calls.menus)currentUrl=options.redirectOnWait;},waitForLoadState:async(state,options)=>{assert.equal(state,'networkidle');assert.deepEqual(options,{timeout:20000});},screenshot:async()=>{calls.screenshots++;},
     getByLabel:()=>({count:async()=>1,nth:()=>search}),
     getByText:pattern=>{
       if(pattern.test('Créditos disponíveis: 90')) {
@@ -58,7 +71,7 @@ function fixture(options={}) {
       return one(pattern.source.includes('Usuário')?'Usuário:':pattern.source.includes('Senha')?'Senha:':'Data de validade:');
     },
     getByRole:(role,{name})=>{
-      if(role==='menuitem')return{click:async()=>{assert.equal(name,'Renovar');calls.menus++;dialogVisible=true;}};
+      if(role==='menuitem')return{click:async()=>{assert.equal(name,'Renovar');calls.menus++;dialogVisible=true;openedAt=calls.waitMs;if(options.redirectOnMenu)currentUrl=options.redirectOnMenu;}};
       assert.equal(name,'Next page');return{count:async()=>1,isEnabled:async()=>Boolean(options.next)};
     },
     locator:selector=>{
@@ -73,10 +86,31 @@ function fixture(options={}) {
       if(selector==='.v-dialog--active')return dialog;
       if(selector.startsWith('i[title='))return{count:async()=>1,click:async()=>{}};
       if(selector.startsWith('[role="option"]')) {
-        const labels=dropdown==='plan'?['130, R$30,00','30, R$30,00']:['1 Mês','3 Meses','6 Meses','12 Meses'];
-        return{count:async()=>labels.length,nth:index=>({isVisible:async()=>true,innerText:async()=>labels[index],click:async()=>{
+        let labels=[...(dropdown==='plan'?(options.planLabels || ['130, R$30,00','30, R$30,00']):(options.monthLabels || ['1 Mês','3 Meses','6 Meses','12 Meses']))],hidden=options.hiddenOptions;
+        let batched=false;
+        return{evaluateAll:async evaluate=>{
+          calls.optionBatches++;
+          const ready=calls.waitMs-optionOpenedAt>=(options.optionDelayMs || 0);
+          const nodes=ready?labels.map(label=>({innerText:label,isConnected:true,
+            ownerDocument:{defaultView:{getComputedStyle:()=>({visibility:hidden?'hidden':'visible',display:'block'})}},
+            getBoundingClientRect:()=>({width:100,height:30})})):[];
+          const result=evaluate(nodes);
+          if(dropdown==='plan'&&!batched) {
+            if(options.reorderAfterBatch)labels.reverse();
+            if(options.duplicateAfterBatch)labels.push('30, R$30,00');
+            if(options.hideAfterBatch)hidden=true;
+            if(options.redirectAfterBatch)currentUrl=options.redirectAfterBatch;
+          }
+          batched=true;return result;
+        },count:async()=>{calls.optionCountReads++;return calls.waitMs-optionOpenedAt<(options.optionDelayMs || 0)?0:labels.length;},
+        nth:index=>({isVisible:async()=>{calls.optionVisibilityReads++;return!hidden;},innerText:async()=>{
+          calls.optionReads++;return options.changeCandidateRead && dropdown==='plan'?'30, R$31,00':labels[index];
+        },click:async args=>{
+          calls.optionClickAttempts++;calls.optionClickTimeouts.push(args?.timeout);options.onOptionClick?.(calls);
+          if(options.optionClickThrows)throw Error('private disabled or obstructed option');
+          calls.optionClicks++;
           if(dropdown==='months')selectedMonths=Number(labels[index].match(/^\d+/)[0]);
-          else selectedPlan=labels[index].match(/^\d+/)[0];
+          else {selectedPlan=labels[index].match(/^\d+/)[0];planSelectedAt=calls.waitMs;}
         }})};
       }
       return empty;
@@ -210,4 +244,138 @@ test('preview sanitizes unexpected provider errors and does not depend on the ex
   await assert.rejects(previewBitPanelRenewal(config,subject(),{withSession:async()=>{throw Error('synthetic-secret unexpected DOM content');}}),error=>error.code==='RENEWAL_PREVIEW_UNAVAILABLE'&&!error.message.includes('synthetic-secret'));
   const f=fixture();await assert.rejects(previewBitPanelRenewal(config,{...subject(),charge_stage:'new_sale'},f),{code:'BITPANEL_READ_LINK_UNVERIFIED'});
   assert.equal(f.calls.finalClicks,0);
+});
+
+test('a provider Aguarde dialog transitions to the form and options hydrate before exact selection',async()=>{
+  const f=fixture({loadingMs:2400,optionDelayMs:800,validityDelayMs:600});
+  const result=await previewBitPanelRenewal(config,subject(),f);
+  assert.equal(result.prepared,true);assert.equal(result.quote.months,1);
+  assert.equal(f.calls.menus,1);assert.equal(f.calls.optionClicks,2);assert.equal(f.calls.closes,1);
+  assert.ok(f.calls.waitMs>=4700);
+  assert.equal(f.calls.finalLookups,0);assert.equal(f.calls.finalClicks,0);assert.equal(f.calls.passwordReads,0);
+});
+
+test('a permanent Aguarde reaches its bounded timeout and only closes the nonfinancial Fechar control',async()=>{
+  const f=fixture({permanentLoading:true});
+  await assert.rejects(previewBitPanelRenewal(config,subject(),f),{code:'RENEWAL_PREVIEW_UNAVAILABLE'});
+  assert.ok(f.calls.waitMs>=12000);assert.ok(f.calls.waitMs<=12700);
+  assert.equal(f.calls.closes,1);assert.equal(f.calls.optionClicks,0);
+  assert.equal(f.calls.finalLookups,0);assert.equal(f.calls.finalClicks,0);assert.equal(f.calls.passwordReads,0);assert.equal(f.calls.screenshots,0);
+});
+
+test('preexisting, duplicate and unrecognized dialogs are blocked before any option or actuator',async()=>{
+  for(const patch of [{preexistingDialog:true},{duplicateDialogs:true},{unknownDialog:true},{duplicatePlan:true},
+    {permanentLoading:true,loadingFields:1}]) {
+    const f=fixture(patch);
+    await assert.rejects(previewBitPanelRenewal(config,subject(),f),error=>
+      error.code==='RENEWAL_PREVIEW_UNAVAILABLE'&&!error.message.includes('private'));
+    assert.equal(f.calls.optionClicks,0);assert.equal(f.calls.finalLookups,0);assert.equal(f.calls.finalClicks,0);assert.equal(f.calls.passwordReads,0);
+    if(patch.preexistingDialog)assert.equal(f.calls.menus,0);
+    if(patch.unknownDialog || patch.loadingFields)assert.equal(f.calls.closes,0);
+  }
+});
+
+test('source changes during form loading or option hydration cannot select an option or close a foreign dialog',async()=>{
+  for(const patch of [{redirectOnMenu:'https://foreign.example/list'},
+    {loadingMs:2000,redirectOnWait:'https://bitpanel.vip/login'},
+    {optionDelayMs:800,redirectOnWait:'https://foreign.example/list'}]) {
+    const f=fixture(patch);
+    await assert.rejects(previewBitPanelRenewal(config,subject(),f),{code:patch.redirectOnWait?.includes('/login')?
+      'BITPANEL_READ_REAUTH_REQUIRED':'BITPANEL_READ_LINK_UNVERIFIED'});
+    assert.equal(f.calls.optionClicks,0);assert.equal(f.calls.closes,0);assert.equal(f.calls.finalLookups,0);assert.equal(f.calls.finalClicks,0);
+  }
+});
+
+test('renewal selection requires a unique visible exact option and cannot choose a substring month or wrong price',async()=>{
+  for(const patch of [{planLabels:['30, R$30,00','30, R$30,00']},{planLabels:['30, R$31,00']},{hiddenOptions:true}]) {
+    const f=fixture(patch);await assert.rejects(previewBitPanelRenewal(config,subject(),f),{code:'RENEWAL_PREVIEW_UNAVAILABLE'});
+    assert.equal(f.calls.optionClicks,0);assert.equal(f.calls.finalLookups,0);assert.equal(f.calls.finalClicks,0);
+  }
+  const wrongMonth=fixture({monthLabels:['13 Meses']});
+  await assert.rejects(previewBitPanelRenewal(config,subject('quarterly',3),wrongMonth),{code:'RENEWAL_PREVIEW_UNAVAILABLE'});
+  assert.equal(wrongMonth.calls.optionClicks,1);assert.equal(wrongMonth.calls.finalLookups,0);assert.equal(wrongMonth.calls.finalClicks,0);
+});
+
+test('cleanup failures retain the primary fixed failure and ambiguous close controls never click',async()=>{
+  const badQuote=fixture({quote:'private invalid quote',missingExit:true});
+  await assert.rejects(previewBitPanelRenewal(config,subject(),badQuote),error=>
+    error.code==='RENEWAL_PROVIDER_QUOTE_MISMATCH'&&error.cleanupCode==='RENEWAL_PREVIEW_CLOSE_FAILED'&&!error.message.includes('private'));
+  const stuck=fixture({permanentLoading:true,closeThrows:true});
+  await assert.rejects(previewBitPanelRenewal(config,subject(),stuck),error=>
+    error.code==='RENEWAL_PREVIEW_UNAVAILABLE'&&error.cleanupCode==='RENEWAL_PREVIEW_CLOSE_FAILED'&&!error.message.includes('private'));
+  const ambiguous=fixture({extraClose:true});
+  await assert.rejects(previewBitPanelRenewal(config,subject(),ambiguous),{code:'RENEWAL_PREVIEW_CLOSE_FAILED'});
+  assert.equal(ambiguous.calls.closes,0);
+  for(const f of [badQuote,stuck,ambiguous]) {assert.equal(f.calls.finalLookups,0);assert.equal(f.calls.finalClicks,0);assert.equal(f.calls.passwordReads,0);}
+});
+
+test('one hundred option nodes use bounded DOM batches and only read the two selected candidates via individual RPCs',async()=>{
+  const planLabels=[...Array.from({length:99},(_,index)=>`${index+100}, R$30,00`),'30, R$30,00'];
+  const monthLabels=Array.from({length:12},(_,index)=>`${index+1} ${index===0?'Mês':'Meses'}`);
+  const f=fixture({planLabels,monthLabels});
+  const result=await previewBitPanelRenewal(config,subject(),f);
+  assert.equal(result.prepared,true);assert.equal(result.quote.months,1);
+  assert.equal(f.calls.optionBatches,4);assert.equal(f.calls.optionReads,2);assert.equal(f.calls.optionVisibilityReads,2);
+  assert.equal(f.calls.optionCountReads,0);assert.equal(f.calls.optionClicks,2);
+  assert.equal(f.calls.finalLookups,0);assert.equal(f.calls.finalClicks,0);assert.equal(f.calls.passwordReads,0);
+});
+
+test('reordered, duplicated, hidden or relabelled candidates between snapshots cannot click any option',async()=>{
+  for(const patch of [{reorderAfterBatch:true},{duplicateAfterBatch:true},{hideAfterBatch:true},{changeCandidateRead:true}]) {
+    const f=fixture(patch);
+    await assert.rejects(previewBitPanelRenewal(config,subject(),f),{code:'RENEWAL_PREVIEW_UNAVAILABLE'});
+    assert.equal(f.calls.optionClicks,0);assert.equal(f.calls.finalLookups,0);assert.equal(f.calls.finalClicks,0);assert.equal(f.calls.passwordReads,0);
+    assert.equal(f.calls.closes,1);
+  }
+});
+
+test('oversized option batches and source changes while batching cannot authorize any selection',async()=>{
+  for(const [patch,code] of [[{planLabels:Array.from({length:101},()=> '30, R$30,00')},'RENEWAL_PREVIEW_UNAVAILABLE'],
+    [{redirectAfterBatch:'https://foreign.example/list'},'BITPANEL_READ_LINK_UNVERIFIED']]) {
+    const f=fixture(patch);await assert.rejects(previewBitPanelRenewal(config,subject(),f),{code});
+    assert.equal(f.calls.optionClicks,0);assert.equal(f.calls.finalLookups,0);assert.equal(f.calls.finalClicks,0);
+  }
+});
+
+test('the safe close click and disappearance share a total five-second budget',async t=>{
+  let now=0;t.mock.method(Date,'now',()=>now);
+  const f=fixture({onCloseClick:()=>{now+=4000;}});
+  const result=await previewBitPanelRenewal(config,subject(),f);
+  assert.equal(result.prepared,true);assert.equal(f.calls.closeClickTimeout,5000);assert.equal(f.calls.closeWaitTimeout,1000);
+  assert.equal(f.calls.finalLookups,0);assert.equal(f.calls.finalClicks,0);
+});
+
+test('field opening and exact option selection share the same remaining five-second deadline',async t=>{
+  let now=0;t.mock.method(Date,'now',()=>now);
+  const f=fixture({onFieldClick:()=>{now+=4000;}});
+  const result=await previewBitPanelRenewal(config,subject(),f);
+  assert.equal(result.prepared,true);assert.equal(f.calls.optionClicks,2);
+  assert.deepEqual(f.calls.fieldClickTimeouts,[5000,5000]);assert.deepEqual(f.calls.optionClickTimeouts,[1000,1000]);
+  assert.equal(f.calls.finalLookups,0);assert.equal(f.calls.finalClicks,0);
+});
+
+test('late last modal RPCs expire the field or option budget before another click can start',async t=>{
+  let now=0;t.mock.method(Date,'now',()=>now);
+  const field=fixture({onDialogVisible:calls=>{if(calls.fieldVisibilityReads===2 && !calls.fieldClickAttempts)now=6000;}});
+  await assert.rejects(previewBitPanelRenewal(config,subject(),field),{code:'RENEWAL_PREVIEW_UNAVAILABLE'});
+  assert.equal(field.calls.fieldClickAttempts,0);assert.equal(field.calls.optionClickAttempts,0);
+  now=0;
+  const option=fixture({onDialogCount:calls=>{if(calls.optionReads===1)now=6000;}});
+  await assert.rejects(previewBitPanelRenewal(config,subject(),option),{code:'RENEWAL_PREVIEW_UNAVAILABLE'});
+  assert.equal(option.calls.fieldClickAttempts,1);assert.equal(option.calls.optionClickAttempts,0);
+  for(const f of [field,option]) {assert.equal(f.calls.finalLookups,0);assert.equal(f.calls.finalClicks,0);}
+});
+
+test('obstructed field and option clicks receive only the remaining budget and expose a fixed failure',async t=>{
+  let now=0;t.mock.method(Date,'now',()=>now);
+  const field=fixture({fieldClickThrows:true,onFieldVisible:calls=>{if(calls.fieldVisibilityReads===3)now=2000;}});
+  await assert.rejects(previewBitPanelRenewal(config,subject(),field),error=>
+    error.code==='RENEWAL_PREVIEW_UNAVAILABLE'&&!error.message.includes('private'));
+  assert.deepEqual(field.calls.fieldClickTimeouts,[3000]);assert.equal(field.calls.optionClickAttempts,0);
+  now=0;
+  const option=fixture({optionClickThrows:true,onFieldClick:()=>{now=4000;}});
+  await assert.rejects(previewBitPanelRenewal(config,subject(),option),error=>
+    error.code==='RENEWAL_PREVIEW_UNAVAILABLE'&&!error.message.includes('private'));
+  assert.deepEqual(option.calls.optionClickTimeouts,[1000]);assert.equal(option.calls.optionClicks,0);
+  for(const f of [field,option]) {assert.equal(f.calls.finalLookups,0);assert.equal(f.calls.finalClicks,0);assert.equal(f.calls.passwordReads,0);}
 });

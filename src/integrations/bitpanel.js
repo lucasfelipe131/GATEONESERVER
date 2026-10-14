@@ -271,18 +271,149 @@ async function findListByUsername(page, config, username) {
   return matches[0] || null;
 }
 
-async function selectVuetifyOption(page, scope, buttonName, optionNames) {
+function assertRenewalListSource(page, baseUrl) {
+  if (page.url() === `${baseUrl}/list`) return;
+  let current;
+  try { current = new URL(page.url()); } catch { throw readFailure('BITPANEL_READ_LINK_UNVERIFIED'); }
+  throw readFailure(current.origin === baseUrl && current.pathname.includes('/login') ?
+    'BITPANEL_READ_REAUTH_REQUIRED' : 'BITPANEL_READ_LINK_UNVERIFIED');
+}
+
+const renewalLoadingControls = 'form, input, textarea, select, iframe, [role="combobox"], [role="textbox"], [role="slider"], [contenteditable="true"]';
+const isRenewalLoadingText = text => /^aguarde(?:\.{3}|…)?$/i.test(String(text || '')
+  .replace(/\s*\bFechar\s*$/i, '').replace(/\s+/g, ' ').trim());
+
+async function loadingDialogShape(dialog) {
+  if (await dialog.locator(renewalLoadingControls).count() !== 0) return false;
+  const buttons = dialog.getByRole('button');
+  const close = dialog.getByRole('button', { name: /^Fechar$/i, exact: true });
+  return await buttons.count() === 1 && await close.count() === 1 && await close.isVisible() &&
+    isRenewalLoadingText(await dialog.innerText());
+}
+
+async function waitForRenewalForm(page, baseUrl) {
+  const timeoutMs = 12_000, deadline = Date.now() + timeoutMs;
+  let waitBudget = timeoutMs;
+  while (Date.now() < deadline && waitBudget > 0) {
+    assertRenewalListSource(page, baseUrl);
+    const dialog = page.locator('.v-dialog--active'), count = await dialog.count();
+    if (count > 1) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+    if (count === 1 && await dialog.isVisible()) {
+      const plan = dialog.getByRole('button', { name: /^Selecione o plano/ });
+      const validity = dialog.getByRole('button', { name: /^Selecione a validade/ });
+      const planCount = await plan.count(), validityCount = await validity.count();
+      if (planCount > 1 || validityCount > 1) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+      if (planCount === 1 && await plan.isVisible()) {
+        assertRenewalListSource(page, baseUrl);
+        if (await dialog.count() !== 1) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+        return dialog;
+      }
+      if (planCount === 0 && validityCount === 0 && !await loadingDialogShape(dialog))
+        throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+    }
+    assertRenewalListSource(page, baseUrl);
+    const delay = Math.min(200, waitBudget, Math.max(0, deadline - Date.now()));
+    if (!delay) break;
+    await page.waitForTimeout(delay); waitBudget -= delay;
+  }
+  throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+}
+
+async function readRenewalOptionSnapshot(options) {
+  const snapshot = await options.evaluateAll(elements => {
+    if (elements.length > 100) return {count:elements.length,rows:[]};
+    return {count:elements.length,rows:elements.map((element,index) => {
+      const style = element.ownerDocument?.defaultView?.getComputedStyle(element);
+      const bounds = element.getBoundingClientRect();
+      const visible = element.isConnected && style?.visibility === 'visible' && style.display !== 'none' &&
+        bounds.width > 0 && bounds.height > 0;
+      return {index,visible:Boolean(visible),label:element.innerText || ''};
+    })};
+  });
+  if (!Number.isSafeInteger(snapshot?.count) || snapshot.count < 0 || snapshot.count > 100 ||
+      !Array.isArray(snapshot.rows) || snapshot.rows.length !== snapshot.count ||
+      snapshot.rows.some((row,index) => row?.index !== index || typeof row.visible !== 'boolean' ||
+        typeof row.label !== 'string' || row.label.length > 1000)) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+  return snapshot.rows;
+}
+
+async function selectVuetifyOption(page, scope, buttonName, optionNames, { renewalBaseUrl } = {}) {
+  const renewalDeadline = renewalBaseUrl ? Date.now() + 5_000 : null;
+  let renewalWaitBudget = 5_000;
+  if (renewalBaseUrl) assertRenewalListSource(page, renewalBaseUrl);
   const button = scope.getByRole('button', { name: buttonName });
+  if (renewalBaseUrl) {
+    let ready = false;
+    while (Date.now() < renewalDeadline && renewalWaitBudget > 0) {
+      assertRenewalListSource(page, renewalBaseUrl);
+      if (await page.locator('.v-dialog--active').count() !== 1 || !await scope.isVisible())
+        throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+      const count = await button.count();
+      if (count > 1) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+      if (count === 1 && await button.isVisible()) { ready = true; break; }
+      const delay = Math.min(200, renewalWaitBudget, Math.max(0, renewalDeadline - Date.now()));
+      if (!delay) break;
+      await page.waitForTimeout(delay); renewalWaitBudget -= delay;
+    }
+    if (!ready) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+  }
   if ((await button.count()) !== 1) {
     throw new Error(`Campo do BitPanel não encontrado: ${buttonName}`);
   }
-  await button.click();
+  if (renewalBaseUrl) {
+    if (await page.locator('.v-dialog--active').count() !== 1 || !await scope.isVisible() || !await button.isVisible())
+      throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+    assertRenewalListSource(page, renewalBaseUrl);
+    const remaining = renewalDeadline - Date.now();
+    if (remaining <= 0) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+    try { await button.click({timeout:remaining}); }
+    catch { throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE'); }
+    assertRenewalListSource(page, renewalBaseUrl);
+    if (Date.now() >= renewalDeadline) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+  } else await button.click();
   const normalizeOption = value => normalizeBitPanelText(value).replace(/r\$\s*/g, 'r$');
   const expected = (Array.isArray(optionNames) ? optionNames : [optionNames])
     .map(normalizeOption);
   const options = page.locator(
     '[role="option"], .v-menu__content:visible .v-list-item, .v-overlay--active .v-list-item'
   );
+  if (renewalBaseUrl) {
+    while (Date.now() < renewalDeadline && renewalWaitBudget > 0) {
+      assertRenewalListSource(page, renewalBaseUrl);
+      if (await page.locator('.v-dialog--active').count() !== 1 || !await scope.isVisible())
+        throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+      const matches = (await readRenewalOptionSnapshot(options))
+        .filter(row => row.visible && expected.includes(normalizeOption(row.label)));
+      if (matches.length > 1) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+      if (matches.length === 1) {
+        assertRenewalListSource(page, renewalBaseUrl);
+        const freshMatches = (await readRenewalOptionSnapshot(options))
+          .filter(row => row.visible && expected.includes(normalizeOption(row.label)));
+        const selected = matches[0];
+        if (freshMatches.length !== 1 || freshMatches[0].index !== selected.index ||
+            normalizeOption(freshMatches[0].label) !== normalizeOption(selected.label))
+          throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+        const option = options.nth(selected.index);
+        if (!await option.isVisible() || normalizeOption(await option.innerText()) !== normalizeOption(selected.label))
+          throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+        assertRenewalListSource(page, renewalBaseUrl);
+        if (await page.locator('.v-dialog--active').count() !== 1 || !await scope.isVisible())
+          throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+        assertRenewalListSource(page, renewalBaseUrl);
+        const remaining = renewalDeadline - Date.now();
+        if (remaining <= 0) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+        try { await option.click({timeout:remaining}); }
+        catch { throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE'); }
+        assertRenewalListSource(page, renewalBaseUrl);
+        if (Date.now() >= renewalDeadline) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+        return;
+      }
+      const delay = Math.min(200, renewalWaitBudget, Math.max(0, renewalDeadline - Date.now()));
+      if (!delay) break;
+      await page.waitForTimeout(delay); renewalWaitBudget -= delay;
+    }
+    throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+  }
   const count = await options.count();
   for (let index = 0; index < count; index += 1) {
     const option = options.nth(index);
@@ -929,31 +1060,56 @@ async function prepareBitPanelRenewalFromPage(page, config, renewal, { allowAlre
   if (allowAlreadyRenewed && before.expiryDate === renewal.expected_expiration)
     return { alreadyRenewed: true, before, binding, listId, detailsUrl };
   if (before.expiryDate !== renewal.current_expiry) throw new Error('RENEWAL_PROVIDER_EXPIRATION_MISMATCH');
+  assertRenewalListSource(page, baseUrl);
+  if (await page.locator('.v-dialog--active').count() !== 0) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
   const menuIcon = page.locator(`i[title="Mais opções, lista ${listId}"]`);
   if (await menuIcon.count() !== 1) throw new Error('RENEWAL_PREVIEW_UNAVAILABLE');
   await menuIcon.click();
+  assertRenewalListSource(page, baseUrl);
+  if (await page.locator('.v-dialog--active').count() !== 0) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
   await page.getByRole('menuitem', { name: 'Renovar', exact: true }).click();
-  const dialog = page.locator('.v-dialog--active');
-  await dialog.waitFor({ state: 'visible' });
-  await selectVuetifyOption(page, dialog, /^Selecione o plano/, config.BITPANEL_PLAN_LABEL);
-  await selectVuetifyOption(page, dialog, /^Selecione a validade/, optionLabelsForMonths(renewal.duration_months));
+  const dialog = await waitForRenewalForm(page, baseUrl);
+  await selectVuetifyOption(page, dialog, /^Selecione o plano/, config.BITPANEL_PLAN_LABEL, { renewalBaseUrl:baseUrl });
+  await selectVuetifyOption(page, dialog, /^Selecione a validade/, optionLabelsForMonths(renewal.duration_months), { renewalBaseUrl:baseUrl });
   const quote = creditQuote(await dialog.innerText(), config, renewal);
   const availableCredits = await readBitPanelCreditBalance(page, baseUrl);
   return { before, binding, listId, detailsUrl, dialog, quote, availableCredits };
 }
 
-async function closeRenewalPreview(page) {
+async function closeRenewalPreview(page, baseUrl) {
+  const deadline = Date.now() + 5_000;
+  try { assertRenewalListSource(page, baseUrl); } catch { throw readFailure('RENEWAL_PREVIEW_CLOSE_FAILED'); }
   const dialog = page.locator('.v-dialog--active');
   const count = await dialog.count();
   if (count === 0) return;
   if (count !== 1) throw readFailure('RENEWAL_PREVIEW_CLOSE_FAILED');
   if (!await dialog.isVisible()) return;
   const exit = dialog.getByRole('button', { name: /^Sair$/i, exact: true });
-  if (await exit.count() !== 1) throw readFailure('RENEWAL_PREVIEW_CLOSE_FAILED');
+  const close = dialog.getByRole('button', { name: /^Fechar$/i, exact: true });
+  const exitCount = await exit.count(), closeCount = await close.count();
+  let target;
+  if (exitCount === 1 && closeCount === 0 && await exit.isVisible()) target = exit;
+  else if (exitCount === 0 && closeCount === 1 && await loadingDialogShape(dialog)) target = close;
+  else throw readFailure('RENEWAL_PREVIEW_CLOSE_FAILED');
   try {
-    await exit.click();
-    await dialog.waitFor({ state: 'hidden' });
+    assertRenewalListSource(page, baseUrl);
+    if (await dialog.count() !== 1) throw Error();
+    const clickBudget = deadline - Date.now();
+    if (clickBudget <= 0) throw Error();
+    await target.click({timeout:clickBudget});
+    const hiddenBudget = deadline - Date.now();
+    if (hiddenBudget <= 0) throw Error();
+    await dialog.waitFor({ state: 'hidden', timeout:hiddenBudget });
+    assertRenewalListSource(page, baseUrl);
   } catch { throw readFailure('RENEWAL_PREVIEW_CLOSE_FAILED'); }
+}
+
+async function closeRenewalPreservingPrimary(page, baseUrl, primaryError) {
+  try { await closeRenewalPreview(page, baseUrl); }
+  catch (error) {
+    if (!primaryError) throw error;
+    try { if (typeof primaryError === 'object') primaryError.cleanupCode = 'RENEWAL_PREVIEW_CLOSE_FAILED'; } catch {}
+  }
 }
 
 const previewCodes = new Set([...readCodes, 'RENEWAL_PROVIDER_QUOTE_MISMATCH',
@@ -967,16 +1123,19 @@ export async function previewBitPanelRenewal(config, renewal, { withSession = ru
     const previewRenewal = { ...renewal, automatic_renewal: true };
     if (config.BITPANEL_AUTOMATIC_RENEWAL_POLICY?.enabled !== true) throw new Error('RENEWAL_PROVIDER_QUOTE_MISMATCH');
     return await withSession({ ...config, BITPANEL_READ_TIMEOUT_MS: 30_000 }, async page => {
+      let primaryError;
       try {
         const prepared = await prepareBitPanelRenewalFromPage(page, config, previewRenewal);
         return { prepared: true, submitted: false, quote: prepared.quote,
           balance: creditCapacity(prepared.availableCredits, prepared.quote),
           sourceUrl: prepared.detailsUrl, verifiedAt: new Date().toISOString() };
-      } finally { await closeRenewalPreview(page); }
+      } catch (error) { primaryError = error; throw error; }
+      finally { await closeRenewalPreservingPrimary(page, readBaseUrl(config), primaryError); }
     });
   } catch (error) {
     const code = error?.code || error?.message;
-    if (previewCodes.has(code)) throw readFailure(code);
+    if (previewCodes.has(code)) throw Object.assign(readFailure(code), error?.cleanupCode === 'RENEWAL_PREVIEW_CLOSE_FAILED' ?
+      {cleanupCode:'RENEWAL_PREVIEW_CLOSE_FAILED'} : {});
     if (/CAPTCHA|autentica|sessão|credenciais|acesso|login/i.test(String(error?.message))) throw readFailure('BITPANEL_READ_REAUTH_REQUIRED');
     throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
   }
@@ -1005,6 +1164,7 @@ export async function renewInBitPanel(config, renewal, { withSession = runWithBr
 
     const evidencePath = join(config.ARTIFACTS_DIR, `${Date.now()}-${safeName(renewal.id)}-renovacao.png`);
     let submitted = false;
+    let primaryError;
     try {
       requireCreditCapacity(availableCredits, quote);
       if (renewal.automatic_renewal === true && typeof config.BITPANEL_BEFORE_RENEWAL_SUBMIT !== 'function')
@@ -1023,8 +1183,9 @@ export async function renewInBitPanel(config, renewal, { withSession = runWithBr
       await renewButton.click();
       submitted = true;
       await dialog.waitFor({ state: 'hidden' });
-    } finally {
-      if (!submitted) await closeRenewalPreview(page);
+    } catch (error) { primaryError = error; throw error; }
+    finally {
+      if (!submitted) await closeRenewalPreservingPrimary(page, readBaseUrl(config), primaryError);
     }
 
     await page.goto(detailsUrl, { waitUntil: 'domcontentloaded' });
