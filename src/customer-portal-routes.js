@@ -2,6 +2,13 @@ import { z } from 'zod';
 import { hmacSha256, safeEqual } from './security.js';
 import { isTrustedMutationOrigin } from './authorization.js';
 import { CustomerPortal } from './services/customer-portal.js';
+import { CustomerAccessSync } from './services/customer-access-sync.js';
+import { buildCustomerHelp } from './services/customer-help-content.js';
+import { CustomerPortalHelp } from './services/customer-portal-help.js';
+import { buildCustomerPlaylist } from './services/customer-playlist.js';
+import { latestTelegramContent } from './services/telegram-content.js';
+import { getSetting } from './db.js';
+import { audit } from './audit.js';
 
 export const PORTAL_COOKIE = 'gate_customer_session';
 const errors = {
@@ -18,11 +25,17 @@ const errors = {
   SUBSCRIPTION_NOT_FOUND: 'Seu cadastro está salvo. A equipe precisa conferir e preparar sua assinatura antes da primeira cobrança.',
   LIVE_BILLING_PAUSED_OR_UNAVAILABLE: 'A cobrança está indisponível agora. Peça ajuda pelo WhatsApp.',
   BILLING_CYCLE_ALREADY_CLOSED: 'Este ciclo já foi concluído. Consulte os pagamentos ou fale com a equipe.',
-  SUBSCRIPTION_NOT_ELIGIBLE: 'A equipe precisa conferir sua assinatura antes da cobrança.'
+  SUBSCRIPTION_NOT_ELIGIBLE: 'A equipe precisa conferir sua assinatura antes da cobrança.',
+  CUSTOMER_ACCESS_UPDATE_REQUIRED: 'Seu acesso precisa ser conferido no BitPanel antes de mostrar a senha. Peça ajuda à equipe pelo WhatsApp.',
+  PORTAL_AI_UNAVAILABLE: 'A ajuda automática está indisponível agora. Consulte os guias ou peça ajuda à equipe pelo WhatsApp.',
+  PORTAL_AI_TIMEOUT: 'A ajuda automática demorou para responder. Tente novamente ou consulte os guias.',
+  PORTAL_AI_BUSY: 'Aguarde a resposta da sua pergunta anterior antes de enviar outra.'
 };
 
-export function registerCustomerPortal(app, {db,config,billingAutomation,getPaymentOptions,requireBotSecret}) {
+export function registerCustomerPortal(app, {db,config,billingAutomation,getPaymentOptions,requireBotSecret,supportAssistant}) {
   const portal=new CustomerPortal({db,config,billing:billingAutomation,getPaymentOptions});
+  const access=new CustomerAccessSync({db,config});
+  const assistant=supportAssistant || new CustomerPortalHelp({db,config});
   app.decorateRequest('portalSession',null);
   const privateHeaders=async(_request,reply)=>{
     reply.header('Cache-Control','no-store, private').header('Referrer-Policy','no-referrer').header('X-Robots-Tag','noindex, nofollow');
@@ -56,6 +69,25 @@ export function registerCustomerPortal(app, {db,config,billingAutomation,getPaym
     return {ok:true,expiresAt:session.expiresAt};
   }));
   app.get('/api/portal/me',readOptions,safe(async request=>({...await portal.account(request.portalSession.customer_id),csrf_token:csrf(request)})));
+  app.get('/api/portal/me/access',readOptions,safe(request=>access.metadata(request.portalSession.customer_id)));
+  app.post('/api/portal/me/access/reveal',{...writeOptions,config:{rateLimit:{max:6,timeWindow:'1 hour',
+    keyGenerator:request=>hmacSha256(config.COOKIE_SECRET,`portal-reveal-rate:${request.cookies?.[PORTAL_COOKIE]||request.ip}`)}}},safe(async request=>{
+    z.object({}).strict().parse(request.body);
+    const revealed=await access.reveal(request.portalSession.customer_id);
+    await audit(db,{actorType:'customer',actorId:request.portalSession.customer_id,action:'customer.access_revealed',
+      entityType:'customer',entityId:request.portalSession.customer_id,after:{expiresInSeconds:revealed.expiresInSeconds},ip:request.ip});
+    const catalog=await getSetting(db,'customer_help_catalog',{});
+    const playlist=buildCustomerPlaylist({help:buildCustomerHelp({catalog}),access:revealed});
+    return {...revealed,playlistUrl:playlist?.url || null};
+  }));
+  app.get('/api/portal/me/help',readOptions,safe(async()=>{
+    const [catalog,telegramSync,posts]=await Promise.all([getSetting(db,'customer_help_catalog',{}),
+      getSetting(db,'telegram_content_sync',{}),latestTelegramContent(db,10)]);
+    return buildCustomerHelp({catalog,telegramSync,posts});
+  }));
+  app.post('/api/portal/me/support/chat',{...writeOptions,bodyLimit:4096,config:{rateLimit:{max:10,timeWindow:'1 hour',
+    keyGenerator:request=>hmacSha256(config.COOKIE_SECRET,`portal-help-rate:${request.cookies?.[PORTAL_COOKIE]||request.ip}`)}}},
+    safe(request=>assistant.ask(request.portalSession.customer_id,request.body)));
   app.patch('/api/portal/me/profile',writeOptions,safe(request=>portal.saveProfile(request.portalSession.customer_id,request.body)));
   app.post('/api/portal/me/payments',{...writeOptions,config:{rateLimit:{max:6,timeWindow:'1 hour'}}},safe(request=>portal.requestPayment(request.portalSession.customer_id,request.body)));
   app.post('/api/portal/me/privacy/withdraw',writeOptions,safe(request=>portal.withdrawContact(request.portalSession.customer_id)));

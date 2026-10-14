@@ -1,3 +1,5 @@
+import { parseBitPanelRenewalQuote, validateBitPanelRenewalQuote } from '../services/bitpanel-renewal-quote.js';
+import { parseBitPanelPublishedDate } from './bitpanel-date.js';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
@@ -92,11 +94,101 @@ async function firstVisible(page, selector) {
   return null;
 }
 
-async function openSession(page, config) {
+async function uniqueVisible(candidates) {
+  let selected = null;
+  for (let index = 0; index < await candidates.count(); index += 1) {
+    const candidate = candidates.nth(index);
+    if (!(await candidate.isVisible().catch(() => false))) continue;
+    if (selected) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+    selected = candidate;
+  }
+  return selected;
+}
+
+async function findListSearchField(page) {
+  // Current Vuetify inputs have empty placeholders; the label is the stable identity.
+  const labelledFields = page.getByLabel('Buscar por nome', { exact: true });
+  const labelled = await uniqueVisible(labelledFields);
+  if (labelled) return labelled;
+  const legacy = await uniqueVisible(page.locator(
+    "input[placeholder='Buscar' i], input[placeholder='Pesquisar' i], input[placeholder='Buscar por nome' i], input[placeholder='Pesquisar por nome' i], input[type='search']"
+  ));
+  if (legacy) return legacy;
+  try { await labelledFields.first().waitFor({ state: 'visible', timeout: 20_000 }); }
+  catch { throw readFailure('BITPANEL_READ_UNAVAILABLE'); }
+  const hydrated = await uniqueVisible(labelledFields);
+  if (!hydrated) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+  return hydrated;
+}
+
+async function waitForBitPanelListData(page, baseUrl, { afterSearch = false } = {}) {
+  const assertList = () => {
+    const current = new URL(page.url());
+    if (current.origin !== baseUrl) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+    if (current.pathname.includes('/login')) throw readFailure('BITPANEL_READ_REAUTH_REQUIRED');
+    if (page.url() !== `${baseUrl}/list`) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  };
+  if (afterSearch) await page.waitForTimeout(700);
+  // The search asynchronously replaces the table; a visible empty tbody is not data readiness.
+  try { await page.waitForLoadState('networkidle', { timeout: 20_000 }); }
+  catch { assertList(); throw readFailure('BITPANEL_READ_TIMEOUT'); }
+  assertList();
+  const headers = page.locator('table thead th');
+  try { await headers.first().waitFor({ state: 'visible', timeout: 5_000 }); }
+  catch { throw readFailure('BITPANEL_READ_UNAVAILABLE'); }
+  const names = (await headers.allInnerTexts()).map(normalizeBitPanelText);
+  for (const pattern of [/^(?:#?id|#|codigo)$/, /proprietario|revendedor|owner/, /usuario|login/]) {
+    if (names.filter(name => pattern.test(name)).length !== 1) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+  }
+  assertList();
+}
+
+async function listDetailValue(page, label) {
+  const prefix = new RegExp(`^\\s*${label}\\s*`, 'i');
+  const textMatches = page.getByText(prefix);
+  await textMatches.first().waitFor({ state: 'visible' });
+  // Current markup is <li><b>Label:</b> value</li>; reading the bold text loses the value.
+  const rows = page.locator('li').filter({ hasText: prefix });
+  const rowCount = await rows.count();
+  if (rowCount > 1) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  const target = rowCount === 1 ? rows : textMatches;
+  if (await target.count() !== 1) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  const text = (await target.innerText()).trim();
+  const value = text.replace(prefix, '').trim();
+  if (!prefix.test(text) || !value) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+  return value;
+}
+
+export async function openBitPanelSession(page, config, { storedSession = Boolean(config.BITPANEL_STORAGE_STATE) } = {}) {
   const loginUrl = resolveBitPanelLoginUrl(
     config.BITPANEL_BASE_URL,
     config.BITPANEL_LOGIN_URL
   );
+  if (storedSession) {
+    const baseUrl = readBaseUrl(config);
+    if (new URL(loginUrl).origin !== baseUrl) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+    const listUrl = `${baseUrl}/list`;
+    await page.goto(listUrl, { waitUntil: 'domcontentloaded' });
+    const loginRequired = async () => {
+      if (new URL(page.url()).origin !== baseUrl) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+      if (new URL(page.url()).pathname.includes('/login')) return true;
+      const username = await firstVisible(page, BITPANEL_LOGIN_SELECTORS.username);
+      const password = await firstVisible(page, BITPANEL_LOGIN_SELECTORS.password);
+      const submit = await firstVisible(page, BITPANEL_LOGIN_SELECTORS.submit);
+      return Boolean(username && password && submit);
+    };
+    if (!await loginRequired()) {
+      if (page.url() !== listUrl) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+      let tableReady = false;
+      try { await page.locator('table tbody').waitFor({ state: 'visible' }); tableReady = true; }
+      catch { /* A delayed authentication redirect is checked below. */ }
+      if (!await loginRequired()) {
+        if (!tableReady || page.url() !== listUrl) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+        return;
+      }
+    }
+    // Only an actual login redirect/form allows falling back to configured credentials.
+  }
   await page.goto(loginUrl, { waitUntil: 'domcontentloaded' });
 
   const username = await firstVisible(page, BITPANEL_LOGIN_SELECTORS.username);
@@ -109,6 +201,10 @@ async function openSession(page, config) {
     throw new Error(
       'O BitPanel exige autenticação humana. Gere e importe uma nova sessão; o CAPTCHA não será contornado.'
     );
+  }
+
+  if (!config.BITPANEL_USERNAME || !config.BITPANEL_PASSWORD) {
+    throw new Error('O BitPanel exige autenticação humana. Gere e importe uma nova sessão autenticada.');
   }
 
   await username.fill(config.BITPANEL_USERNAME);
@@ -128,68 +224,202 @@ async function openSession(page, config) {
   }
 }
 
-async function captureListDetails(page) {
-  const usernameText = await page.getByText(/^Usuário:/).innerText();
-  const passwordText = await page.getByText(/^Senha:/).innerText();
-  const expiryText = await page.getByText(/^Data de validade:/).innerText();
+async function captureListDetails(page, { expectedListId, expectedUsername, includePassword = true } = {}) {
   const match = page.url().match(/\/list\/view\/(\d+)/);
   if (!match) throw new Error('O BitPanel não abriu a página final da lista.');
+  if (expectedListId !== undefined && match[1] !== expectedListId) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  const username = await listDetailValue(page, 'Usuário:');
+  if (expectedUsername !== undefined && username !== expectedUsername) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  const password = includePassword ? await listDetailValue(page, 'Senha:') : undefined;
+  const expiryText = await listDetailValue(page, 'Data de validade:');
   return {
     listId: match[1],
-    username: stripPrefix(usernameText, 'Usuário:'),
-    password: stripPrefix(passwordText, 'Senha:'),
-    expiryText: stripPrefix(expiryText, 'Data de validade:'),
+    username,
+    ...(includePassword ? { password } : {}),
+    expiryText,
     expiryDate: parseBitPanelExpiry(expiryText)
   };
 }
 
 async function findListByUsername(page, config, username) {
-  await page.goto(`${config.BITPANEL_BASE_URL}/list`, { waitUntil: 'domcontentloaded' });
-  const search = await firstVisible(
-    page,
-    "input[placeholder*='Buscar' i], input[placeholder*='Pesquisar' i], input[type='search']"
-  );
-  if (!search) {
-    throw new Error('Busca de listas do BitPanel não encontrada.');
-  }
+  const baseUrl = readBaseUrl(config);
+  await page.goto(`${baseUrl}/list`, { waitUntil: 'domcontentloaded' });
+  const search = await findListSearchField(page);
   await search.fill(username);
-  await page.waitForTimeout(700);
+  await waitForBitPanelListData(page, baseUrl, { afterSearch: true });
 
+  const columns = await tableColumnMap(page);
   const rows = page.locator('table tbody tr');
   const count = await rows.count();
+  const matches = [];
   for (let index = 0; index < count; index += 1) {
     const cells = rows.nth(index).locator('td');
-    if ((await cells.count()) < 7) continue;
-    const rowUsername = (await cells.nth(4).innerText()).trim();
+    if ((await cells.count()) <= Math.max(...Object.values(columns))) continue;
+    const rowUsername = (await cells.nth(columns.username).innerText()).trim();
     if (rowUsername !== username) continue;
-    return {
-      id: (await cells.nth(0).innerText()).trim().replace(/^#/, ''),
-      owner: (await cells.nth(2).innerText()).trim(),
-      status: (await cells.nth(3).innerText()).trim(),
+    matches.push({
+      id: (await cells.nth(columns.id).innerText()).trim().replace(/^#/, ''),
+      owner: (await cells.nth(columns.owner).innerText()).trim(),
+      status: (await cells.nth(columns.status).innerText()).trim(),
       username: rowUsername,
-      expiryText: (await cells.nth(6).innerText()).trim()
-    };
+      expiryText: (await cells.nth(columns.expiry).innerText()).trim()
+    });
   }
-  return null;
+  const next = page.getByRole('button', { name: 'Next page', exact: true });
+  if (matches.length > 1 || await next.count() > 1 ||
+      (await next.count() === 1 && await next.isEnabled())) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  return matches[0] || null;
 }
 
-async function selectVuetifyOption(page, scope, buttonName, optionNames) {
+function assertRenewalListSource(page, baseUrl) {
+  if (page.url() === `${baseUrl}/list`) return;
+  let current;
+  try { current = new URL(page.url()); } catch { throw readFailure('BITPANEL_READ_LINK_UNVERIFIED'); }
+  throw readFailure(current.origin === baseUrl && current.pathname.includes('/login') ?
+    'BITPANEL_READ_REAUTH_REQUIRED' : 'BITPANEL_READ_LINK_UNVERIFIED');
+}
+
+const renewalLoadingControls = 'form, input, textarea, select, iframe, [role="combobox"], [role="textbox"], [role="slider"], [contenteditable="true"]';
+const isRenewalLoadingText = text => /^aguarde(?:\.{3}|…)?$/i.test(String(text || '')
+  .replace(/\s*\bFechar\s*$/i, '').replace(/\s+/g, ' ').trim());
+
+async function loadingDialogShape(dialog) {
+  if (await dialog.locator(renewalLoadingControls).count() !== 0) return false;
+  const buttons = dialog.getByRole('button');
+  const close = dialog.getByRole('button', { name: /^Fechar$/i, exact: true });
+  return await buttons.count() === 1 && await close.count() === 1 && await close.isVisible() &&
+    isRenewalLoadingText(await dialog.innerText());
+}
+
+async function waitForRenewalForm(page, baseUrl) {
+  const timeoutMs = 12_000, deadline = Date.now() + timeoutMs;
+  let waitBudget = timeoutMs;
+  while (Date.now() < deadline && waitBudget > 0) {
+    assertRenewalListSource(page, baseUrl);
+    const dialog = page.locator('.v-dialog--active'), count = await dialog.count();
+    if (count > 1) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+    if (count === 1 && await dialog.isVisible()) {
+      const plan = dialog.getByRole('button', { name: /^Selecione o plano/ });
+      const validity = dialog.getByRole('button', { name: /^Selecione a validade/ });
+      const planCount = await plan.count(), validityCount = await validity.count();
+      if (planCount > 1 || validityCount > 1) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+      if (planCount === 1 && await plan.isVisible()) {
+        assertRenewalListSource(page, baseUrl);
+        if (await dialog.count() !== 1) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+        return dialog;
+      }
+      if (planCount === 0 && validityCount === 0 && !await loadingDialogShape(dialog))
+        throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+    }
+    assertRenewalListSource(page, baseUrl);
+    const delay = Math.min(200, waitBudget, Math.max(0, deadline - Date.now()));
+    if (!delay) break;
+    await page.waitForTimeout(delay); waitBudget -= delay;
+  }
+  throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+}
+
+async function readRenewalOptionSnapshot(options) {
+  const snapshot = await options.evaluateAll(elements => {
+    if (elements.length > 100) return {count:elements.length,rows:[]};
+    return {count:elements.length,rows:elements.map((element,index) => {
+      const style = element.ownerDocument?.defaultView?.getComputedStyle(element);
+      const bounds = element.getBoundingClientRect();
+      const visible = element.isConnected && style?.visibility === 'visible' && style.display !== 'none' &&
+        bounds.width > 0 && bounds.height > 0;
+      return {index,visible:Boolean(visible),label:element.innerText || ''};
+    })};
+  });
+  if (!Number.isSafeInteger(snapshot?.count) || snapshot.count < 0 || snapshot.count > 100 ||
+      !Array.isArray(snapshot.rows) || snapshot.rows.length !== snapshot.count ||
+      snapshot.rows.some((row,index) => row?.index !== index || typeof row.visible !== 'boolean' ||
+        typeof row.label !== 'string' || row.label.length > 1000)) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+  return snapshot.rows;
+}
+
+async function selectVuetifyOption(page, scope, buttonName, optionNames, { renewalBaseUrl } = {}) {
+  const renewalDeadline = renewalBaseUrl ? Date.now() + 5_000 : null;
+  let renewalWaitBudget = 5_000;
+  if (renewalBaseUrl) assertRenewalListSource(page, renewalBaseUrl);
   const button = scope.getByRole('button', { name: buttonName });
+  if (renewalBaseUrl) {
+    let ready = false;
+    while (Date.now() < renewalDeadline && renewalWaitBudget > 0) {
+      assertRenewalListSource(page, renewalBaseUrl);
+      if (await page.locator('.v-dialog--active').count() !== 1 || !await scope.isVisible())
+        throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+      const count = await button.count();
+      if (count > 1) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+      if (count === 1 && await button.isVisible()) { ready = true; break; }
+      const delay = Math.min(200, renewalWaitBudget, Math.max(0, renewalDeadline - Date.now()));
+      if (!delay) break;
+      await page.waitForTimeout(delay); renewalWaitBudget -= delay;
+    }
+    if (!ready) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+  }
   if ((await button.count()) !== 1) {
     throw new Error(`Campo do BitPanel não encontrado: ${buttonName}`);
   }
-  await button.click();
+  if (renewalBaseUrl) {
+    if (await page.locator('.v-dialog--active').count() !== 1 || !await scope.isVisible() || !await button.isVisible())
+      throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+    assertRenewalListSource(page, renewalBaseUrl);
+    const remaining = renewalDeadline - Date.now();
+    if (remaining <= 0) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+    try { await button.click({timeout:remaining}); }
+    catch { throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE'); }
+    assertRenewalListSource(page, renewalBaseUrl);
+    if (Date.now() >= renewalDeadline) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+  } else await button.click();
+  const normalizeOption = value => normalizeBitPanelText(value).replace(/r\$\s*/g, 'r$');
   const expected = (Array.isArray(optionNames) ? optionNames : [optionNames])
-    .map(normalizeBitPanelText);
+    .map(normalizeOption);
   const options = page.locator(
     '[role="option"], .v-menu__content:visible .v-list-item, .v-overlay--active .v-list-item'
   );
+  if (renewalBaseUrl) {
+    while (Date.now() < renewalDeadline && renewalWaitBudget > 0) {
+      assertRenewalListSource(page, renewalBaseUrl);
+      if (await page.locator('.v-dialog--active').count() !== 1 || !await scope.isVisible())
+        throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+      const matches = (await readRenewalOptionSnapshot(options))
+        .filter(row => row.visible && expected.includes(normalizeOption(row.label)));
+      if (matches.length > 1) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+      if (matches.length === 1) {
+        assertRenewalListSource(page, renewalBaseUrl);
+        const freshMatches = (await readRenewalOptionSnapshot(options))
+          .filter(row => row.visible && expected.includes(normalizeOption(row.label)));
+        const selected = matches[0];
+        if (freshMatches.length !== 1 || freshMatches[0].index !== selected.index ||
+            normalizeOption(freshMatches[0].label) !== normalizeOption(selected.label))
+          throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+        const option = options.nth(selected.index);
+        if (!await option.isVisible() || normalizeOption(await option.innerText()) !== normalizeOption(selected.label))
+          throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+        assertRenewalListSource(page, renewalBaseUrl);
+        if (await page.locator('.v-dialog--active').count() !== 1 || !await scope.isVisible())
+          throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+        assertRenewalListSource(page, renewalBaseUrl);
+        const remaining = renewalDeadline - Date.now();
+        if (remaining <= 0) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+        try { await option.click({timeout:remaining}); }
+        catch { throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE'); }
+        assertRenewalListSource(page, renewalBaseUrl);
+        if (Date.now() >= renewalDeadline) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+        return;
+      }
+      const delay = Math.min(200, renewalWaitBudget, Math.max(0, renewalDeadline - Date.now()));
+      if (!delay) break;
+      await page.waitForTimeout(delay); renewalWaitBudget -= delay;
+    }
+    throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+  }
   const count = await options.count();
   for (let index = 0; index < count; index += 1) {
     const option = options.nth(index);
     if (!(await option.isVisible().catch(() => false))) continue;
-    const label = normalizeBitPanelText(await option.innerText().catch(() => ''));
-    if (expected.some((candidate) => label === candidate || label.includes(candidate))) {
+    const label = normalizeOption(await option.innerText().catch(() => ''));
+    if (expected.some((candidate) => label === candidate || (!candidate.includes('r$') && label.includes(candidate)))) {
       await option.click();
       return;
     }
@@ -249,11 +479,18 @@ async function runWithBrowser(config, task) {
     headless: config.BITPANEL_HEADLESS,
     args: ['--no-sandbox', '--disable-dev-shm-usage']
   });
+  // The optional read deadline is never supplied by renewal/provisioning callers.
+  const readDeadline = Number(config.BITPANEL_READ_TIMEOUT_MS);
+  const readTimer = Number.isFinite(readDeadline) && readDeadline > 0
+    ? setTimeout(() => browser.close().catch(() => null), readDeadline)
+    : null;
+  readTimer?.unref?.();
   try {
     let storageState;
     if (config.BITPANEL_STORAGE_STATE) {
       try {
         storageState = JSON.parse(config.BITPANEL_STORAGE_STATE);
+        if (!storageState || !Array.isArray(storageState.cookies) || !Array.isArray(storageState.origins)) throw new Error();
       } catch {
         throw new Error('A sessão salva do BitPanel está corrompida. Importe uma nova sessão.');
       }
@@ -265,14 +502,192 @@ async function runWithBrowser(config, task) {
     });
     const page = await context.newPage();
     page.setDefaultTimeout(20_000);
-    await openSession(page, config);
+    await openBitPanelSession(page, config, { storedSession: Boolean(storageState) });
     const result = await task(page);
     if (typeof config.saveBitPanelStorageState === 'function') {
       await config.saveBitPanelStorageState(await context.storageState());
     }
     return result;
   } finally {
+    if (readTimer) clearTimeout(readTimer);
     await browser.close();
+  }
+}
+
+const readFailure = code => Object.assign(new Error(code), { code });
+const readCodes = new Set(['BITPANEL_READ_LINK_UNVERIFIED','BITPANEL_READ_REAUTH_REQUIRED','BITPANEL_READ_UNAVAILABLE','BITPANEL_READ_TIMEOUT']);
+
+function readBaseUrl(config) {
+  try {
+    const url = new URL(config.BITPANEL_BASE_URL);
+    if (url.protocol !== 'https:' || !['bitpanel.vip','www.bitpanel.vip'].includes(url.hostname) ||
+        url.username || url.password || url.port || url.search || url.hash || url.pathname !== '/') throw new Error();
+    return url.origin;
+  } catch { throw readFailure('BITPANEL_READ_LINK_UNVERIFIED'); }
+}
+
+function readBinding(binding) {
+  const listId = String(binding?.listId || '').trim();
+  const username = String(binding?.username || '').trim();
+  if (!/^\d{1,20}$/.test(listId) || !username || username.length > 120 ||
+      /[\r\n\x00]/.test(username) || !isGateOneOwner(binding?.owner)) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  return { listId, username, owner: binding.owner };
+}
+
+// No buttons that modify the provider are reachable from this reader.
+export async function readBitPanelAccessFromPage(page, config, binding) {
+  const expected = readBinding(binding), baseUrl = readBaseUrl(config);
+  await page.goto(`${baseUrl}/list`, { waitUntil: 'domcontentloaded' });
+  if (new URL(page.url()).origin !== baseUrl) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  if (new URL(page.url()).pathname.includes('/login')) throw readFailure('BITPANEL_READ_REAUTH_REQUIRED');
+  const search = await findListSearchField(page);
+  await search.fill(expected.username);
+  await waitForBitPanelListData(page, baseUrl, { afterSearch: true });
+  const columns = await tableColumnMap(page), rows = page.locator('table tbody tr');
+  const matches = [];
+  for (let index = 0; index < await rows.count(); index += 1) {
+    const cells = rows.nth(index).locator('td');
+    if (await cells.count() <= Math.max(...Object.values(columns))) continue;
+    const id = (await cells.nth(columns.id).innerText()).trim().replace(/^#/, '');
+    const username = (await cells.nth(columns.username).innerText()).trim();
+    const owner = (await cells.nth(columns.owner).innerText()).trim();
+    if (id === expected.listId || username === expected.username) matches.push({ id, username, owner });
+  }
+  if (matches.length !== 1 || matches[0].id !== expected.listId || matches[0].username !== expected.username ||
+      !isGateOneOwner(matches[0].owner) || normalizeBitPanelText(matches[0].owner) !== normalizeBitPanelText(expected.owner))
+    throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  // Search must have a single page; incomplete or ambiguous results fail closed.
+  const next = page.getByRole('button', { name: 'Next page', exact: true });
+  if (await next.count() > 1 || (await next.count() === 1 && await next.isEnabled())) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  const sourceUrl = `${baseUrl}/list/view/${expected.listId}`;
+  await page.goto(sourceUrl, { waitUntil: 'domcontentloaded' });
+  if (page.url() !== sourceUrl) throw readFailure(new URL(page.url()).pathname.includes('/login') ? 'BITPANEL_READ_REAUTH_REQUIRED' : 'BITPANEL_READ_LINK_UNVERIFIED');
+  // The detail username is checked inside captureListDetails before the password is read.
+  const details = await captureListDetails(page, { expectedListId: expected.listId, expectedUsername: expected.username });
+  if (details.listId !== expected.listId || details.username !== expected.username || !details.password ||
+      details.password.length > 1000 || /[\r\n\x00]/.test(details.password)) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  return { listId: details.listId, username: details.username, password: details.password,
+    owner: matches[0].owner, sourceUrl, verifiedAt: new Date().toISOString() };
+}
+
+export async function readBitPanelLinkedAccess(config, binding, { withSession = runWithBrowser } = {}) {
+  readBinding(binding);
+  const baseUrl = readBaseUrl(config);
+  try {
+    const login = new URL(resolveBitPanelLoginUrl(baseUrl, config.BITPANEL_LOGIN_URL));
+    if (login.origin !== baseUrl) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+    return await withSession({ ...config, BITPANEL_BASE_URL: baseUrl, BITPANEL_READ_TIMEOUT_MS: 30_000 },
+      page => readBitPanelAccessFromPage(page, config, binding));
+  } catch (error) {
+    if (readCodes.has(error?.code)) throw readFailure(error.code);
+    if (/CAPTCHA|autentica|sessão|credenciais|acesso|login/i.test(String(error?.message))) throw readFailure('BITPANEL_READ_REAUTH_REQUIRED');
+    throw readFailure('BITPANEL_READ_UNAVAILABLE');
+  }
+}
+
+// The source path must be explicitly reviewed after authenticated UI inspection.
+// This function does not discover pages or fetch URLs.
+export function parseBitPanelDnsLinks(candidates, { sourceUrl, reviewedSourcePaths = [] } = {}) {
+  let source;
+  try {
+    source = new URL(sourceUrl);
+    if (readBaseUrl({ BITPANEL_BASE_URL: source.origin }) !== source.origin || source.search || source.hash ||
+        source.username || source.password || !reviewedSourcePaths.includes(source.pathname)) return [];
+  } catch { return []; }
+  const results = new Map();
+  for (const item of (Array.isArray(candidates) ? candidates : []).slice(0, 100)) {
+    const label = String(item?.label || '').trim().slice(0, 100);
+    if (!/^(dns|servidor)(?:\s+\d+)?$/i.test(label)) continue;
+    try {
+      const url = new URL(item.url), host = url.hostname.toLowerCase();
+      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash ||
+          url.pathname !== '/' || !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(host) ||
+          /(?:^|\.)(?:localhost|local|internal|invalid|example|test)$/.test(host) ||
+          !['','80','443','8080','8000'].includes(url.port)) continue;
+      results.set(url.href, { label, url: url.href, sourceUrl: source.href });
+    } catch { /* Untrusted links are omitted. */ }
+  }
+  return [...results.values()].slice(0, 10);
+}
+
+function customerContentLink(value) {
+  try {
+    const url = new URL(value);
+    if (!['http:','https:'].includes(url.protocol) || url.username || url.password ||
+        [...url.searchParams.keys()].some(key => /token|pass|secret|user|auth|key/i.test(key))) return null;
+    if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(url.hostname) || /(?:^|\.)(?:localhost|local|internal|invalid|example|test)$/.test(url.hostname)) return null;
+    return url.href;
+  } catch { return null; }
+}
+
+export function parseBitPanelCustomerNotices(entries, { sourceUrl = 'https://bitpanel.vip/notices', category = 'notices' } = {}) {
+  let source;
+  try { source = new URL(sourceUrl); } catch { throw readFailure('BITPANEL_READ_LINK_UNVERIFIED'); }
+  if (!['notices','news'].includes(category) || readBaseUrl({BITPANEL_BASE_URL:source.origin}) !== source.origin || source.pathname !== `/${category}` ||
+      source.search || source.hash || source.username || source.password) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  const notices = (Array.isArray(entries) ? entries : []).slice(0, 20).map(item => {
+    const title = String(item.title || '').replace(/\s+/g,' ').trim().slice(0,200);
+    const text = String(item.content || '').replace(/\r/g,'').trim()
+      .replace(/https?:\/\/[^\s<>]+/gi, value => customerContentLink(value.replace(/[.,;!)]+$/,'')) ? value : '[link protegido]')
+      .replace(/(?:password|senha|secret|token|api[_-]?key)\s*[:=]\s*[^\s]+/gi,'[dado protegido]');
+    const publishedLabel = String(item.publishedLabel || '').replace(/\s+/g,' ').trim().slice(0,200);
+    const publishedAt = parseBitPanelPublishedDate(publishedLabel);
+    if (!title || !text || !publishedAt) return null;
+    return {category,title,content:text.slice(0,1000),publishedLabel,
+      publishedAt,sourceUrl:source.href,
+      links:[...new Set((Array.isArray(item.links) ? item.links : []).map(customerContentLink).filter(Boolean))].slice(0,12),
+      _fullText:text};
+  }).filter(Boolean);
+  if (!notices.length) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+  notices.sort((a,b) => new Date(b.publishedAt)-new Date(a.publishedAt));
+  // Only the newest notice explicitly designating a NEW DNS may promote a domain.
+  const announcement = category === 'notices' ? notices.find(item => /utilize\s+(?:a\s+)?nova\s+dns/i.test(item._fullText)) : null;
+  const candidate = announcement?._fullText.match(/utilize\s+(?:a\s+)?nova\s+dns\s*:?\s*(https?:\/\/[^\s<>]+)/i)?.[1]?.replace(/[.,;!)]+$/,'');
+  const dns = candidate ? parseBitPanelDnsLinks([{label:'DNS',url:candidate}],{
+    sourceUrl:source.href,reviewedSourcePaths:['/notices']
+  }).map(item => ({...item,publishedAt:announcement.publishedAt})) : [];
+  return {notices:notices.slice(0,5).map(({_fullText,...item}) => item),dns,dnsVerified:Boolean(dns.length)};
+}
+
+export async function readBitPanelCustomerInformation(config, { withSession = runWithBrowser } = {}) {
+  const baseUrl = readBaseUrl(config);
+  try {
+    const login = new URL(resolveBitPanelLoginUrl(baseUrl,config.BITPANEL_LOGIN_URL));
+    if (login.origin !== baseUrl) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+    return await withSession({...config,BITPANEL_BASE_URL:baseUrl,BITPANEL_READ_TIMEOUT_MS:30_000},async page => {
+      const verifiedAt = new Date().toISOString(), sections = [];
+      for (const category of ['notices','news']) {
+        const sourceUrl = `${baseUrl}/${category}`;
+        await page.goto(sourceUrl,{waitUntil:'domcontentloaded'});
+        if (page.url() !== sourceUrl) throw readFailure(new URL(page.url()).pathname.includes('/login') ? 'BITPANEL_READ_REAUTH_REQUIRED' : 'BITPANEL_READ_LINK_UNVERIFIED');
+        const bodies = page.locator('.notices .notice-body');
+        await bodies.first().waitFor({state:'visible'});
+        const entries = await bodies.evaluateAll(nodes => nodes.slice(0,20).map(node => {
+          const title = node.querySelector('h4')?.textContent || '';
+          const publishedLabel = node.querySelector('h6')?.textContent || '';
+          const content = (node.innerText || '').replace(title,'').replace(publishedLabel,'').trim();
+          return {title,publishedLabel,content,links:[...node.querySelectorAll('a[href]')].map(link => link.href)};
+        }));
+        sections.push(parseBitPanelCustomerNotices(entries,{sourceUrl,category}));
+      }
+      await page.goto(`${baseUrl}/`,{waitUntil:'domcontentloaded'});
+      if (page.url() !== `${baseUrl}/`) throw readFailure(new URL(page.url()).pathname.includes('/login') ? 'BITPANEL_READ_REAUTH_REQUIRED' : 'BITPANEL_READ_LINK_UNVERIFIED');
+      const links = page.locator('a[href*="t.me/"]');
+      let telegram = null;
+      if (await links.count() === 1) {
+        const candidate = customerContentLink(await links.first().getAttribute('href'));
+        if (candidate && new URL(candidate).protocol === 'https:' && new URL(candidate).hostname === 't.me')
+          telegram={channelUrl:candidate,verifiedAt,sourceUrl:`${baseUrl}/`};
+      }
+      return {source:`${baseUrl}/notices`,verifiedAt,status:'READY',
+        posts:sections.flatMap(section=>section.notices.map(({sourceUrl,publishedLabel,...post})=>({...post,source:'bitpanel',url:sourceUrl,verifiedAt}))),
+        dns:sections[0].dns.map(item=>({name:'DNS atual',value:item.url.replace(/\/$/,''),status:'READY',verifiedAt,sourceUrl:item.sourceUrl})),
+        dnsVerified:sections[0].dnsVerified,telegram,downloadsUrl:'https://bitplatform.vip/'};
+    });
+  } catch (error) {
+    if (readCodes.has(error?.code)) throw readFailure(error.code);
+    if (/CAPTCHA|autentica|sessão|credenciais|acesso|login/i.test(String(error?.message))) throw readFailure('BITPANEL_READ_REAUTH_REQUIRED');
+    throw readFailure('BITPANEL_READ_UNAVAILABLE');
   }
 }
 
@@ -285,13 +700,228 @@ function statusFromBitPanel(value, expiryDate) {
   return 'active';
 }
 
-export async function testBitPanelConnection(config) {
-  return runWithBrowser(config, async (page) => {
-    await page.goto(`${config.BITPANEL_BASE_URL}/list`, { waitUntil: 'domcontentloaded' });
-    const table = page.locator('table tbody');
-    await table.waitFor({ state: 'visible' });
+export async function testBitPanelConnection(config, { withSession = runWithBrowser } = {}) {
+  return withSession(config, async (page) => {
+    const baseUrl = readBaseUrl(config);
+    await page.goto(`${baseUrl}/list`, { waitUntil: 'domcontentloaded' });
+    await waitForBitPanelListData(page, baseUrl);
     return { ok: true, message: 'Login confirmado e lista de clientes encontrada.' };
   });
+}
+
+async function runWithReadOnlyBrowser(config, task) {
+  if (!config.BITPANEL_STORAGE_STATE) throw readFailure('BITPANEL_READ_REAUTH_REQUIRED');
+  // An expired session may show the login page, but this reader can never submit
+  // configured credentials or bypass the human authentication requirement.
+  return runWithBrowser({ ...config, BITPANEL_USERNAME: '', BITPANEL_PASSWORD: '' }, task);
+}
+
+const lookupCredential = (value, max) => typeof value === 'string' && value.length > 0 && value.length <= max &&
+  value.trim() === value && !/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/.test(value);
+
+function lookupDate(value) {
+  const matches = [...String(value || '').matchAll(/\b(\d{2})\/(\d{2})\/(\d{4})\b/g)];
+  if (matches.length !== 1) return null;
+  const [, day, month, year] = matches[0], iso = `${year}-${month}-${day}`;
+  if (Number(year) < 1900) return null;
+  const date = new Date(`${iso}T00:00:00.000Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === iso ? iso : null;
+}
+
+async function lookupColumnMap(page) {
+  const names = (await page.locator('table thead th').allInnerTexts()).map(normalizeBitPanelText);
+  const columns = {}, patterns = { id: /^(?:#?id|#|codigo)$/, username: /^(?:usuario|login|nome do usuario)$/,
+    owner: /proprietario|revendedor|owner/, state: /^(?:estado|situacao)$/, expiry: /validade|vencimento|expira/ };
+  for (const [field, pattern] of Object.entries(patterns)) {
+    let matches = names.map((name, index) => pattern.test(name) ? index : -1).filter(index => index >= 0);
+    // Legacy tables use Status for the subscription state; current tables also
+    // have a presence Status column, so an explicit Estado/Situação wins.
+    if (field === 'state' && matches.length === 0)
+      matches = names.map((name, index) => name === 'status' ? index : -1).filter(index => index >= 0);
+    if (matches.length !== 1) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+    columns[field] = matches[0];
+  }
+  if (new Set(Object.values(columns)).size !== 5) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+  return { columns, headerSignature: JSON.stringify(names) };
+}
+
+function assertLookupPage(page, expectedUrl, baseUrl) {
+  let current;try { current = new URL(page.url()); } catch { throw readFailure('BITPANEL_READ_LINK_UNVERIFIED'); }
+  if (current.origin !== baseUrl) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  if (current.pathname.includes('/login') || current.pathname.includes('/captcha')) throw readFailure('BITPANEL_READ_REAUTH_REQUIRED');
+  if (page.url() !== expectedUrl) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+}
+
+const lookupCaptcha = "iframe[src*='recaptcha' i], iframe[src*='hcaptcha' i], iframe[src*='challenges.cloudflare' i], [data-sitekey], .g-recaptcha, .h-captcha";
+async function assertLookupProtectedPage(page, expectedUrl, baseUrl) {
+  assertLookupPage(page, expectedUrl, baseUrl);
+  for (const selector of [BITPANEL_LOGIN_SELECTORS.username, BITPANEL_LOGIN_SELECTORS.password, lookupCaptcha])
+    if (await firstVisible(page, selector)) throw readFailure('BITPANEL_READ_REAUTH_REQUIRED');
+  assertLookupPage(page, expectedUrl, baseUrl);
+}
+
+/** Private observations only: JSON serialization exposes status/counts, never account data. */
+export async function readBitPanelExactMissingAccesses(config, usernames,
+  { withSession = runWithReadOnlyBrowser, maxPages = 100, now = () => new Date(), onSaveStorageState, onProgress } = {}) {
+  if (!Array.isArray(usernames) || usernames.length < 1 || usernames.length > 13 ||
+      usernames.some(value => !lookupCredential(value, 120)) ||
+      new Set(usernames.map(value => value.toLowerCase())).size !== usernames.length ||
+      !Number.isSafeInteger(maxPages) || maxPages < 1 || maxPages > 100 ||
+      onSaveStorageState !== undefined && typeof onSaveStorageState !== 'function' ||
+      onProgress !== undefined && typeof onProgress !== 'function')
+    throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  const baseUrl = readBaseUrl(config), listUrl = `${baseUrl}/list`, requestedNames = Object.freeze([...usernames]);
+  const started = Date.now(), deadline = Math.min(120_000, Math.max(1000, Number(config.BITPANEL_READ_TIMEOUT_MS) || 120_000));
+  const observationStarts = new Map();
+  let progress = { phase: 'STARTING_SESSION', scannedPages: 0, scannedRows: 0, verified: 0, notFound: 0, rejected: 0 };
+  const reportProgress = async (phase, counts = {}) => {
+    progress = { phase, scannedPages: counts.scannedPages ?? progress.scannedPages, scannedRows: counts.scannedRows ?? progress.scannedRows,
+      verified: counts.verified ?? progress.verified, notFound: counts.notFound ?? progress.notFound, rejected: counts.rejected ?? progress.rejected };
+    if (onProgress) await onProgress(Object.freeze({ ...progress }));
+  };
+  try {
+    if (new URL(resolveBitPanelLoginUrl(baseUrl, config.BITPANEL_LOGIN_URL)).origin !== baseUrl)
+      throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+    await reportProgress('STARTING_SESSION');
+    const result = await withSession({ ...config, BITPANEL_BASE_URL: baseUrl, BITPANEL_USERNAME: '', BITPANEL_PASSWORD: '',
+      BITPANEL_READ_TIMEOUT_MS: deadline, ...(onSaveStorageState ? { saveBitPanelStorageState: onSaveStorageState } : {}) }, async page => {
+      await reportProgress('OPENING_LIST');
+      await page.goto(listUrl, { waitUntil: 'domcontentloaded' });
+      await assertLookupProtectedPage(page, listUrl, baseUrl);
+      await waitForBitPanelListData(page, baseUrl);
+      const firstHeaders = await lookupColumnMap(page), { columns } = firstHeaders;
+      const wanted = new Set(requestedNames), candidates = [], ids = new Set(), logins = new Set(),
+        duplicateIds = new Set(), duplicateLogins = new Set(), pageSignatures = new Set();
+      let scannedPages = 0, scannedRows = 0, complete = false;
+      for (; scannedPages < maxPages;) {
+        await reportProgress('READING_PAGE', { scannedPages, scannedRows });
+        await assertLookupProtectedPage(page, listUrl, baseUrl);
+        if ((await lookupColumnMap(page)).headerSignature !== firstHeaders.headerSignature)
+          throw readFailure('BITPANEL_READ_UNAVAILABLE');
+        // One browser RPC per page. Non-target rows expose only the two fields
+        // needed for global uniqueness; private detail fields stay on the page.
+        const observedAt = now();
+        const batch = await page.locator('table tbody tr').evaluateAll((rows, { columns, requested }) => {
+          const wanted = new Set(requested), text = cell => { const value = cell?.innerText;return typeof value === 'string' ? value.trim() : null; };
+          return rows.map(row => {
+            const cells = [...row.querySelectorAll('td')], id = text(cells[columns.id])?.replace(/^#/, ''), username = text(cells[columns.username]);
+            return { cellCount: cells.length, id, username, ...(wanted.has(username) ? {
+              owner: text(cells[columns.owner]), state: text(cells[columns.state]), expiry: text(cells[columns.expiry]) } : {}) };
+          });
+        }, { columns, requested: requestedNames });
+        await assertLookupProtectedPage(page, listUrl, baseUrl);
+        const signatureRows = [];
+        if (!Array.isArray(batch) || batch.length < 1 || batch.some(row => !row || !Number.isSafeInteger(row.cellCount) || row.cellCount <= Math.max(...Object.values(columns))))
+          throw readFailure('BITPANEL_READ_PAGE_NOT_READY');
+        if (batch.length > 500) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+        for (const row of batch) {
+          const { id, username } = row;
+          if (!/^[1-9]\d{0,19}$/.test(id) || !lookupCredential(username, 120)) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+          signatureRows.push([id, username]);scannedRows++;
+          if (ids.has(id)) duplicateIds.add(id);ids.add(id);
+          const loginKey = username.toLowerCase();
+          if (logins.has(loginKey)) duplicateLogins.add(loginKey);logins.add(loginKey);
+          if (wanted.has(username)) candidates.push({ id, username, owner: row.owner, state: row.state, expiry: row.expiry, observedAt });
+        }
+        const signature = JSON.stringify(signatureRows);
+        if (pageSignatures.has(signature)) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+        pageSignatures.add(signature);scannedPages++;
+        await reportProgress('PAGE_SCANNED', { scannedPages, scannedRows });
+        const next = page.getByRole('button', { name: 'Next page', exact: true });
+        if (await next.count() !== 1) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+        if (!await next.isEnabled()) { complete = true;break; }
+        if (scannedPages >= maxPages) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+        await reportProgress('PAGINATING', { scannedPages, scannedRows });
+        await next.click();
+        await assertLookupProtectedPage(page, listUrl, baseUrl);
+        await waitForBitPanelListData(page, baseUrl);
+        await assertLookupProtectedPage(page, listUrl, baseUrl);
+        try {
+          await page.waitForFunction(({ previous, idColumn, usernameColumn, minimumColumns }) => {
+            const text = cell => { const value = cell?.innerText;return typeof value === 'string' ? value.trim() : null; };
+            const rows = [...document.querySelectorAll('table tbody tr')].map(row => [...row.querySelectorAll('td')])
+              .filter(cells => cells.length > minimumColumns);
+            const current = JSON.stringify(rows.map(cells => [text(cells[idColumn])?.replace(/^#/, ''), text(cells[usernameColumn])]));
+            return rows.length > 0 && current !== previous;
+          }, { previous: signature, idColumn: columns.id, usernameColumn: columns.username,
+            minimumColumns: Math.max(...Object.values(columns)) }, { timeout: 20_000 });
+        } catch {
+          assertLookupPage(page, listUrl, baseUrl);throw readFailure('BITPANEL_READ_TIMEOUT');
+        }
+        await waitForBitPanelListData(page, baseUrl);
+      }
+      if (!complete) throw readFailure('BITPANEL_READ_UNAVAILABLE');
+      const observations = [], counts = { requested: requestedNames.length, scannedPages, scannedRows, verified: 0, notFound: 0,
+        rejected: 0, rejectionReasons: {} };
+      const reject = (requestIndex, reason) => {
+        counts.rejected++;counts.rejectionReasons[reason] = (counts.rejectionReasons[reason] || 0) + 1;
+        observations.push({ requestIndex, status: 'REJECTED', reason });
+      };
+      for (const [requestIndex, username] of requestedNames.entries()) {
+        await reportProgress('CHECKING_CANDIDATES', counts);
+        const matches = candidates.filter(row => row.username === username), candidate = matches[0];
+        if (duplicateLogins.has(username.toLowerCase())) { reject(requestIndex, 'DUPLICATE_LOGIN');continue; }
+        if (!candidate) { counts.notFound++;observations.push({ requestIndex, status: 'NOT_FOUND' });continue; }
+        if (matches.length !== 1 || duplicateIds.has(candidate.id)) { reject(requestIndex, 'DUPLICATE_LIST_ID');continue; }
+        if (!lookupCredential(candidate.owner, 120) || !isGateOneOwner(candidate.owner)) { reject(requestIndex, 'FOREIGN_OWNER');continue; }
+        const expiresOn = lookupDate(candidate.expiry), state = normalizeBitPanelText(candidate.state);
+        if (!expiresOn) { reject(requestIndex, 'INVALID_EXPIRY');continue; }
+        if (!['ativa', 'ativo', 'active', 'expirada', 'expirado', 'expired'].includes(state)) { reject(requestIndex, 'PROVIDER_STATE_UNVERIFIED');continue; }
+        const observedAt = new Date(candidate.observedAt), beforeDetail = now();
+        if (!Number.isFinite(observedAt.getTime()) || observedAt > beforeDetail || beforeDetail - observedAt > 60_000) {
+          reject(requestIndex, 'STALE_OBSERVATION');continue;
+        }
+        const sourceUrl = `${baseUrl}/list/view/${candidate.id}`;
+        await reportProgress('READING_DETAIL', counts);
+        await page.goto(sourceUrl, { waitUntil: 'domcontentloaded' });await assertLookupProtectedPage(page, sourceUrl, baseUrl);
+        try { await page.waitForLoadState('networkidle', { timeout: 20_000 }); }
+        catch { await assertLookupProtectedPage(page, sourceUrl, baseUrl);throw readFailure('BITPANEL_READ_TIMEOUT'); }
+        await assertLookupProtectedPage(page, sourceUrl, baseUrl);
+        const details = await captureListDetails(page, { expectedListId: candidate.id, expectedUsername: username, includePassword: false });
+        if (lookupDate(details.expiryText) !== expiresOn) { reject(requestIndex, 'DETAIL_EXPIRY_CHANGED');continue; }
+        await assertLookupProtectedPage(page, sourceUrl, baseUrl);
+        const password = await listDetailValue(page, 'Senha:');
+        if (!lookupCredential(password, 1000)) { reject(requestIndex, 'PASSWORD_UNVERIFIED');continue; }
+        const confirmed = await captureListDetails(page, { expectedListId: candidate.id, expectedUsername: username, includePassword: false });
+        await assertLookupProtectedPage(page, sourceUrl, baseUrl);
+        if (lookupDate(confirmed.expiryText) !== expiresOn) { reject(requestIndex, 'DETAIL_EXPIRY_CHANGED');continue; }
+        const verifiedAt = now(), today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(verifiedAt);
+        if (!Number.isFinite(verifiedAt.getTime()) || verifiedAt < beforeDetail || verifiedAt - observedAt > 60_000) {
+          reject(requestIndex, 'STALE_OBSERVATION');continue;
+        }
+        observations.push({ requestIndex, status: 'VERIFIED', listId: candidate.id, username, owner: candidate.owner, password,
+          expiresOn, subscriptionStatus: ['expirada', 'expirado', 'expired'].includes(state) || expiresOn < today ? 'late' : 'active',
+          sourceUrl, verifiedAt: verifiedAt.toISOString() });counts.verified++;
+        observationStarts.set(requestIndex, observedAt.getTime());
+      }
+      const result = { status: 'READY', counts };
+      Object.defineProperty(result, 'observations', { value: observations, enumerable: false });
+      return result;
+    });
+    const discardStale = () => {
+      const finishedAt = new Date(now()).getTime();
+      for (let index = 0; index < result.observations.length; index++) {
+        const observation = result.observations[index];
+        if (observation.status !== 'VERIFIED') continue;
+        const sourceAt = observationStarts.get(observation.requestIndex), verifiedAt = new Date(observation.verifiedAt).getTime();
+        if (Number.isFinite(finishedAt) && Number.isFinite(sourceAt) && Number.isFinite(verifiedAt) &&
+            finishedAt >= sourceAt && finishedAt >= verifiedAt && finishedAt - sourceAt <= 60_000 && finishedAt - verifiedAt <= 60_000) continue;
+        result.observations[index] = { requestIndex: observation.requestIndex, status: 'REJECTED', reason: 'STALE_OBSERVATION' };
+        result.counts.verified--;result.counts.rejected++;
+        result.counts.rejectionReasons.STALE_OBSERVATION = (result.counts.rejectionReasons.STALE_OBSERVATION || 0) + 1;
+      }
+    };
+    // Saving refreshed auth or checking later candidates must not extend the
+    // first row's lease. A delayed diagnostics callback cannot extend it either.
+    discardStale();await reportProgress('COMPLETE', result.counts);discardStale();
+    progress = { ...progress, verified: result.counts.verified, notFound: result.counts.notFound, rejected: result.counts.rejected };
+    return result;
+  } catch (error) {
+    const code = readCodes.has(error?.code) || error?.code === 'BITPANEL_READ_PAGE_NOT_READY' ? error.code :
+      error?.name === 'TimeoutError' || Date.now() - started >= deadline ? 'BITPANEL_READ_TIMEOUT' :
+      /CAPTCHA|autentica|sessão|credenciais|acesso|login/i.test(String(error?.message)) ? 'BITPANEL_READ_REAUTH_REQUIRED' : 'BITPANEL_READ_UNAVAILABLE';
+    throw Object.assign(readFailure(code), { lookupProgress: Object.freeze({ ...progress }) });
+  }
 }
 
 export async function fetchBitPanelCustomers(config) {
@@ -342,7 +972,176 @@ export async function fetchBitPanelCustomers(config) {
   });
 }
 
-export async function renewInBitPanel(config, renewal) {
+async function captureBoundRenewalDetails(page, detailsUrl, binding, includePassword) {
+  if (page.url() !== detailsUrl) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  return captureListDetails(page, { expectedListId: binding.listId,
+    expectedUsername: binding.username, includePassword });
+}
+
+const CREDIT_BALANCE_TEXT = /^\s*(?:Saldo (?:em|de) cr[eé]ditos|Cr[eé]ditos dispon[ií]veis)\s*:\s*(?:0|[1-9]\d*)\s*$/i;
+
+// An icon and an unlabelled number do not establish what the number means.
+// Only an explicit, complete available-credit label can authorize expenditure.
+export function parseBitPanelCreditBalance(text) {
+  if (typeof text !== 'string' || text.length > 120 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/.test(text)) return null;
+  const clean = text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\u00a0/g, ' ').trim();
+  const match = /^(?:saldo (?:em|de) creditos|creditos disponiveis)\s*:\s*(0|[1-9]\d*)$/i.exec(clean);
+  const available = match ? Number(match[1]) : null;
+  return Number.isSafeInteger(available) ? available : null;
+}
+
+export async function readBitPanelCreditBalance(page, baseUrl) {
+  const assertSource = () => {
+    let current;
+    try { current = new URL(page.url()); } catch { throw readFailure('BITPANEL_READ_LINK_UNVERIFIED'); }
+    if (current.origin !== baseUrl || current.pathname !== '/list' || current.search || current.hash)
+      throw readFailure(current.pathname.includes('/login') && current.origin === baseUrl ?
+        'BITPANEL_READ_REAUTH_REQUIRED' : 'BITPANEL_READ_LINK_UNVERIFIED');
+  };
+  assertSource();
+  let available = null, visible = 0;
+  try {
+    const candidates = page.getByText(CREDIT_BALANCE_TEXT);
+    for (let index = 0; index < await candidates.count(); index += 1) {
+      const candidate = candidates.nth(index);
+      if (!await candidate.isVisible()) continue;
+      visible += 1;
+      available = parseBitPanelCreditBalance(await candidate.innerText());
+    }
+  } catch { available = null; visible = 0; }
+  assertSource();
+  return visible === 1 ? available : null;
+}
+
+function creditQuote(text, config, renewal) {
+  let validated;
+  try { validated = validateBitPanelRenewalQuote(text, renewal, config.BITPANEL_AUTOMATIC_RENEWAL_POLICY); }
+  catch { throw readFailure('RENEWAL_PROVIDER_QUOTE_MISMATCH'); }
+  if (validated) return validated;
+  // A human-approved operation also needs an intact provider quote for its
+  // available-credit check, even when the automatic policy does not apply.
+  const quote = parseBitPanelRenewalQuote(text);
+  const positive = value => Number.isSafeInteger(value) && value > 0;
+  const selectedPlan = String(config.BITPANEL_PLAN_LABEL || '').split(',')[0].trim();
+  if (quote.listId !== String(renewal.bitpanel_list_id || '') || quote.months !== renewal.duration_months ||
+      !selectedPlan || quote.planLabel !== selectedPlan || !positive(quote.credits) ||
+      !positive(quote.connections) || !positive(quote.unitPriceCents) || !positive(quote.totalPriceCents) ||
+      !positive(quote.unitPriceCents * quote.months * quote.connections) ||
+      quote.totalPriceCents !== quote.unitPriceCents * quote.months * quote.connections)
+    throw readFailure('RENEWAL_PROVIDER_QUOTE_MISMATCH');
+  return quote;
+}
+
+function creditCapacity(availableCredits, quote) {
+  return { status: availableCredits === null ? 'unverified' : 'verified', availableCredits,
+    sufficient: availableCredits === null ? null : availableCredits >= quote.credits };
+}
+
+function requireCreditCapacity(availableCredits, quote) {
+  if (!Number.isSafeInteger(availableCredits) || availableCredits < 0)
+    throw readFailure('RENEWAL_PROVIDER_BALANCE_UNVERIFIED');
+  if (availableCredits < quote.credits) throw readFailure('RENEWAL_PROVIDER_INSUFFICIENT_CREDITS');
+}
+
+// Preparation only opens and reads the form. The final actuator is deliberately
+// outside this function so the administrator preview follows the same path.
+async function prepareBitPanelRenewalFromPage(page, config, renewal, { allowAlreadyRenewed = false } = {}) {
+  const binding = readBinding({ listId: renewal.bitpanel_list_id,
+    username: renewal.bitpanel_reference, owner: renewal.bitpanel_owner });
+  const baseUrl = readBaseUrl(config), listId = binding.listId;
+  const detailsUrl = `${baseUrl}/list/view/${listId}`;
+  if (renewal.charge_stage === 'new_sale') throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  await page.goto(detailsUrl, { waitUntil: 'domcontentloaded' });
+  const before = await captureBoundRenewalDetails(page, detailsUrl, binding, false);
+  const row = await findListByUsername(page, { ...config, BITPANEL_BASE_URL: baseUrl }, binding.username);
+  if (!row || row.id !== listId || row.username !== binding.username || !isGateOneOwner(row.owner) ||
+      normalizeBitPanelText(row.owner) !== normalizeBitPanelText(binding.owner)) throw readFailure('BITPANEL_READ_LINK_UNVERIFIED');
+  if (!renewal.expected_expiration) throw new Error('RENEWAL_EXPECTED_EXPIRATION_REQUIRED');
+  if (allowAlreadyRenewed && before.expiryDate === renewal.expected_expiration)
+    return { alreadyRenewed: true, before, binding, listId, detailsUrl };
+  if (before.expiryDate !== renewal.current_expiry) throw new Error('RENEWAL_PROVIDER_EXPIRATION_MISMATCH');
+  assertRenewalListSource(page, baseUrl);
+  if (await page.locator('.v-dialog--active').count() !== 0) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+  const menuIcon = page.locator(`i[title="Mais opções, lista ${listId}"]`);
+  if (await menuIcon.count() !== 1) throw new Error('RENEWAL_PREVIEW_UNAVAILABLE');
+  await menuIcon.click();
+  assertRenewalListSource(page, baseUrl);
+  if (await page.locator('.v-dialog--active').count() !== 0) throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+  await page.getByRole('menuitem', { name: 'Renovar', exact: true }).click();
+  const dialog = await waitForRenewalForm(page, baseUrl);
+  await selectVuetifyOption(page, dialog, /^Selecione o plano/, config.BITPANEL_PLAN_LABEL, { renewalBaseUrl:baseUrl });
+  await selectVuetifyOption(page, dialog, /^Selecione a validade/, optionLabelsForMonths(renewal.duration_months), { renewalBaseUrl:baseUrl });
+  const quote = creditQuote(await dialog.innerText(), config, renewal);
+  const availableCredits = await readBitPanelCreditBalance(page, baseUrl);
+  return { before, binding, listId, detailsUrl, dialog, quote, availableCredits };
+}
+
+async function closeRenewalPreview(page, baseUrl) {
+  const deadline = Date.now() + 5_000;
+  try { assertRenewalListSource(page, baseUrl); } catch { throw readFailure('RENEWAL_PREVIEW_CLOSE_FAILED'); }
+  const dialog = page.locator('.v-dialog--active');
+  const count = await dialog.count();
+  if (count === 0) return;
+  if (count !== 1) throw readFailure('RENEWAL_PREVIEW_CLOSE_FAILED');
+  if (!await dialog.isVisible()) return;
+  const exit = dialog.getByRole('button', { name: /^Sair$/i, exact: true });
+  const close = dialog.getByRole('button', { name: /^Fechar$/i, exact: true });
+  const exitCount = await exit.count(), closeCount = await close.count();
+  let target;
+  if (exitCount === 1 && closeCount === 0 && await exit.isVisible()) target = exit;
+  else if (exitCount === 0 && closeCount === 1 && await loadingDialogShape(dialog)) target = close;
+  else throw readFailure('RENEWAL_PREVIEW_CLOSE_FAILED');
+  try {
+    assertRenewalListSource(page, baseUrl);
+    if (await dialog.count() !== 1) throw Error();
+    const clickBudget = deadline - Date.now();
+    if (clickBudget <= 0) throw Error();
+    await target.click({timeout:clickBudget});
+    const hiddenBudget = deadline - Date.now();
+    if (hiddenBudget <= 0) throw Error();
+    await dialog.waitFor({ state: 'hidden', timeout:hiddenBudget });
+    assertRenewalListSource(page, baseUrl);
+  } catch { throw readFailure('RENEWAL_PREVIEW_CLOSE_FAILED'); }
+}
+
+async function closeRenewalPreservingPrimary(page, baseUrl, primaryError) {
+  try { await closeRenewalPreview(page, baseUrl); }
+  catch (error) {
+    if (!primaryError) throw error;
+    try { if (typeof primaryError === 'object') primaryError.cleanupCode = 'RENEWAL_PREVIEW_CLOSE_FAILED'; } catch {}
+  }
+}
+
+const previewCodes = new Set([...readCodes, 'RENEWAL_PROVIDER_QUOTE_MISMATCH',
+  'RENEWAL_PROVIDER_EXPIRATION_MISMATCH', 'RENEWAL_EXPECTED_EXPIRATION_REQUIRED',
+  'RENEWAL_PREVIEW_UNAVAILABLE', 'RENEWAL_PREVIEW_CLOSE_FAILED']);
+
+// Available while automation is disabled. It never claims a job, reads a
+// password, captures a screenshot, or obtains the final RENOVAR button.
+export async function previewBitPanelRenewal(config, renewal, { withSession = runWithBrowser } = {}) {
+  try {
+    const previewRenewal = { ...renewal, automatic_renewal: true };
+    if (config.BITPANEL_AUTOMATIC_RENEWAL_POLICY?.enabled !== true) throw new Error('RENEWAL_PROVIDER_QUOTE_MISMATCH');
+    return await withSession({ ...config, BITPANEL_READ_TIMEOUT_MS: 30_000 }, async page => {
+      let primaryError;
+      try {
+        const prepared = await prepareBitPanelRenewalFromPage(page, config, previewRenewal);
+        return { prepared: true, submitted: false, quote: prepared.quote,
+          balance: creditCapacity(prepared.availableCredits, prepared.quote),
+          sourceUrl: prepared.detailsUrl, verifiedAt: new Date().toISOString() };
+      } catch (error) { primaryError = error; throw error; }
+      finally { await closeRenewalPreservingPrimary(page, readBaseUrl(config), primaryError); }
+    });
+  } catch (error) {
+    const code = error?.code || error?.message;
+    if (previewCodes.has(code)) throw Object.assign(readFailure(code), error?.cleanupCode === 'RENEWAL_PREVIEW_CLOSE_FAILED' ?
+      {cleanupCode:'RENEWAL_PREVIEW_CLOSE_FAILED'} : {});
+    if (/CAPTCHA|autentica|sessão|credenciais|acesso|login/i.test(String(error?.message))) throw readFailure('BITPANEL_READ_REAUTH_REQUIRED');
+    throw readFailure('RENEWAL_PREVIEW_UNAVAILABLE');
+  }
+}
+
+export async function renewInBitPanel(config, renewal, { withSession = runWithBrowser } = {}) {
   if (config.BITPANEL_MODE === 'disabled') throw new Error('Automação BitPanel desativada.');
   if (config.BITPANEL_MODE === 'simulation') {
     return {
@@ -355,63 +1154,42 @@ export async function renewInBitPanel(config, renewal) {
   }
   if (!renewal.bitpanel_list_id) throw new Error('ID da lista BitPanel não informado.');
 
-  return runWithBrowser(config, async (page) => {
-    const listId = String(renewal.bitpanel_list_id);
-    const detailsUrl = `${config.BITPANEL_BASE_URL}/list/view/${listId}`;
-    await page.goto(detailsUrl, { waitUntil: 'domcontentloaded' });
-    const before = await captureListDetails(page);
-    const row = await findListByUsername(
-      page,
-      config,
-      renewal.bitpanel_reference || before.username
-    );
-    if (!row || row.id !== listId) {
-      throw new Error('Lista não encontrada na busca do BitPanel.');
-    }
-    if (!isGateOneOwner(row.owner)) {
-      throw new Error('Automação bloqueada: a lista não pertence ao Gate One Pro Server.');
-    }
-    if (!renewal.expected_expiration) throw new Error('RENEWAL_EXPECTED_EXPIRATION_REQUIRED');
-    if (before.expiryDate === renewal.expected_expiration) {
+  return withSession(config, async (page) => {
+    const { before, binding, listId, detailsUrl, dialog, quote, availableCredits, alreadyRenewed } =
+      await prepareBitPanelRenewalFromPage(page, config, renewal, { allowAlreadyRenewed: true });
+    if (alreadyRenewed) {
       return {operation:'renew',simulated:false,alreadyRenewed:true,beforeExpiry:renewal.current_expiry,
         afterExpiry:before.expiryDate,evidencePath:null,listId,username:before.username};
     }
-    if (before.expiryDate !== renewal.current_expiry) throw new Error('RENEWAL_PROVIDER_EXPIRATION_MISMATCH');
 
-    const menuIcon = page.locator(`i[title="Mais opções, lista ${listId}"]`);
-    if ((await menuIcon.count()) !== 1) {
-      throw new Error('Menu de opções da lista não encontrado.');
+    const evidencePath = join(config.ARTIFACTS_DIR, `${Date.now()}-${safeName(renewal.id)}-renovacao.png`);
+    let submitted = false;
+    let primaryError;
+    try {
+      requireCreditCapacity(availableCredits, quote);
+      if (renewal.automatic_renewal === true && typeof config.BITPANEL_BEFORE_RENEWAL_SUBMIT !== 'function')
+        throw readFailure('RENEWAL_BINDING_UNVERIFIED');
+      await page.screenshot({ path: evidencePath, fullPage: true });
+      const renewButton = dialog.getByRole('button', { name: 'Renovar', exact: true });
+      if ((await renewButton.count()) !== 1) throw new Error('Botão final de renovação não encontrado.');
+      const currentQuote = creditQuote(await dialog.innerText(), config, renewal);
+      requireCreditCapacity(await readBitPanelCreditBalance(page, readBaseUrl(config)), currentQuote);
+      if (typeof config.BITPANEL_BEFORE_RENEWAL_SUBMIT === 'function') {
+        let result;
+        try { result = await config.BITPANEL_BEFORE_RENEWAL_SUBMIT(); }
+        catch { throw readFailure('RENEWAL_BINDING_UNVERIFIED'); }
+        if (result?.verified !== true) throw readFailure('RENEWAL_BINDING_UNVERIFIED');
+      }
+      await renewButton.click();
+      submitted = true;
+      await dialog.waitFor({ state: 'hidden' });
+    } catch (error) { primaryError = error; throw error; }
+    finally {
+      if (!submitted) await closeRenewalPreservingPrimary(page, readBaseUrl(config), primaryError);
     }
-    await menuIcon.click();
-    await page.getByRole('menuitem', { name: 'Renovar', exact: true }).click();
-
-    const dialog = page.locator('.v-dialog--active');
-    await dialog.waitFor({ state: 'visible' });
-    await selectVuetifyOption(
-      page,
-      dialog,
-      /^Selecione o plano/,
-      config.BITPANEL_PLAN_LABEL
-    );
-    await selectVuetifyOption(
-      page,
-      dialog,
-      /^Selecione a validade/,
-      optionLabelsForMonths(renewal.duration_months)
-    );
-
-    const evidencePath = join(
-      config.ARTIFACTS_DIR,
-      `${Date.now()}-${safeName(renewal.id)}-renovacao.png`
-    );
-    await page.screenshot({ path: evidencePath, fullPage: true });
-    const renewButton = dialog.getByRole('button', { name: 'Renovar', exact: true });
-    if ((await renewButton.count()) !== 1) throw new Error('Botão final de renovação não encontrado.');
-    await renewButton.click();
-    await dialog.waitFor({ state: 'hidden' });
 
     await page.goto(detailsUrl, { waitUntil: 'domcontentloaded' });
-    const after = await captureListDetails(page);
+    const after = await captureBoundRenewalDetails(page, detailsUrl, binding, true);
     if (after.expiryDate !== renewal.expected_expiration) throw new Error('RENEWAL_PROVIDER_EXPIRATION_MISMATCH');
     return {
       operation: 'renew',
