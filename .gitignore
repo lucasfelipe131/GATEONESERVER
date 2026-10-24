@@ -4,6 +4,8 @@ artifacts/
 data/bitpanel-logins-*.json
 bitpanel-session.json
 data/bitpanel-auth/
+data/bitpanel-auth-*/
+data/bitpanel-session*.json
 data/bitpanel-auth-*.err
 coverage/
 *.log

@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
-import { bitPanelAuthOrigin, bitPanelHumanAuthState, bitPanelListHeadersReady, captureHumanBitPanelSession,
+import { bitPanelAuthOrigin, bitPanelHumanAuthState, bitPanelListHeadersReady, bitPanelLinesHeadersReady, captureHumanBitPanelSession,
   parseBitPanelAuthArgs, safeBitPanelAuthError, waitForHumanBitPanelSession } from '../scripts/bitpanel-auth.js';
 
 const origin = 'https://bitpanel.vip';
 const privateValue = 'synthetic-private-cookie-and-password';
-function pageFixture({ url = `${origin}/login`, table = false, headers = ['ID', 'Usuário', 'Proprietário'], login = false, captcha = false, navigate } = {}) {
-  const state = { url, table, headers, login, captcha, closed: false }, calls = { navigation: [], fieldActions: 0, contents: 0, headerReads: 0 };
+function pageFixture({ url = `${origin}/login`, table = false, headers = ['ID', 'Usuário', 'Proprietário'], login = false,
+  loginButton = false, captcha = false, captchaControl = false, navigation = [], tableCount = 1, navigate } = {}) {
+  const state = { url, table, headers, login, loginButton, captcha, captchaControl, navigation, tableCount, closed: false }, calls = { navigation: [], fieldActions: 0, contents: 0, headerReads: 0 };
   const page = {
     url: () => state.url, isClosed: () => state.closed,
     goto: async (next, options) => { calls.navigation.push({ url: next, options });if (navigate) return navigate(next, state); },
@@ -16,13 +17,17 @@ function pageFixture({ url = `${origin}/login`, table = false, headers = ['ID', 
         isVisible: async () => state.headers[index]?.visible !== false,
         innerText: async () => { calls.headerReads++;return typeof state.headers[index] === 'string' ? state.headers[index] : state.headers[index].text; }
       }) };
-      const visibility = () => selector === 'table tbody' ? state.table : selector.includes("input[type='password']") ? state.login : state.captcha;
+      if (selector === 'table') return { count: async () => state.tableCount };
+      if (selector === "input[name='cf-turnstile-response'],input[name='g-recaptcha-response']") return { count: async () => state.captchaControl ? 1 : 0 };
+      const visibility = () => selector === 'table tbody' ? state.table : selector.includes("input[type='password']") ? state.login :
+        selector.startsWith('a[href=') ? state.navigation.some(path => selector.includes(`a[href='${path}']`)) : state.captcha;
       const values = () => Array.isArray(visibility()) ? visibility() : [visibility()];
       return { count: async () => values().length, nth: index => ({ isVisible: async () => Boolean(values()[index]),
         fill: async () => { calls.fieldActions++;assert.fail('human-only helper cannot fill'); },
         click: async () => { calls.fieldActions++;assert.fail('human-only helper cannot click'); },
         innerText: async () => { calls.contents++;assert.fail('customer content cannot be read'); } }) };
     },
+    getByRole: () => ({ count: async () => 1, nth: () => ({ isVisible: async () => state.loginButton }) }),
     waitForLoadState: async () => assert.fail('page readiness cannot require full load/network-idle'),
     waitForURL: async () => assert.fail('page readiness cannot wait only on the first tab URL')
   };
@@ -51,6 +56,9 @@ function clockFixture(onSleep = () => {}) {
 
 test('page states require the protected list and verified headers, while login, CAPTCHA and other origins remain waiting', () => {
   assert.equal(bitPanelHumanAuthState({ url: `${origin}/list`, tableProtectedReady: true }), 'READY');
+  assert.equal(bitPanelHumanAuthState({ url: `${origin}/lines`, linesProtectedReady: true }), 'READY');
+  for (const url of [`${origin}/lines?filter=all`, `${origin}/lines#tab`, `${origin}/lines/`])
+    assert.equal(bitPanelHumanAuthState({ url, linesProtectedReady: true }), 'WAITING');
   assert.equal(bitPanelHumanAuthState({ url: `${origin}/list/?private-query=${privateValue}`, tableProtectedReady: true }), 'READY');
   assert.equal(bitPanelHumanAuthState({ url: `${origin}/list`, tableVisible: true }), 'WAITING');
   assert.equal(bitPanelHumanAuthState({ url: origin }), 'OPEN_LIST');
@@ -82,6 +90,38 @@ test('new English protected list captures only after unique ID, owner and userna
       save: async () => { saves++;assert.ok(clock.now() >= 250); } });
     assert.equal(result.code, 'BITPANEL_AUTH_SESSION_SAVED');assert.equal(saves, 1);assert.equal(calls.storage, 1);
     assert.equal(calls.close, 1);assert.equal(f.calls.fieldActions, 0);assert.equal(f.calls.contents, 0);
+  }
+});
+
+const currentLinesHeaders = ['Estado', 'Usuário', 'Senha', 'País', 'Telas', 'Status', 'Validade', 'Criação', 'Ações'];
+const currentLinesNavigation = ['/lines', '/dashboard', '/finance'];
+test('the observed lines header vocabulary requires seven unique semantic groups', () => {
+  assert.equal(bitPanelLinesHeadersReady(currentLinesHeaders), true);
+  assert.equal(bitPanelLinesHeadersReady(['State', 'Username', 'Password', 'Screens', 'Status', 'Expires', 'Actions']), true);
+  for (const headers of [[], currentLinesHeaders.filter(value => value !== 'Senha'), [...currentLinesHeaders, 'Username'],
+    [...currentLinesHeaders, 'Estado'], currentLinesHeaders.map(value => value === 'Validade' ? 'Other' : value)])
+    assert.equal(bitPanelLinesHeadersReady(headers), false);
+});
+
+test('the current canonical lines page captures after two observations with its own navigation and no row reads', async () => {
+  const f = pageFixture({ url: `${origin}/lines`, table: true, headers: currentLinesHeaders, navigation: currentLinesNavigation });
+  const { context, calls } = contextFixture([f.page]), clock = clockFixture();let saves = 0;
+  const result = await captureHumanBitPanelSession({ ...clock, timeoutMs: 2_000, ensureProfile: async () => {}, launch: async () => context,
+    save: async () => { saves++;assert.ok(clock.now() >= 250); } });
+  assert.equal(result.code, 'BITPANEL_AUTH_SESSION_SAVED');assert.equal(saves, 1);assert.equal(calls.storage, 1);
+  assert.equal(f.calls.navigation[0].url, `${origin}/lines`);assert.equal(f.calls.contents, 0);assert.equal(f.calls.fieldActions, 0);
+});
+
+test('lines capture rejects missing own navigation, duplicate or missing headers, login, hidden Turnstile, multiple tables and foreign sources', async () => {
+  for (const patch of [{ navigation: ['/lines', '/dashboard'] }, { navigation: ['https://outside.invalid/lines', '/dashboard', '/finance'] },
+    { headers: currentLinesHeaders.filter(value => value !== 'Senha') }, { headers: [...currentLinesHeaders, 'Usuário'] },
+    { login: true }, { loginButton: true }, { captcha: true }, { captchaControl: true }, { tableCount: 2 },
+    { url: `${origin}/lines?filter=all` }, { url: `${origin}/lines#tab` }, { url: 'https://outside.invalid/lines' }]) {
+    const f = pageFixture({ url: `${origin}/lines`, table: true, headers: currentLinesHeaders, navigation: currentLinesNavigation, ...patch });
+    const { context, calls } = contextFixture([f.page]), clock = clockFixture();let saves = 0;
+    await assert.rejects(captureHumanBitPanelSession({ ...clock, timeoutMs: 1_000, ensureProfile: async () => {}, launch: async () => context,
+      save: async () => { saves++; } }), { code: 'BITPANEL_AUTH_TIMEOUT' });
+    assert.equal(saves, 0);assert.equal(calls.storage, 0);assert.equal(f.calls.contents, 0);assert.equal(f.calls.fieldActions, 0);
   }
 });
 
@@ -142,7 +182,7 @@ test('a stable provider homepage opens the protected list and visible DOM succee
   const f = pageFixture({ url: origin, navigate: (_url, state) => { state.url = `${origin}/list`;state.table = true;return new Promise(() => {}); } });
   const { context } = contextFixture([f.page]), clock = clockFixture();
   assert.equal(await waitForHumanBitPanelSession(context, { ...clock, timeoutMs: 5_000 }), f.page);
-  assert.equal(f.calls.navigation.length, 1);assert.equal(f.calls.navigation[0].url, `${origin}/list`);
+  assert.equal(f.calls.navigation.length, 1);assert.equal(f.calls.navigation[0].url, `${origin}/lines`);
   assert.equal(f.calls.navigation[0].options.waitUntil, 'commit');assert.equal(f.calls.contents, 0);assert.equal(f.calls.fieldActions, 0);
 });
 

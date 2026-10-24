@@ -43,14 +43,23 @@ export function bitPanelListHeadersReady(headers) {
     .every(pattern => names.filter(name => pattern.test(name)).length === 1);
 }
 
+export function bitPanelLinesHeadersReady(headers) {
+  if (!Array.isArray(headers) || headers.length > 100 || headers.some(value => typeof value !== 'string' || value.length > 200)) return false;
+  const names = headers.map(value => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase());
+  return [/^(?:estado|state)$/, /^(?:usuario|username|user name|login)$/, /^(?:senha|password)$/,
+    /^(?:telas|screens|connections)$/, /^status$/, /^(?:validade|expires|expiration)$/, /^(?:acoes|actions)$/]
+    .every(pattern => names.filter(name => pattern.test(name)).length === 1);
+}
+
 /** Classify only generic page state; never inspect customer rows, credentials or CAPTCHA contents. */
 export function bitPanelHumanAuthState({ url, baseUrl = 'https://bitpanel.vip', tableProtectedReady = false,
-  loginVisible = false, captchaVisible = false } = {}) {
+  linesProtectedReady = false, loginVisible = false, captchaVisible = false } = {}) {
   const origin = bitPanelAuthOrigin(baseUrl);
   let current;
   try { current = new URL(url); } catch { return 'IGNORED'; }
   if (current.origin !== origin || current.username || current.password) return 'IGNORED';
   if (/\/login(?:\/|$)/i.test(current.pathname) || loginVisible || captchaVisible) return 'WAITING';
+  if (current.pathname === '/lines' && !current.search && !current.hash && linesProtectedReady) return 'READY';
   if (['/list', '/list/'].includes(current.pathname) && tableProtectedReady) return 'READY';
   return current.pathname === '/' ? 'OPEN_LIST' : 'WAITING';
 }
@@ -60,28 +69,38 @@ async function genericPageState(page, baseUrl) {
   const observedUrl = page.url();
   if (bitPanelHumanAuthState({ url: observedUrl, baseUrl }) === 'IGNORED') return 'IGNORED';
   const visible = async selector => {
-    const candidates = page.locator(selector), count = await candidates.count();
+    const candidates = typeof selector === 'string' ? page.locator(selector) : selector, count = await candidates.count();
     if (count > 100) return true;
     for (let index = 0; index < count; index++)
       if (await candidates.nth(index).isVisible().catch(() => false)) return true;
     return false;
   };
-  const [tableVisible, loginVisible, captchaVisible] = await Promise.all([
+  const [tableVisible, passwordVisible, loginButtonVisible, captchaWidgetVisible, captchaControlCount] = await Promise.all([
     visible('table tbody'),
     visible("input[type='password'], input[autocomplete='current-password']"),
-    visible("[data-sitekey], iframe[src*='challenges.cloudflare.com'], iframe[src*='recaptcha']")
+    visible(page.getByRole('button', { name: /^(?:Login|Log in|Sign in|Entrar|Acessar)$/i })),
+    visible("[data-sitekey], iframe[src*='challenges.cloudflare.com'], iframe[src*='recaptcha']"),
+    page.locator("input[name='cf-turnstile-response'],input[name='g-recaptcha-response']").count()
   ]);
-  let tableProtectedReady = false;
-  if (tableVisible && ['/list', '/list/'].includes(new URL(observedUrl).pathname)) {
+  const loginVisible = passwordVisible || loginButtonVisible, captchaVisible = captchaWidgetVisible || captchaControlCount > 0;
+  let tableProtectedReady = false, linesProtectedReady = false;
+  const pathname = new URL(observedUrl).pathname;
+  if (tableVisible && ['/list', '/list/', '/lines'].includes(pathname)) {
     const headers = page.locator('table thead th'), count = await headers.count(), names = [];
     if (count <= 100) for (let index = 0; index < count; index++) {
       const header = headers.nth(index);
       if (await header.isVisible().catch(() => false)) names.push(await header.innerText());
     }
-    tableProtectedReady = count <= 100 && bitPanelListHeadersReady(names);
+    if (pathname === '/lines') {
+      const ownOrigin = bitPanelAuthOrigin(baseUrl);
+      const ownNavigation = await Promise.all(['/lines', '/dashboard', '/finance'].map(path =>
+        visible(`a[href='${path}'],a[href='${ownOrigin}${path}']`)));
+      linesProtectedReady = count <= 100 && bitPanelLinesHeadersReady(names) && ownNavigation.every(Boolean) &&
+        await page.locator('table').count() === 1 && await page.locator('table tbody').count() === 1;
+    } else tableProtectedReady = count <= 100 && bitPanelListHeadersReady(names);
   }
   if (page.url() !== observedUrl) return 'WAITING';
-  return bitPanelHumanAuthState({ url: observedUrl, baseUrl, tableProtectedReady, loginVisible, captchaVisible });
+  return bitPanelHumanAuthState({ url: observedUrl, baseUrl, tableProtectedReady, linesProtectedReady, loginVisible, captchaVisible });
 }
 
 /** The caller owns cleanup. Navigation is read-only; all authentication stays with the human. */
@@ -107,7 +126,7 @@ export async function waitForHumanBitPanelSession(context, { baseUrl = 'https://
           if (!observation.rootAttempted && now() - observation.rootSince >= 1_500) {
             observation.rootAttempted = true;emit('BITPANEL_AUTH_OPENING_LIST');
             // Commit finishes before DOM/load completion. A timeout still leaves the DOM observable.
-            void page.goto(`${origin}/list`, { waitUntil: 'commit', timeout: Math.min(10_000, Math.max(1, deadline - now())) })
+            void page.goto(`${origin}/lines`, { waitUntil: 'commit', timeout: Math.min(10_000, Math.max(1, deadline - now())) })
               .catch(() => { if (!closed) emit('BITPANEL_AUTH_NAVIGATION_RETRY'); });
           }
         } else { observation.rootSince = null;observation.rootAttempted = false; }
@@ -156,7 +175,7 @@ export async function captureHumanBitPanelSession({ baseUrl = 'https://bitpanel.
     const page = context.pages().find(candidate => !candidate.isClosed()) || await context.newPage();
     emit('BITPANEL_AUTH_WAITING_FOR_HUMAN');
     // Do not await load/network-idle, and never fill a field or click a login/CAPTCHA control.
-    void page.goto(`${origin}/list`, { waitUntil: 'commit', timeout: 10_000 })
+    void page.goto(`${origin}/lines`, { waitUntil: 'commit', timeout: 10_000 })
       .catch(() => emit('BITPANEL_AUTH_NAVIGATION_RETRY'));
     const authenticated = await waitForHumanBitPanelSession(context, { baseUrl: origin, timeoutMs, now, sleep, emit, cancelled });
     if (cancelled()) throw fail('BITPANEL_AUTH_BROWSER_CLOSED');
