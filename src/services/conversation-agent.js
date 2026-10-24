@@ -4,6 +4,7 @@ import { GATE_CONVERSATION_AGENT_PROMPT_VERSION } from '../core/conversation-pro
 import {
   avoidRepeatedResponse,
   mergeResponseFacts,
+  renderConversationCourtesy,
   renderConversationResponse,
   responseFactsFromContext,
   safeResponseForFacts,
@@ -42,6 +43,29 @@ function statusFromToolError(error) {
   if (error?.policy_result === 'REQUIRE_HUMAN') return 'HUMAN_REQUIRED';
   if (error?.policy_result === 'DENY') return 'POLICY_DENIED';
   return 'TOOL_FAILED';
+}
+
+function courtesyContinuation(previous, customerId) {
+  const states = new Set(['awaiting_login','awaiting_name','awaiting_plan','waiting_payment','renewal',
+    'support_device','support_application','support_scope','support_result']);
+  if (!previous || previous.customer_id !== customerId || !states.has(previous.conversation_state))
+    return {customer_id:customerId};
+  const continuation = {customer_id:customerId,conversation_state:previous.conversation_state};
+  const session = previous.support_session;
+  if (customerId && previous.conversation_state.startsWith('support_') && session &&
+      typeof session === 'object' && !Array.isArray(session)) {
+    const field = value => typeof value === 'string' && !/https?:\/\/|\b(?:senha|password|token)\s*[:=]|\bBearer\s/i.test(value)
+      ? value.replace(/[\r\n\x00-\x1f]/g,' ').trim().slice(0,100) || null : null;
+    continuation.support_session = {
+      problem:field(session.problem),
+      category:new Set(['buffering','audio_video','login','installation','connection','payment']).has(session.category) ? session.category : 'connection',
+      device:field(session.device),application:field(session.application),
+      scope:['ALL','ONE'].includes(session.scope) ? session.scope : null
+    };
+  }
+  // Retain the conversational step only. Operational facts are read afresh on
+  // the next query and never become authoritative through a courtesy reply.
+  return continuation;
 }
 
 function resultFromStored(stored) {
@@ -119,6 +143,7 @@ export class GateConversationAgent {
     let conversationState = null;
     let supportEligible = null;
     let recentDecisions = [];
+    let courtesyReply = null;
 
     try {
       if (intentResult.security_flags.includes('PROMPT_INJECTION')) {
@@ -130,6 +155,7 @@ export class GateConversationAgent {
         const resolution = await discoveryTurn.execute('resolveCustomer', identity);
         if (resolution.status === 'MATCHED') customerId = resolution.customer_id;
         recentDecisions = await this.repository.recentDecisions(conversationId,customerId);
+        courtesyReply = renderConversationCourtesy(text,recentDecisions);
         let activeHandoff = await this.repository.activeHandoff(conversationId,customerId);
         if (activeHandoff && /^MENU$/i.test(String(text || '').trim())) {
           await this.repository.resumeHandoffAutomation(conversationId,customerId);
@@ -140,12 +166,13 @@ export class GateConversationAgent {
           if (contextual.primary_intent !== 'UNKNOWN') intentResult = contextual;
         }
 
-        if (intentResult.primary_intent === 'UNKNOWN' && this.semanticInterpreter &&
+        if (!courtesyReply && intentResult.primary_intent === 'UNKNOWN' && this.semanticInterpreter &&
             !activeHandoff && resolution.status !== 'AMBIGUOUS') {
           try {
             const semantic = await this.semanticInterpreter({
               text, contentType,
-              conversationState: recentDecisions[0]?.response_facts?.conversation_state
+              conversationState: recentDecisions[0]?.response_facts?.conversation_state,
+              recentIntents: recentDecisions.slice(0,3).map(row => row.intents?.[0]?.name)
             });
             // Validate even injected interpreters; tool policy remains authoritative.
             const validated = validatedSemanticIntent(semantic && {
@@ -162,6 +189,13 @@ export class GateConversationAgent {
           outcome = 'HANDOFF_PENDING';
           autonomous = false;
           conversationState = 'human_handoff';
+        } else if (courtesyReply) {
+          // Never interpret courtesy as payment approval or a support result.
+          // The active handoff above always retains priority, including silence.
+          outcome = 'CONVERSATION_ACKNOWLEDGED';
+          const continuation=courtesyContinuation(recentDecisions[0]?.response_facts,customerId);
+          conversationState=continuation.conversation_state || null;
+          responseFacts=mergeResponseFacts(responseFacts,continuation);
         } else if (resolution.status === 'AMBIGUOUS') {
           const handoff = await discoveryTurn.execute('requestHumanHandoff', {
             conversation_id: conversationId,
@@ -199,6 +233,9 @@ export class GateConversationAgent {
             const plans = await discoveryTurn.execute('listPlans', {});
             responseFacts = mergeResponseFacts(responseFacts, { plans });
             proposedAction = 'listPlans';
+          } else if (intentResult.primary_intent === 'GREETING') {
+            // A casual hello does not require disclosing a login or full name.
+            proposedAction = null;
           } else {
             outcome = 'IDENTITY_REQUIRED';
             autonomous = false;
@@ -353,7 +390,7 @@ export class GateConversationAgent {
       if (!conversationState && ['CREATED','PENDING'].includes(responseFacts.payment_status)) conversationState = 'waiting_payment';
       if (!conversationState && ['READY','PROCESSING','VERIFYING','REQUESTED','RETRY_SCHEDULED'].includes(responseFacts.renewal_status)) conversationState = 'renewal';
       responseFacts = mergeResponseFacts(responseFacts,{conversation_state:conversationState});
-      let responseText = renderConversationResponse({
+      let responseText = outcome === 'CONVERSATION_ACKNOWLEDGED' ? courtesyReply : renderConversationResponse({
         intent: intentResult.primary_intent,
         facts: responseFacts,
         outcome
@@ -365,7 +402,7 @@ export class GateConversationAgent {
         responseStatus = 'SAFE_FALLBACK';
         outcome = 'RESPONSE_VALIDATION_FALLBACK';
       }
-      const repeated = ['HANDOFF_CREATED','HANDOFF_PENDING','IDENTITY_AMBIGUOUS','IDENTITY_REQUIRED'].includes(outcome)
+      const repeated = ['HANDOFF_CREATED','HANDOFF_PENDING','IDENTITY_AMBIGUOUS','IDENTITY_REQUIRED','CONVERSATION_ACKNOWLEDGED'].includes(outcome)
         ? {text:responseText,repeated:false} : avoidRepeatedResponse(
         responseText,
         [...(contextSnapshot?.customer360?.conversation?.recent_messages || []),

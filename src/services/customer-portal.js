@@ -5,7 +5,7 @@ import { getSetting } from '../db.js';
 import { cleanCustomerName } from './customer-memory.js';
 import { PgConversationAgentRepository } from './conversation-operations.js';
 
-export const PRIVACY_NOTICE_VERSION = '2026-10-12.1';
+export const PRIVACY_NOTICE_VERSION = '2026-10-12.2';
 export const PORTAL_LINK_MINUTES = 15;
 export const PORTAL_SESSION_HOURS = 24;
 const failure = (code, statusCode = 400) => Object.assign(new Error(code), { code, statusCode });
@@ -32,12 +32,13 @@ export class CustomerPortal {
     return {
       version: PRIVACY_NOTICE_VERSION, controller, contact, ready: Boolean(controller && contact),
       whatsapp_url:this.config.PUBLIC_WHATSAPP_NUMBER?`https://wa.me/${this.config.PUBLIC_WHATSAPP_NUMBER}`:null,
-      purposes: ['Cadastro e identificação da conta', 'Atendimento e gestão da assinatura', 'Cobranças solicitadas e confirmação de pagamentos'],
-      data: ['Nome', 'WhatsApp verificado', 'E-mail de contato, opcional', 'Login do serviço e histórico da assinatura e dos pagamentos'],
-      providers: ['Mercado Pago, para processar pagamentos', 'WhatsApp/Meta, para comunicação', 'Railway, para hospedagem e armazenamento'],
+      purposes: ['Cadastro e identificação da conta', 'Atendimento e gestão da assinatura', 'Cobranças solicitadas e confirmação de pagamentos', 'Orientação opcional por IA sobre instalação, aplicativos e funcionamento da própria assinatura'],
+      data: ['Nome', 'WhatsApp verificado', 'E-mail de contato, opcional', 'Login do serviço e histórico da assinatura e dos pagamentos', 'Perguntas enviadas pelo cliente à ajuda com IA'],
+      providers: ['Mercado Pago, para processar pagamentos', 'WhatsApp/Meta, para comunicação', 'Railway, para hospedagem e armazenamento', 'OpenAI, para responder às perguntas enviadas à ajuda com IA'],
       legalBasis: 'Os dados necessários ao atendimento e à assinatura são tratados para executar o contrato ou procedimentos solicitados pelo cliente. Avisos opcionais pelo WhatsApp dependem de autorização separada.',
       retention: 'Mantemos os dados necessários enquanto houver atendimento ou assinatura. Após o encerramento, pedidos de eliminação são avaliados; documentos e registros podem ser conservados quando houver obrigação legal ou necessidade de exercer direitos.',
       rights: 'Você pode acessar e corrigir seus dados, solicitar cópia ou eliminação e retirar a autorização para avisos. Pedidos são gratuitos e podem ser feitos nesta área ou pelo contato indicado.',
+      aiHelp: 'A ajuda com IA é acionada somente ao enviar uma pergunta. Enviamos o texto tratado da pergunta e o contexto necessário da própria assinatura, dos guias e do DNS. Nome, telefone, e-mail, login, senha e dados de pagamento não são incluídos nesse contexto. Não informe dados sensíveis nas perguntas. A Gate One não salva um histórico dessas conversas; a OpenAI pode processar dados fora do Brasil e manter registros técnicos conforme sua política de dados. A IA orienta, e pode errar; pagamentos e renovações dependem da confirmação dos sistemas responsáveis.',
       noCpf: 'O cadastro Gate One Pro não solicita CPF nem dados de cartão. O Mercado Pago poderá solicitar informações próprias no checkout, conforme suas regras.'
     };
   }
