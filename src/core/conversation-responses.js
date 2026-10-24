@@ -21,11 +21,38 @@ function currency(cents, code = 'BRL') {
   return (cents / 100).toLocaleString('pt-BR', { style: 'currency', currency: code });
 }
 
+function subscriptionStatus(value) {
+  return ({ACTIVE:'ativo',PAST_DUE:'vencido',EXPIRED:'vencido',BLOCKED:'bloqueado',
+    CANCELLED:'cancelado',CANCELED:'cancelado',PENDING:'aguardando confirmação',SUSPENDED:'suspenso'})[
+      String(value || '').toUpperCase()] || 'em atualização';
+}
+
 function paymentChoices(facts) {
   const allowed=new Set(['Pix','Cartão de crédito','Boleto']);
   const methods=[...new Set((Array.isArray(facts.payment_methods)?facts.payment_methods:[]).filter(method=>allowed.has(method)))];
   return methods.length ? `Formas de pagamento no Mercado Pago:\n${methods.map(method=>`• ${method}`).join('\n')}\nAs condições e a disponibilidade final aparecem no checkout.`
     : 'Consulte as formas de pagamento disponíveis no checkout seguro do Mercado Pago.';
+}
+
+// Courtesy is deliberately narrow: a greeting or thanks combined with an
+// operational request must still follow the normal intent/tool policy.
+export function renderConversationCourtesy(value, recentMessages = []) {
+  const text = String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Z0-9 ]/gi, ' ').replace(/\s+/g, ' ').trim().toUpperCase();
+  if (text.length > 160) return null;
+  let choices;
+  if (/^(?:VOCE|VC) E (?:UM |UMA |O |A )?(?:ROBO|BOT|IA|INTELIGENCIA ARTIFICIAL|HUMANO|PESSOA|ASSISTENTE VIRTUAL)$/.test(text) ||
+      /^(?:ESTOU|TO) FALANDO COM (?:UM |UMA |O |A )?(?:ROBO|BOT|IA|HUMANO|PESSOA)$/.test(text) ||
+      /^(?:QUEM (?:ESTA|TA) (?:FALANDO|ME ATENDENDO)|ESSE ATENDIMENTO E AUTOMATICO)$/.test(text)) {
+    choices = ['Sou o assistente virtual da Gate One. Posso ajudar com seu acesso, instalação e pagamentos. Se preferir conversar com a equipe, é só pedir ATENDENTE.'];
+  } else if (/^(?:(?:MUITO )?OBRIGAD[OA](?: MESMO)?|VALEU|AGRADECO)(?: PELA AJUDA| PELO ATENDIMENTO)?$/.test(text)) {
+    choices = ['Por nada! Se precisar de mais alguma coisa, estou por aqui.', 'Disponha! Pode me chamar quando precisar.'];
+  } else if (/^(?:TCHAU|ATE MAIS|ATE LOGO|FALOU)$/.test(text)) {
+    choices = ['Até mais! Se precisar, é só chamar por aqui.', 'Até logo! Estou por aqui quando precisar.'];
+  } else return null;
+  const recent = new Set((Array.isArray(recentMessages) ? recentMessages : []).slice(0, 5)
+    .map(message => normalizedText(message?.response_text || message?.content)));
+  return choices.find(choice => !recent.has(normalizedText(choice))) || choices[0];
 }
 
 export function responseFactsFromContext(customer360 = null) {
@@ -111,7 +138,7 @@ export function renderConversationResponse({ intent, facts = {}, outcome = null 
     return 'Entendi a solicitação, mas preciso que você confirme claramente a operação antes de continuar.';
   }
   if (outcome === 'HANDOFF_CREATED') {
-    return 'Certo. Registrei o atendimento para uma pessoa da equipe continuar com todo o contexto, sem você precisar repetir tudo. Vou aguardar em silêncio. Se a espera demorar, digite MENU para voltar às opções automáticas; seu pedido para a equipe continua registrado. Para aguardar novamente, digite ATENDENTE.';
+    return 'Certo. Registrei o atendimento para a equipe continuar com o histórico da conversa. Vou aguardar em silêncio. Se a espera demorar, digite MENU para voltar às opções automáticas; seu pedido para a equipe continua registrado. Para aguardar novamente, digite ATENDENTE.';
   }
   if (outcome === 'HANDOFF_PENDING') return '';
   if (outcome === 'HANDOFF_FAILED') {
@@ -138,7 +165,7 @@ export function renderConversationResponse({ intent, facts = {}, outcome = null 
     case 'SUBSCRIPTION_QUERY': {
       const expiration = formatDate(facts.expiration);
       const parts = [facts.plan_name ? `plano ${facts.plan_name}` : null,
-        facts.subscription_status ? `status ${facts.subscription_status}` : null,
+        facts.subscription_status ? `status ${subscriptionStatus(facts.subscription_status)}` : null,
         expiration ? `vencimento em ${expiration}` : null].filter(Boolean);
       return parts.length
         ? `${prefix}sua assinatura está com ${parts.join(', ')}.`
@@ -231,9 +258,11 @@ export function avoidRepeatedResponse(text, recentMessages = [], facts = {}) {
     .slice(-4)
     .map((message) => normalizedText(message.content));
   if (!recentOutbound.includes(normalized)) return { text, repeated: false };
-  if (facts.checkout_url) return {text:`${facts.simulated ? '[Simulação] ' : ''}A cobrança continua pendente. Você pode usar o mesmo link: ${facts.checkout_url}\n\n${paymentChoices(facts)}`,repeated:true};
+  if (facts.checkout_url && String(text).includes(facts.checkout_url)) return {text:`${facts.simulated ? '[Simulação] ' : ''}A cobrança continua pendente. Você pode usar o mesmo link: ${facts.checkout_url}\n\n${paymentChoices(facts)}`,repeated:true};
+  if (facts.payment_status || facts.renewal_status || facts.plan_name || facts.expiration || facts.subscription_status)
+    return {text:`Conferi novamente: ${text}`,repeated:true};
   return {
-    text: 'O estado continua o mesmo da última consulta. Se quiser, posso verificar outro ponto da sua conta.',
+    text: 'Pode me contar qual ponto você quer conferir agora. Vou seguir a partir do que já conversamos.',
     repeated: true
   };
 }

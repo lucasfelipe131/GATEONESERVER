@@ -39,7 +39,7 @@ export function parseBitPanelAuthArgs(args) {
 export function bitPanelListHeadersReady(headers) {
   if (!Array.isArray(headers) || headers.length > 100 || headers.some(value => typeof value !== 'string' || value.length > 200)) return false;
   const names = headers.map(value => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase());
-  return [/^(?:#\s*)?(?:id|codigo)$|^#$/, /^(?:proprietario|revendedor|owner)$/, /^(?:usuario|login)$/]
+  return [/^(?:#\s*)?(?:id|codigo)$|^#$/, /^(?:proprietario|revendedor|owner|reseller)$/, /^(?:usuario|login|username|user name)$/]
     .every(pattern => names.filter(name => pattern.test(name)).length === 1);
 }
 
@@ -57,7 +57,8 @@ export function bitPanelHumanAuthState({ url, baseUrl = 'https://bitpanel.vip', 
 
 async function genericPageState(page, baseUrl) {
   if (page.isClosed()) return 'IGNORED';
-  if (bitPanelHumanAuthState({ url: page.url(), baseUrl }) === 'IGNORED') return 'IGNORED';
+  const observedUrl = page.url();
+  if (bitPanelHumanAuthState({ url: observedUrl, baseUrl }) === 'IGNORED') return 'IGNORED';
   const visible = async selector => {
     const candidates = page.locator(selector), count = await candidates.count();
     if (count > 100) return true;
@@ -71,7 +72,7 @@ async function genericPageState(page, baseUrl) {
     visible("[data-sitekey], iframe[src*='challenges.cloudflare.com'], iframe[src*='recaptcha']")
   ]);
   let tableProtectedReady = false;
-  if (tableVisible && ['/list', '/list/'].includes(new URL(page.url()).pathname)) {
+  if (tableVisible && ['/list', '/list/'].includes(new URL(observedUrl).pathname)) {
     const headers = page.locator('table thead th'), count = await headers.count(), names = [];
     if (count <= 100) for (let index = 0; index < count; index++) {
       const header = headers.nth(index);
@@ -79,7 +80,8 @@ async function genericPageState(page, baseUrl) {
     }
     tableProtectedReady = count <= 100 && bitPanelListHeadersReady(names);
   }
-  return bitPanelHumanAuthState({ url: page.url(), baseUrl, tableProtectedReady, loginVisible, captchaVisible });
+  if (page.url() !== observedUrl) return 'WAITING';
+  return bitPanelHumanAuthState({ url: observedUrl, baseUrl, tableProtectedReady, loginVisible, captchaVisible });
 }
 
 /** The caller owns cleanup. Navigation is read-only; all authentication stays with the human. */

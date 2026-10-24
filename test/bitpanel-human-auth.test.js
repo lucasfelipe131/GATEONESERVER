@@ -54,7 +54,8 @@ test('page states require the protected list and verified headers, while login, 
   assert.equal(bitPanelHumanAuthState({ url: `${origin}/list/?private-query=${privateValue}`, tableProtectedReady: true }), 'READY');
   assert.equal(bitPanelHumanAuthState({ url: `${origin}/list`, tableVisible: true }), 'WAITING');
   assert.equal(bitPanelHumanAuthState({ url: origin }), 'OPEN_LIST');
-  for (const state of [{ url: `${origin}/login`, tableProtectedReady: true }, { url: origin, loginVisible: true },
+  for (const state of [{ url: `${origin}/login`, tableProtectedReady: true }, { url: `${origin}/auth/login`, tableProtectedReady: true },
+    { url: `${origin}/auth/recovery`, tableProtectedReady: true }, { url: origin, loginVisible: true },
     { url: origin, captchaVisible: true }, { url: `${origin}/list` }, { url: `${origin}/list/view/12345`, tableProtectedReady: true }])
     assert.equal(bitPanelHumanAuthState(state), 'WAITING');
   for (const url of ['about:blank', 'https://outside.invalid/list', `https://user:${privateValue}@bitpanel.vip/list`])
@@ -64,11 +65,49 @@ test('page states require the protected list and verified headers, while login, 
 });
 
 test('protected list headers require one visible ID, owner and username column and reject incomplete or duplicate labels', () => {
-  for (const headers of [['#', 'Usuário', 'Proprietário'], ['Código', 'Login', 'Revendedor'], [' # ID ', 'Validade', 'Login', 'Owner']])
+  for (const headers of [['#', 'Usuário', 'Proprietário'], ['Código', 'Login', 'Revendedor'], [' # ID ', 'Validade', 'Login', 'Owner'],
+    ['ID', 'Username', 'Owner'], ['ID', 'User name', 'Reseller'], [' # ID ', ' USER   NAME ', ' RESELLER ']])
     assert.equal(bitPanelListHeadersReady(headers), true);
   for (const headers of [[], ['ID', 'Usuário'], ['ID', 'Usuário', 'Proprietário', 'Login'], ['ID', 'Usuário', 'Owner', 'Proprietário'],
-    ['ID', 'ID', 'Usuário', 'Owner'], ['Other', 'Usuário', 'Owner'], ['ID', 'Usuário', 'Other'], null])
+    ['ID', 'ID', 'Usuário', 'Owner'], ['Other', 'Usuário', 'Owner'], ['ID', 'Usuário', 'Other'],
+    ['ID', 'Username'], ['Username', 'Owner'], ['ID', 'Username', 'User name', 'Owner'],
+    ['ID', 'Username', 'Owner', 'Reseller'], ['ID', 'User', 'Owner'], null])
     assert.equal(bitPanelListHeadersReady(headers), false);
+});
+
+test('new English protected list captures only after unique ID, owner and username headers', async () => {
+  for (const headers of [['ID', 'Username', 'Owner'], ['ID', 'User name', 'Reseller']]) {
+    const f = pageFixture({ url: `${origin}/list`, table: true, headers }), { context, calls } = contextFixture([f.page]), clock = clockFixture();let saves = 0;
+    const result = await captureHumanBitPanelSession({ ...clock, timeoutMs: 2_000, ensureProfile: async () => {}, launch: async () => context,
+      save: async () => { saves++;assert.ok(clock.now() >= 250); } });
+    assert.equal(result.code, 'BITPANEL_AUTH_SESSION_SAVED');assert.equal(saves, 1);assert.equal(calls.storage, 1);
+    assert.equal(calls.close, 1);assert.equal(f.calls.fieldActions, 0);assert.equal(f.calls.contents, 0);
+  }
+});
+
+test('new login route, password or CAPTCHA cannot capture an English table scaffold', async () => {
+  for (const options of [{ url: `${origin}/auth/login` }, { url: `${origin}/auth/recovery` },
+    { url: `${origin}/list`, login: true }, { url: `${origin}/list`, captcha: true }, { url: 'https://outside.invalid/list' }]) {
+    const f = pageFixture({ table: true, headers: ['ID', 'Username', 'Owner'], ...options }), { context, calls } = contextFixture([f.page]), clock = clockFixture();let saves = 0;
+    await assert.rejects(captureHumanBitPanelSession({ ...clock, timeoutMs: 1_000, ensureProfile: async () => {}, launch: async () => context,
+      save: async () => { saves++; } }), { code: 'BITPANEL_AUTH_TIMEOUT' });
+    assert.equal(saves, 0);assert.equal(calls.storage, 0);assert.equal(calls.close, 1);assert.equal(f.calls.fieldActions, 0);assert.equal(f.calls.contents, 0);
+  }
+});
+
+test('a source change during public header reads cannot release session capture', async () => {
+  const f = pageFixture({ url: `${origin}/list`, table: true, headers: ['ID', 'Username', 'Owner'] });
+  const originalLocator = f.page.locator;
+  f.page.locator = selector => {
+    const locator = originalLocator(selector);if (selector !== 'table thead th') return locator;
+    return { ...locator, nth: index => { const header = locator.nth(index);return { ...header, innerText: async () => {
+      const text = await header.innerText();f.state.url = `${origin}/auth/login`;return text;
+    } }; } };
+  };
+  const { context, calls } = contextFixture([f.page]), clock = clockFixture();let saves = 0;
+  await assert.rejects(captureHumanBitPanelSession({ ...clock, timeoutMs: 1_000, ensureProfile: async () => {}, launch: async () => context,
+    save: async () => { saves++; } }), { code: 'BITPANEL_AUTH_TIMEOUT' });
+  assert.equal(saves, 0);assert.equal(calls.storage, 0);assert.equal(f.calls.fieldActions, 0);assert.equal(f.calls.contents, 0);
 });
 
 test('a visible empty scaffold or hidden/missing/duplicate generic headers cannot capture or overwrite a session', async () => {
